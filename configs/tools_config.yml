@@ -1,0 +1,35 @@
+primary_agent:
+  llm: gpt-4.1
+  llm_temperature: 0.0
+
+clinical_notes_rag:
+  llm: gpt-4.1
+  summarization_llm: gpt-4.1-nano   # Fastest model for full-record summarization (5-10x faster than gpt-4.1)
+  llm_temperature: 0.7
+  embedding_model: NeuML/pubmedbert-base-embeddings
+  embedding_dimensions: 768
+  vectordb: data/clinical_notes_vectordb
+  unstructured_docs: data/unstructured_docs/clinical_notes
+  k: 6
+  fetch_k: 20
+  chunk_size: 1000
+  chunk_overlap: 200
+  collection_name: PatientData
+  reranker_model: cross-encoder/ms-marco-MiniLM-L-6-v2
+  reranker_top_k: 6
+  qdrant_url: ""  # empty = embedded mode (no Docker needed). Set to "http://localhost:6333" for Docker.
+  qdrant_api_key: ""
+
+hospital_sqlagent_configs:
+  llm: gpt-4.1-mini
+  llm_temperature: 0.0
+
+langsmith:
+  tracing: "false"  # Disabled — langsmith 0.7.3 has RunTree/Pydantic bug. Enable when upgraded.
+  project_name: "rag_sqlagent_project"
+
+tavily_search_api:
+  tavily_search_max_results: 2
+
+graph_configs:
+  thread_id: 1 # This can be adjusted to assign a unique value for each user session, so it's easier to access data later on.
