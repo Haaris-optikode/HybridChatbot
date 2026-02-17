@@ -6,6 +6,14 @@ This project demonstrates how to build an agentic system using Large Language Mo
 
 ---
 
+## Architecture Diagram
+
+The following diagram illustrates the end-to-end workflow of the AgentGraph system, including user interaction, routing through the agent graph, SQL tooling, and the RAG pipeline.
+
+![AgentGraph Workflow](workflow_diagram.png)
+
+---
+
 ## Requirements
 
 - **Operating System:** Linux or Windows (Tested on Windows 11 with Python 3.9.11 or above)
