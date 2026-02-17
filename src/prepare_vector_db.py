@@ -341,14 +341,16 @@ class ClinicalNotesVectorizer:
         print("  HNSW(m=16, ef=128) + INT8 quantization + Cosine")
 
         # Create payload indexes BEFORE inserting data
+        # Note: LangChain's QdrantVectorStore nests metadata under "metadata."
+        # so indexes must use the full nested path (e.g., "metadata.patient_mrn")
         print("  Creating payload indexes...")
-        for field in ("patient_mrn", "section_title", "source"):
+        for field in ("metadata.patient_mrn", "metadata.section_title", "metadata.source"):
             client.create_payload_index(
                 collection_name=collection_name,
                 field_name=field,
                 field_schema=PayloadSchemaType.KEYWORD,
             )
-        print("  Payload indexes: patient_mrn, section_title, source")
+        print("  Payload indexes: metadata.patient_mrn, metadata.section_title, metadata.source")
 
     def index_documents(
         self,

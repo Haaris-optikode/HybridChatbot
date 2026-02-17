@@ -354,18 +354,24 @@ async def health():
 
 @app.post("/api/cache/clear")
 async def clear_summary_cache():
-    """Delete all cached patient summaries so they regenerate fresh."""
+    """Delete all cached patient summaries (both disk and in-memory) so they regenerate fresh."""
+    # Clear in-memory cache
+    from agent_graph.tool_clinical_notes_rag import _memory_cache, _memory_cache_lock
+    with _memory_cache_lock:
+        memory_cleared = len(_memory_cache)
+        _memory_cache.clear()
+
+    # Clear disk cache
     cache_dir = Path(here("data")) / "summary_cache"
-    if not cache_dir.exists():
-        return {"status": "ok", "deleted": 0}
-    deleted = 0
-    for f in cache_dir.glob("*.json"):
-        try:
-            f.unlink()
-            deleted += 1
-        except Exception:
-            pass
-    return {"status": "ok", "deleted": deleted}
+    disk_deleted = 0
+    if cache_dir.exists():
+        for f in cache_dir.glob("*.json"):
+            try:
+                f.unlink()
+                disk_deleted += 1
+            except Exception:
+                pass
+    return {"status": "ok", "disk_deleted": disk_deleted, "memory_cleared": memory_cleared}
 
 
 # ── Delete Chat History API ───────────────────────────────────────────

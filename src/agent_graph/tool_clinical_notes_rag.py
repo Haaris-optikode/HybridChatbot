@@ -27,6 +27,12 @@ import threading
 load_dotenv()
 TOOLS_CFG = LoadToolsConfig()
 
+# ── Global in-memory summary cache (cross-session, process-lifetime) ─────────
+# Keyed by patient MRN → {"summary": str, "cached_at": datetime}
+_memory_cache: dict[str, dict] = {}
+_memory_cache_lock = threading.Lock()
+_CACHE_TTL_HOURS = 24
+
 
 def _make_embeddings(model_name: str) -> HuggingFaceEmbeddings:
     """Create local HuggingFace embeddings (CPU, HIPAA-safe)."""
@@ -393,6 +399,31 @@ def get_rag_tool_instance():
 
 # ── Summarization helpers ────────────────────────────────────────────────────
 
+def _cleanup_expired_cache():
+    """Delete disk cache files older than TTL. Runs once per startup."""
+    cache_dir = _Path(here("data")) / "summary_cache"
+    if not cache_dir.exists():
+        return
+    now = _dt.now()
+    for f in cache_dir.glob("*.json"):
+        try:
+            cached = json.loads(f.read_text(encoding="utf-8"))
+            generated_at = cached.get("generated_at", "")
+            cache_time = _dt.strptime(generated_at, "%Y-%m-%d %H:%M:%S")
+            age_hours = (now - cache_time).total_seconds() / 3600
+            if age_hours > _CACHE_TTL_HOURS:
+                f.unlink()
+                print(f"  [Cache Cleanup] Deleted expired: {f.name} ({age_hours:.1f}h old)")
+        except Exception:
+            pass  # skip corrupt files
+
+# Run cleanup once on module load
+try:
+    _cleanup_expired_cache()
+except Exception:
+    pass
+
+
 def _get_summarization_llm():
     """Create the fast summarization LLM instance with output cap."""
     model = getattr(TOOLS_CFG, "clinical_notes_rag_summarization_llm",
@@ -447,43 +478,54 @@ def summarize_patient_record(patient_identifier: str) -> str:
                     f"Use list_available_patients to see who is in the database.")
         print(f"  Resolved '{patient_identifier}' → {patient_mrn}")
 
-        # ── Check disk cache ──────────────────────────────────────
+        # ── Layer 1: In-memory cache (instant, cross-session) ─────
+        with _memory_cache_lock:
+            if patient_mrn in _memory_cache:
+                entry = _memory_cache[patient_mrn]
+                age_hours = (_dt.now() - entry["cached_at"]).total_seconds() / 3600
+                if age_hours <= _CACHE_TTL_HOURS:
+                    elapsed = _time.perf_counter() - t_start
+                    print(f"  ⚡ MEMORY CACHE HIT for {patient_mrn} ({elapsed:.3f}s, {age_hours:.1f}h old)")
+                    return entry["summary"]
+                else:
+                    print(f"  Memory cache EXPIRED for {patient_mrn} ({age_hours:.1f}h old)")
+                    del _memory_cache[patient_mrn]
+
+        # ── Layer 2: Disk cache (survives restarts, cross-session) ─
         cache_dir = _Path(here("data")) / "summary_cache"
         cache_dir.mkdir(parents=True, exist_ok=True)
         cache_key = hashlib.sha256(patient_mrn.encode()).hexdigest()[:16]
         cache_file = cache_dir / f"{cache_key}.json"
 
         if cache_file.exists():
-            cached = json.loads(cache_file.read_text(encoding="utf-8"))
-            # ── 24-hour TTL check ─────────────────────────────────
-            generated_at = cached.get("generated_at", "")
-            cache_expired = False
             try:
+                cached = json.loads(cache_file.read_text(encoding="utf-8"))
+                generated_at = cached.get("generated_at", "")
                 cache_time = _dt.strptime(generated_at, "%Y-%m-%d %H:%M:%S")
                 age_hours = (_dt.now() - cache_time).total_seconds() / 3600
-                if age_hours > 24:
-                    print(f"  Summary cache EXPIRED ({age_hours:.1f}h old)")
-                    cache_expired = True
-            except (ValueError, TypeError):
-                print(f"  Summary cache: invalid timestamp, treating as expired")
-                cache_expired = True
 
-            if not cache_expired:
-                from qdrant_client.models import Filter, FieldCondition, MatchValue
-                current_count = rag.client.count(
-                    collection_name=rag.collection_name,
-                    count_filter=Filter(must=[
-                        FieldCondition(key="metadata.patient_mrn",
-                                       match=MatchValue(value=patient_mrn))
-                    ]),
-                ).count
-                if cached.get("chunk_count") == current_count:
+                if age_hours <= _CACHE_TTL_HOURS:
+                    # Valid cache — promote to memory cache and return
+                    summary = cached["summary"]
+                    with _memory_cache_lock:
+                        _memory_cache[patient_mrn] = {
+                            "summary": summary,
+                            "cached_at": cache_time,
+                        }
                     elapsed = _time.perf_counter() - t_start
-                    print(f"  Summary cache HIT for {patient_mrn} ({elapsed:.2f}s)")
-                    return cached["summary"]
-                print(f"  Summary cache STALE ({cached.get('chunk_count')} → {current_count})")
+                    print(f"  💾 DISK CACHE HIT for {patient_mrn} ({elapsed:.3f}s, {age_hours:.1f}h old)")
+                    return summary
+                else:
+                    print(f"  Disk cache EXPIRED for {patient_mrn} ({age_hours:.1f}h old), deleting")
+                    cache_file.unlink(missing_ok=True)
+            except (ValueError, TypeError, json.JSONDecodeError) as e:
+                print(f"  Disk cache unreadable for {patient_mrn}: {e}, regenerating")
+                cache_file.unlink(missing_ok=True)
 
-        # ── Retrieve and merge ALL chunks ─────────────────────────
+        # ── Cache MISS — generate fresh summary ───────────────────
+        print(f"  Cache MISS for {patient_mrn} — generating summary...")
+
+        # Retrieve and merge ALL chunks
         full_record = rag.get_all_chunks_for_patient(patient_mrn)
         if full_record.startswith("No records found") or full_record.startswith("Error"):
             return full_record
@@ -491,7 +533,7 @@ def summarize_patient_record(patient_identifier: str) -> str:
         record_chars = len(full_record)
         print(f"  Record: {record_chars:,} chars (~{record_chars // 4:,} tokens)")
 
-        # ── Single-pass summarization with output cap ─────────────
+        # Single-pass summarization with output cap
         model_name, llm = _get_summarization_llm()
         prompt = _SUMMARY_PROMPT.format(mrn=patient_mrn, record=full_record)
         t_llm_start = _time.perf_counter()
@@ -503,26 +545,27 @@ def summarize_patient_record(patient_identifier: str) -> str:
         t_total = _time.perf_counter() - t_start
         print(f"  Total summarization: {t_total:.1f}s")
 
-        # ── Cache the result ──────────────────────────────────────
+        # ── Write to both cache layers ────────────────────────────
+        now = _dt.now()
+
+        # Memory cache
+        with _memory_cache_lock:
+            _memory_cache[patient_mrn] = {
+                "summary": summary,
+                "cached_at": now,
+            }
+
+        # Disk cache (TTL-only, no fragile chunk_count validation)
         try:
-            from qdrant_client.models import Filter, FieldCondition, MatchValue
-            chunk_count = rag.client.count(
-                collection_name=rag.collection_name,
-                count_filter=Filter(must=[
-                    FieldCondition(key="metadata.patient_mrn",
-                                   match=MatchValue(value=patient_mrn))
-                ]),
-            ).count
             cache_file.write_text(json.dumps({
                 "mrn": patient_mrn,
-                "chunk_count": chunk_count,
                 "summary": summary,
                 "model": model_name,
-                "generated_at": _time.strftime("%Y-%m-%d %H:%M:%S"),
+                "generated_at": now.strftime("%Y-%m-%d %H:%M:%S"),
             }, ensure_ascii=False), encoding="utf-8")
-            print(f"  Cached → {cache_file.name}")
+            print(f"  Cached → {cache_file.name} (memory + disk)")
         except Exception as ce:
-            print(f"  Cache write failed (non-critical): {ce}")
+            print(f"  Disk cache write failed (non-critical): {ce}")
 
         return summary
 
