@@ -12,11 +12,17 @@ Architecture decisions:
      - Runs on CPU (~50 sent/s on i5), no GPU required
      - Data never leaves your server — full HIPAA compliance
 
-  2. CHUNKING: Section-aware recursive splitting (1000 chars, 200 overlap)
-     - Clinical notes are heavily structured (Demographics, Meds, Labs, SOAP…)
-     - Detects numbered section headers and chunks WITHIN sections only
-     - 1000 chars ≈ 250 tokens — holds a full clinical concept intact
-     - Each chunk is prepended with "[Section: <title>]" for contextual grounding
+  2. CHUNKING: Structure-aware hybrid chunking (content-zone adaptive)
+     - Two-pass heading detection: regex candidate matching + multi-heuristic
+       validation (rejects CPT/LOINC/SNOMED/RxNorm codes, table data rows,
+       ICD-10 lines, medication dosages, and long data lines)
+     - Content-zone strategies:
+         • SOAP daily notes → split on "Day N —" boundaries (one chunk per day)
+         • Short sections (≤ 1.5× chunk_size) → kept whole (tables stay intact)
+         • Long sections → RecursiveCharacterTextSplitter (1000 chars, 200 overlap)
+     - Tiny fragments (< 100 chars) are merged with neighbors
+     - Each chunk prepended with "[Patient: X | MRN: Y | Section: Z]" for
+       contextual grounding in both embeddings and LLM retrieval
 
   3. INDEXING: Qdrant embedded mode (in-process, on-disk, no Docker needed)
      - Cosine distance for normalized sentence-transformer embeddings
@@ -63,45 +69,182 @@ from qdrant_client.models import (
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Text utilities (pure functions, no external dependencies)
+# Section Detection — Structure-Aware Clinical Heading Parser
 # ──────────────────────────────────────────────────────────────────────────────
 
-# Matches numbered headings: "1 PATIENT DEMOGRAPHICS", "6.1.2 Subjective", etc.
-SECTION_RE = re.compile(r"^(\d+(?:\.\d+)*)\s+(.+)$", re.MULTILINE)
+# Matches clinical document section headings in two common formats:
+#   "N TITLE"   → "1 Patient Demographics", "6.1.2 Subjective"
+#   "N. TITLE"  → "1. PATIENT DEMOGRAPHICS", "18a. Laboratory Orders"
+#
+# The first numeric component is limited to 1–2 digits (\d{1,2}) which
+# automatically excludes CPT codes (85025), LOINC (6690-2), SNOMED (91936005),
+# and RxNorm (314076) codes that appear at the start of table data rows.
+# An optional single lowercase letter [a-d] handles sub-section labels (18a, 18b).
+HEADING_RE = re.compile(
+    r"^(\d{1,2}(?:[a-d])?(?:\.\d{1,2})*)\.?\s+(.+)$",
+    re.MULTILINE,
+)
+
+# SOAP daily progress note boundary: "Day 1 — ...", "Day 30 — ..."
+SOAP_DAY_RE = re.compile(r"^(Day\s+\d+\s*[—\-–].*)$", re.MULTILINE)
+
+# Clinical measurement / medication units — indicate table data, not headings
+_DATA_UNIT_RE = re.compile(
+    r"\b(?:mg|mL|mmHg|tablet|capsule|injection|oral|daily|once|twice|"
+    r"BID|TID|QID|mcg|mEq|units?|puffs?|inject|inhale[ds]?|"
+    r"kg/m|solution|spray|subcutaneous|intravenous|intramuscular)\b",
+    re.IGNORECASE,
+)
+
+# ICD-10 code at the very start of title text (e.g., I50.23, E11.9, N17.9)
+_ICD10_START_RE = re.compile(r"^[A-Z]\d+\.\d+")
+
+
+def _is_valid_section_heading(title_text: str) -> bool:
+    """Multi-heuristic validation to distinguish real section headings from
+    table data rows, prescription items, procedure descriptions, etc.
+
+    Rejects:
+      - Lines that don't start with an uppercase letter
+      - Overly long lines (>80 chars — clinical headings are concise)
+      - Lines without at least 2 alphabetic words
+      - Lines that are predominantly numeric (codes, measurements)
+      - Lines starting with an ICD-10 code (e.g., "I50.23 Acute on chronic…")
+      - Lines containing clinical measurement/medication units
+        (mg, mL, mmHg, tablet, BID, etc.)
+    """
+    title = title_text.strip()
+    if not title:
+        return False
+
+    # Must start with an uppercase letter (rejects dates "01/15…", numbers "158 94…")
+    if not title[0].isupper():
+        return False
+
+    # Clinical section headings are concise — rarely exceed 80 characters
+    if len(title) > 80:
+        return False
+
+    # Must contain at least 2 alphabetic words (2+ letters each)
+    alpha_words = re.findall(r"[A-Za-z]{2,}", title)
+    if len(alpha_words) < 2:
+        return False
+
+    # Title should be predominantly text (≥60% alpha + space)
+    alpha_space = sum(1 for c in title if c.isalpha() or c.isspace())
+    if alpha_space / max(len(title), 1) < 0.6:
+        return False
+
+    # Reject if starts with ICD-10 code (e.g., "I50.23 Acute on chronic…")
+    if _ICD10_START_RE.match(title):
+        return False
+
+    # Reject if contains clinical measurement / medication units
+    if _DATA_UNIT_RE.search(title):
+        return False
+
+    return True
 
 
 def detect_sections(text: str) -> List[Dict[str, str]]:
-    """Split document text into sections based on numbered headings.
+    """Split clinical document text into sections using validated numbered headings.
+
+    Two-pass algorithm:
+      1. Find ALL regex candidate matches (generous pattern)
+      2. Validate each candidate with _is_valid_section_heading()
+
+    Handles both formats:
+      "N TITLE"  (outpatient notes)  and  "N. TITLE" (inpatient records)
+
+    Captures preamble text (hospital header / patient summary) that appears
+    before the first numbered section.
 
     Returns:
-        List of dicts with 'title' and 'body' keys.
+        List of dicts with 'title' (str) and 'body' (str) keys.
+        Body includes the heading line itself for full context.
     """
-    matches = list(SECTION_RE.finditer(text))
-    if not matches:
+    # Pass 1: regex candidates  →  Pass 2: heuristic validation
+    validated = [m for m in HEADING_RE.finditer(text)
+                 if _is_valid_section_heading(m.group(2).strip())]
+
+    if not validated:
         return [{"title": "Full Document", "body": text}]
 
-    sections = []
-    for i, m in enumerate(matches):
+    sections: List[Dict[str, str]] = []
+
+    # Capture preamble (hospital header, patient summary before first section)
+    preamble_end = validated[0].start()
+    if preamble_end > 30:
+        preamble = text[:preamble_end].strip()
+        if preamble:
+            sections.append({"title": "Document Header", "body": preamble})
+
+    # Build sections from validated heading matches
+    for i, m in enumerate(validated):
         start = m.start()
-        end = matches[i + 1].start() if i + 1 < len(matches) else len(text)
-        title = f"{m.group(1)} {m.group(2).strip()}"
+        end = validated[i + 1].start() if i + 1 < len(validated) else len(text)
+        num = m.group(1)
+        title = m.group(2).strip()
         body = text[start:end].strip()
-        sections.append({"title": title, "body": body})
+        sections.append({"title": f"{num} {title}", "body": body})
+
     return sections
+
+
+def _split_soap_daily_notes(body: str) -> Optional[List[Dict[str, str]]]:
+    """Split a SOAP daily progress notes section into individual day entries.
+
+    Detects "Day N —" boundaries and creates one entry per hospital day.
+    Returns None if fewer than 2 day markers are found (not a daily notes section).
+    """
+    day_matches = list(SOAP_DAY_RE.finditer(body))
+    if len(day_matches) < 2:
+        return None
+
+    entries: List[Dict[str, str]] = []
+
+    # Capture intro text before Day 1 (section heading + description)
+    if day_matches[0].start() > 30:
+        intro = body[: day_matches[0].start()].strip()
+        if intro:
+            entries.append({"sublabel": "Introduction", "content": intro})
+
+    # Each day: from "Day N —" to the next "Day N+1 —"
+    for i, m in enumerate(day_matches):
+        start = m.start()
+        end = day_matches[i + 1].start() if i + 1 < len(day_matches) else len(body)
+        day_text = body[start:end].strip()
+        day_label = m.group(1).strip()
+        entries.append({"sublabel": day_label, "content": day_text})
+
+    return entries
 
 
 def extract_mrn(text: str) -> str:
     """Extract MRN (Medical Record Number) from document text."""
-    pattern = r'\b(?:mrn|medical\s+record\s+number)\s*(?:is\s*|:\s*)?([A-Z0-9\-]+)'
+    pattern = r"\b(?:mrn|medical\s+record\s+number)\s*(?:is\s*|:\s*)?([A-Z0-9\-]+)"
     match = re.search(pattern, text, re.IGNORECASE)
     return match.group(1).strip() if match else ""
 
 
 def extract_patient_name(text: str) -> str:
-    """Extract patient name from document text."""
-    pattern = r'(?:patient\s+name|name)\s*:\s*(.+?)(?:\n|$)'
-    match = re.search(pattern, text, re.IGNORECASE)
-    return match.group(1).strip() if match else ""
+    """Extract patient name from document text.
+
+    Handles common clinical document formats:
+      - "Patient Name: Name"  /  "Full Name: Name"
+      - "Patient: Name"  (inpatient header)
+    """
+    patterns = [
+        r"(?:patient\s+name|full\s+name)\s*:\s*(.+?)(?:\n|$)",
+        r"(?:^|\n)\s*patient\s*:\s*([A-Za-z][A-Za-z .\-,]+?)(?:\n|$)",
+    ]
+    for pat in patterns:
+        match = re.search(pat, text, re.IGNORECASE)
+        if match:
+            name = match.group(1).strip()
+            if name and len(name) > 2 and name[0].isalpha():
+                return name
+    return ""
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -173,6 +316,13 @@ class ClinicalNotesVectorizer:
     def process_pdf(self, pdf_path: str) -> List[Document]:
         """Process a single PDF into chunked Documents with rich metadata.
 
+        Content-aware chunking strategy (applied per section):
+          1. SOAP daily progress notes → split on "Day N —" boundaries
+          2. Short sections (≤ 1.5× chunk_size) → kept whole (tables intact)
+          3. Long narrative sections → RecursiveCharacterTextSplitter
+          4. Tiny fragments (< 100 chars) merged with neighbors
+          5. Every chunk prepended with "[Patient | MRN | Section]" context
+
         Args:
             pdf_path: Full path to the PDF file.
 
@@ -206,23 +356,77 @@ class ClinicalNotesVectorizer:
         print(f"  MRN     : {patient_mrn or 'not found'}")
         print(f"  Patient : {patient_name or 'not found'}")
 
-        # Detect sections
+        # Detect sections using validated heading parser
         sections = detect_sections(full_text)
         print(f"  Sections: {len(sections)}")
 
-        # Chunk each section independently — never split across sections
+        # Build context prefix parts (only include non-empty fields)
+        ctx_parts = []
+        if patient_name:
+            ctx_parts.append(f"Patient: {patient_name}")
+        if patient_mrn:
+            ctx_parts.append(f"MRN: {patient_mrn}")
+
+        # Threshold: sections at or below this size are kept whole
+        # (preserves tables, allergy lists, medication lists, etc.)
+        whole_section_limit = int(self.chunk_size * 1.5)
+
+        # ── Content-aware chunking per section ──
         documents = []
         chunk_idx = 0
+
+        # Keywords that identify SOAP daily progress note sections
+        _SOAP_KEYWORDS = ("DAILY PROGRESS", "SOAP NOTES", "PROGRESS NOTES")
+
         for section in sections:
-            title = section["title"]
-            body = section["body"]
-            chunks = self.text_splitter.split_text(body)
+            section_title = section["title"]
+            section_body = section["body"]
 
-            for chunk_text in chunks:
-                # Prepend section context so the embedding captures section meaning
-                contextualized = f"[Section: {title}]\n{chunk_text}"
+            # Full context prefix for this section
+            section_ctx = "[" + " | ".join(ctx_parts + [f"Section: {section_title}"]) + "]"
 
-                # Approximate page number from char offset
+            # Collect (chunk_text, optional_sublabel) pairs
+            chunks_with_labels: List[tuple] = []
+
+            # ── Strategy 1: SOAP daily notes — split by Day boundaries
+            is_soap = any(kw in section_title.upper() for kw in _SOAP_KEYWORDS)
+            if is_soap:
+                day_entries = _split_soap_daily_notes(section_body)
+                if day_entries:
+                    for entry in day_entries:
+                        txt = entry["content"]
+                        sub = entry["sublabel"]
+                        if len(txt) <= self.chunk_size * 2:
+                            chunks_with_labels.append((txt, sub))
+                        else:
+                            # Rare: a single day's note exceeds 2× chunk_size
+                            parts = self.text_splitter.split_text(txt)
+                            parts = self._merge_small_chunks(parts)
+                            for j, p in enumerate(parts):
+                                lbl = f"{sub} (part {j+1})" if len(parts) > 1 else sub
+                                chunks_with_labels.append((p, lbl))
+
+            # ── Strategy 2 (fallback): keep short sections whole
+            if not chunks_with_labels:
+                if len(section_body) <= whole_section_limit:
+                    chunks_with_labels.append((section_body, None))
+                else:
+                    # ── Strategy 3: recursive text splitting for long content
+                    raw_chunks = self.text_splitter.split_text(section_body)
+                    raw_chunks = self._merge_small_chunks(raw_chunks)
+                    for rc in raw_chunks:
+                        chunks_with_labels.append((rc, None))
+
+            # ── Create Document objects with rich metadata
+            for chunk_text, sub_label in chunks_with_labels:
+                # Build contextualized page_content
+                if sub_label:
+                    prefix = f"{section_ctx}\n[{sub_label}]"
+                else:
+                    prefix = section_ctx
+                contextualized = f"{prefix}\n{chunk_text}"
+
+                # Approximate page number from char offset in full_text
                 body_pos = full_text.find(chunk_text[:80])
                 page_num = get_page_number(body_pos) if body_pos >= 0 else 1
 
@@ -233,7 +437,7 @@ class ClinicalNotesVectorizer:
                         "filename": pdf_file,
                         "patient_mrn": patient_mrn,
                         "patient_name": patient_name,
-                        "section_title": title,
+                        "section_title": section_title,
                         "page_number": page_num,
                         "chunk_index": chunk_idx,
                     },
@@ -243,6 +447,38 @@ class ClinicalNotesVectorizer:
 
         print(f"  Chunks  : {chunk_idx}")
         return documents
+
+    # ── Small-chunk merging ───────────────────────────────────────────────
+
+    @staticmethod
+    def _merge_small_chunks(chunks: List[str], min_size: int = 100) -> List[str]:
+        """Merge chunks smaller than *min_size* characters with their neighbors.
+
+        Prevents tiny, context-free fragments from becoming standalone chunks
+        (e.g., a trailing table row or a partial sentence from splitting).
+        """
+        if not chunks or len(chunks) <= 1:
+            return chunks
+
+        merged: List[str] = []
+        buf = ""
+        for chunk in chunks:
+            if not buf:
+                buf = chunk
+            elif len(buf) < min_size:
+                buf = buf + "\n\n" + chunk
+            else:
+                merged.append(buf)
+                buf = chunk
+
+        # Flush remaining buffer
+        if buf:
+            if merged and len(buf) < min_size:
+                merged[-1] = merged[-1] + "\n\n" + buf
+            else:
+                merged.append(buf)
+
+        return merged
 
     def process_folder(self, folder_path: str) -> List[Document]:
         """Process all PDFs in a folder.
