@@ -139,6 +139,12 @@ logs.txt
 
 # ---------- Project-specific: old / test / unused files ----------
 
+# Testing/debugging utilities and their output (created during chunking analysis)
+inspect_pdfs.py
+pdf_raw_text_dump.txt
+view_chunks.py
+chunk_viewer_output.txt
+
 # Test file
 test.py
 
