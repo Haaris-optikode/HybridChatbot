@@ -1,9 +1,11 @@
 import json
-from IPython.display import Image, display
+import logging
 from typing import Annotated, Literal
 from typing_extensions import TypedDict
 from langchain_core.messages import ToolMessage
 from langgraph.graph.message import add_messages
+
+logger = logging.getLogger(__name__)
 
 
 class State(TypedDict):
@@ -102,7 +104,7 @@ def plot_agent_schema(graph):
 
     Tries to display a visual representation of the agent's graph schema
     using Mermaid format and IPython's display capabilities. If the required
-    dependencies are missing, it catches the exception and prints a message
+    dependencies are missing, it catches the exception and logs a message
     instead.
 
     Args:
@@ -113,7 +115,8 @@ def plot_agent_schema(graph):
         None
     """
     try:
+        from IPython.display import Image, display
         display(Image(graph.get_graph().draw_mermaid_png()))
     except Exception:
         # This requires some extra dependencies and is optional
-        return print("Graph could not be displayed.")
+        logger.debug("Graph could not be displayed (IPython/Mermaid not available).")

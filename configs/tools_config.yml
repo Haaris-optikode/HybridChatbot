@@ -1,31 +1,28 @@
 primary_agent:
-  llm: gpt-4.1
+  llm: gpt-4.1-mini            # Fast non-reasoning model for all LLM calls
+  router_llm: gpt-4.1-mini     # Same fast model for tool routing
   llm_temperature: 0.0
 
 clinical_notes_rag:
-  llm: gpt-4.1
-  summarization_llm: gpt-4.1-nano   # Fastest model for full-record summarization (5-10x faster than gpt-4.1)
-  llm_temperature: 0.7
+  llm: gpt-4.1-mini
+  summarization_llm: gpt-4.1-mini
+  llm_temperature: 0.0
   embedding_model: NeuML/pubmedbert-base-embeddings
   embedding_dimensions: 768
   vectordb: data/clinical_notes_vectordb
   unstructured_docs: data/unstructured_docs/clinical_notes
-  k: 6
-  fetch_k: 20
+  k: 8
+  fetch_k: 15
   chunk_size: 1000
   chunk_overlap: 200
   collection_name: PatientData
   reranker_model: cross-encoder/ms-marco-MiniLM-L-6-v2
-  reranker_top_k: 6
+  reranker_top_k: 8
   qdrant_url: ""  # empty = embedded mode (no Docker needed). Set to "http://localhost:6333" for Docker.
   qdrant_api_key: ""
 
-hospital_sqlagent_configs:
-  llm: gpt-4.1-mini
-  llm_temperature: 0.0
-
 langsmith:
-  tracing: "false"  # Disabled — langsmith 0.7.3 has RunTree/Pydantic bug. Enable when upgraded.
+  tracing: "false"  # Set to "true" to enable LangSmith agent tracing. Requires LANGCHAIN_API_KEY in .env.
   project_name: "rag_sqlagent_project"
 
 tavily_search_api:

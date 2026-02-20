@@ -1,0 +1,34 @@
+[
+  {
+    "question": "What medications is the patient currently taking?",
+    "ground_truth": "The patient's current medications should be listed from the clinical notes including drug names, dosages, and frequencies."
+  },
+  {
+    "question": "What are the patient's vital signs on admission?",
+    "ground_truth": "Vital signs on admission including blood pressure, heart rate, temperature, respiratory rate, and oxygen saturation should be documented."
+  },
+  {
+    "question": "Does the patient have any known drug allergies?",
+    "ground_truth": "The patient's allergy information should be retrieved from the clinical notes."
+  },
+  {
+    "question": "What is the patient's primary diagnosis?",
+    "ground_truth": "The primary diagnosis or chief complaint should be documented in the clinical notes."
+  },
+  {
+    "question": "What laboratory results were recorded during the hospital stay?",
+    "ground_truth": "Laboratory results including CBC, BMP, or other panels with values and dates should be present."
+  },
+  {
+    "question": "What procedures were performed during the hospitalization?",
+    "ground_truth": "Any surgical or medical procedures performed should be documented."
+  },
+  {
+    "question": "What is the patient's past medical history?",
+    "ground_truth": "Past medical history including chronic conditions, prior surgeries, and relevant medical events."
+  },
+  {
+    "question": "What were the discharge instructions?",
+    "ground_truth": "Discharge instructions including follow-up appointments, medication changes, and activity restrictions."
+  }
+]

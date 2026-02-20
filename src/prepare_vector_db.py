@@ -53,6 +53,7 @@ Usage:
 import os
 import re
 import sys
+import logging
 from typing import List, Dict, Optional
 
 from langchain_core.documents import Document
@@ -66,6 +67,8 @@ from qdrant_client.models import (
     ScalarQuantizationConfig, ScalarType, ScalarQuantization,
     OptimizersConfigDiff, HnswConfigDiff,
 )
+
+logger = logging.getLogger(__name__)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -295,13 +298,13 @@ class ClinicalNotesVectorizer:
         self.batch_size = batch_size
 
         # Initialize embedding model (local CPU — no data leaves the server)
-        print(f"\n[Embeddings] Loading {embedding_model} (local CPU)...")
+        logger.info(f"\n[Embeddings] Loading {embedding_model} (local CPU)...")
         self.embeddings = HuggingFaceEmbeddings(
             model_name=embedding_model,
             model_kwargs={"device": "cpu"},
             encode_kwargs={"normalize_embeddings": True, "batch_size": 32},
         )
-        print(f"  Model loaded: {embedding_model} ({embedding_dimensions}-dim)")
+        logger.info(f"  Model loaded: {embedding_model} ({embedding_dimensions}-dim)")
 
         # Initialize text splitter
         self.text_splitter = RecursiveCharacterTextSplitter(
@@ -330,7 +333,7 @@ class ClinicalNotesVectorizer:
             List of LangChain Document objects ready for indexing.
         """
         pdf_file = os.path.basename(pdf_path)
-        print(f"\n[Processing] {pdf_file}")
+        logger.info(f"\n[Processing] {pdf_file}")
 
         # Load pages and build full text
         loader = PyPDFLoader(pdf_path)
@@ -353,12 +356,12 @@ class ClinicalNotesVectorizer:
         # Extract document-level metadata
         patient_mrn = extract_mrn(full_text)
         patient_name = extract_patient_name(full_text)
-        print(f"  MRN     : {patient_mrn or 'not found'}")
-        print(f"  Patient : {patient_name or 'not found'}")
+        logger.info(f"  MRN     : {patient_mrn or 'not found'}")
+        logger.info(f"  Patient : {patient_name or 'not found'}")
 
         # Detect sections using validated heading parser
         sections = detect_sections(full_text)
-        print(f"  Sections: {len(sections)}")
+        logger.info(f"  Sections: {len(sections)}")
 
         # Build context prefix parts (only include non-empty fields)
         ctx_parts = []
@@ -445,7 +448,7 @@ class ClinicalNotesVectorizer:
                 documents.append(doc)
                 chunk_idx += 1
 
-        print(f"  Chunks  : {chunk_idx}")
+        logger.info(f"  Chunks  : {chunk_idx}")
         return documents
 
     # ── Small-chunk merging ───────────────────────────────────────────────
@@ -498,7 +501,7 @@ class ClinicalNotesVectorizer:
         if not pdf_files:
             raise FileNotFoundError(f"No PDF files in: {folder_path}")
 
-        print(f"\n[Documents] Found {len(pdf_files)} PDF(s): {pdf_files}")
+        logger.info(f"\n[Documents] Found {len(pdf_files)} PDF(s): {pdf_files}")
 
         all_documents = []
         for pdf_file in pdf_files:
@@ -506,7 +509,7 @@ class ClinicalNotesVectorizer:
             docs = self.process_pdf(pdf_path)
             all_documents.extend(docs)
 
-        print(f"\n[Summary] Total chunks to index: {len(all_documents)}")
+        logger.info(f"\n[Summary] Total chunks to index: {len(all_documents)}")
         return all_documents
 
     # ── Qdrant Collection Management ──────────────────────────────────────
@@ -523,12 +526,12 @@ class ClinicalNotesVectorizer:
             kwargs = {"url": self.qdrant_url, "timeout": 120}
             if self.qdrant_api_key:
                 kwargs["api_key"] = self.qdrant_api_key
-            print(f"  Mode: Server ({self.qdrant_url})")
+            logger.info(f"  Mode: Server ({self.qdrant_url})")
             return QdrantClient(**kwargs)
         elif self.qdrant_path:
             # Embedded mode — runs in-process, no Docker needed
             os.makedirs(self.qdrant_path, exist_ok=True)
-            print(f"  Mode: Embedded (on-disk at {self.qdrant_path})")
+            logger.info(f"  Mode: Embedded (on-disk at {self.qdrant_path})")
             return QdrantClient(path=self.qdrant_path)
         else:
             raise ValueError(
@@ -549,10 +552,10 @@ class ClinicalNotesVectorizer:
         """
         # Drop old collection if exists
         if client.collection_exists(collection_name):
-            print(f"  Deleting existing collection '{collection_name}'...")
+            logger.info(f"  Deleting existing collection '{collection_name}'...")
             client.delete_collection(collection_name)
 
-        print(f"  Creating collection '{collection_name}'...")
+        logger.info(f"  Creating collection '{collection_name}'...")
         client.create_collection(
             collection_name=collection_name,
             vectors_config=VectorParams(
@@ -574,19 +577,19 @@ class ClinicalNotesVectorizer:
                 indexing_threshold=5000,  # build HNSW index early
             ),
         )
-        print("  HNSW(m=16, ef=128) + INT8 quantization + Cosine")
+        logger.info("  HNSW(m=16, ef=128) + INT8 quantization + Cosine")
 
         # Create payload indexes BEFORE inserting data
         # Note: LangChain's QdrantVectorStore nests metadata under "metadata."
         # so indexes must use the full nested path (e.g., "metadata.patient_mrn")
-        print("  Creating payload indexes...")
+        logger.info("  Creating payload indexes...")
         for field in ("metadata.patient_mrn", "metadata.section_title", "metadata.source"):
             client.create_payload_index(
                 collection_name=collection_name,
                 field_name=field,
                 field_schema=PayloadSchemaType.KEYWORD,
             )
-        print("  Payload indexes: metadata.patient_mrn, metadata.section_title, metadata.source")
+        logger.info("  Payload indexes: metadata.patient_mrn, metadata.section_title, metadata.source")
 
     def index_documents(
         self,
@@ -599,7 +602,7 @@ class ClinicalNotesVectorizer:
         Returns:
             QdrantVectorStore instance (can be used for verification queries).
         """
-        print(f"\n[Indexing] Uploading {len(documents)} chunks...")
+        logger.info(f"\n[Indexing] Uploading {len(documents)} chunks...")
 
         vector_store = QdrantVectorStore(
             client=client,
@@ -611,7 +614,7 @@ class ClinicalNotesVectorizer:
             batch = documents[i : i + self.batch_size]
             vector_store.add_documents(batch)
             progress = min(i + self.batch_size, len(documents))
-            print(f"  Uploaded {progress}/{len(documents)} chunks")
+            logger.info(f"  Uploaded {progress}/{len(documents)} chunks")
 
         return vector_store
 
@@ -630,19 +633,19 @@ class ClinicalNotesVectorizer:
             collection_name: Qdrant collection name (e.g. "PatientData").
             force_recreate: If True, drop and recreate the collection.
         """
-        print("=" * 70)
-        print("  CLINICAL NOTES VECTORIZATION — Production Pipeline")
-        print("=" * 70)
-        print(f"\n[Config]")
-        print(f"  Embedding model : {self.embedding_model_name}")
-        print(f"  Vector dims     : {self.embedding_dimensions}")
-        print(f"  Chunk size      : {self.chunk_size} chars")
-        print(f"  Chunk overlap   : {self.chunk_overlap} chars")
-        print(f"  Collection      : {collection_name}")
+        logger.info("=" * 70)
+        logger.info("  CLINICAL NOTES VECTORIZATION — Production Pipeline")
+        logger.info("=" * 70)
+        logger.info(f"\n[Config]")
+        logger.info(f"  Embedding model : {self.embedding_model_name}")
+        logger.info(f"  Vector dims     : {self.embedding_dimensions}")
+        logger.info(f"  Chunk size      : {self.chunk_size} chars")
+        logger.info(f"  Chunk overlap   : {self.chunk_overlap} chars")
+        logger.info(f"  Collection      : {collection_name}")
         if self.qdrant_url:
-            print(f"  Qdrant          : Server @ {self.qdrant_url}")
+            logger.info(f"  Qdrant          : Server @ {self.qdrant_url}")
         else:
-            print(f"  Qdrant          : Embedded @ {self.qdrant_path}")
+            logger.info(f"  Qdrant          : Embedded @ {self.qdrant_path}")
 
         # Process PDFs
         documents = self.process_folder(folder_path)
@@ -650,14 +653,14 @@ class ClinicalNotesVectorizer:
         # Show a sample chunk for verification
         if documents:
             sample = documents[len(documents) // 2]
-            print(f"\n[Sample Chunk — #{sample.metadata['chunk_index']}]")
-            print(f"  Section : {sample.metadata['section_title']}")
-            print(f"  Page    : {sample.metadata['page_number']}")
-            print(f"  MRN     : {sample.metadata['patient_mrn']}")
-            print(f"  Content : {sample.page_content[:200]}...")
+            logger.info(f"\n[Sample Chunk — #{sample.metadata['chunk_index']}]")
+            logger.info(f"  Section : {sample.metadata['section_title']}")
+            logger.info(f"  Page    : {sample.metadata['page_number']}")
+            logger.info(f"  MRN     : {sample.metadata['patient_mrn']}")
+            logger.info(f"  Content : {sample.page_content[:200]}...")
 
         # Connect to Qdrant
-        print(f"\n[Qdrant] Connecting...")
+        logger.info(f"\n[Qdrant] Connecting...")
         client = self._connect()
 
         # Create collection
@@ -692,7 +695,7 @@ class ClinicalNotesVectorizer:
         vector_store = self.index_documents(client, collection_name, documents)
 
         info = client.get_collection(collection_name)
-        print(f"\n[Done] '{collection_name}' now has {info.points_count} vectors")
+        logger.info(f"\n[Done] '{collection_name}' now has {info.points_count} vectors")
 
     def _verify(
         self,
@@ -701,26 +704,26 @@ class ClinicalNotesVectorizer:
         vector_store: QdrantVectorStore,
     ) -> None:
         """Verify collection and run a sanity-check query."""
-        print(f"\n[Verification]")
+        logger.info(f"\n[Verification]")
         info = client.get_collection(collection_name)
-        print(f"  Collection      : {collection_name}")
-        print(f"  Vectors stored  : {info.points_count}")
-        print(f"  Vector size     : {info.config.params.vectors.size}")
-        print(f"  Distance metric : {info.config.params.vectors.distance}")
-        print(f"  Status          : {info.status}")
+        logger.info(f"  Collection      : {collection_name}")
+        logger.info(f"  Vectors stored  : {info.points_count}")
+        logger.info(f"  Vector size     : {info.config.params.vectors.size}")
+        logger.info(f"  Distance metric : {info.config.params.vectors.distance}")
+        logger.info(f"  Status          : {info.status}")
 
         # Quick sanity search
-        print(f"\n[Sanity Check] Running test query...")
+        logger.info(f"\n[Sanity Check] Running test query...")
         test_results = vector_store.similarity_search_with_score(
             "What medications is the patient taking?", k=3
         )
         for doc, score in test_results:
             section = doc.metadata.get("section_title", "?")
-            print(f"  Score={score:.4f} | Section: {section} | {doc.page_content[:80]}...")
+            logger.info(f"  Score={score:.4f} | Section: {section} | {doc.page_content[:80]}...")
 
-        print(f"\n{'=' * 70}")
-        print("  DONE — Vector database built successfully!")
-        print(f"{'=' * 70}")
+        logger.info(f"\n{'=' * 70}")
+        logger.info("  DONE — Vector database built successfully!")
+        logger.info(f"{'=' * 70}")
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -733,6 +736,12 @@ def main():
     """
     from dotenv import load_dotenv
     from pyprojroot import here
+
+    # Configure logging for CLI usage (human-readable, not JSON)
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(message)s",
+    )
 
     sys.path.insert(0, str(here("src")))
     load_dotenv()
@@ -770,27 +779,28 @@ def main():
 
     # ── Optionally pre-compute summaries so they're cached at runtime ────
     if "--precompute-summaries" in sys.argv:
-        print("\n" + "=" * 60)
-        print("PRE-COMPUTING PATIENT SUMMARIES")
-        print("=" * 60)
+        logger.info("\n" + "=" * 60)
+        logger.info("PRE-COMPUTING PATIENT SUMMARIES")
+        logger.info("=" * 60)
         try:
             from agent_graph.tool_clinical_notes_rag import (
                 get_rag_tool_instance, summarize_patient_record
             )
             rag = get_rag_tool_instance()
             patients_info = rag.list_patients()
-            print(patients_info)
+            logger.info(patients_info)
             # Parse MRNs from the listing
             import re
             mrns = re.findall(r"MRN:\s*(\S+)", patients_info)
             for mrn in mrns:
-                print(f"\nGenerating summary for {mrn} ...")
+                logger.info("Generating summary for %s ...", mrn)
                 result = summarize_patient_record.invoke(mrn)
-                print(f"  Done ({len(result):,} chars)")
-            print("\nAll summaries pre-computed and cached.")
+                logger.info("  Done (%s chars)", f"{len(result):,}")
+            logger.info("All summaries pre-computed and cached.")
         except Exception as e:
-            print(f"Warning: Summary pre-computation failed: {e}")
-            print("Summaries will be generated on first request instead.")
+            logger.warning("Summary pre-computation failed: %s", e)
+            logger.info("Summaries will be generated on first request instead.")
+            logger.info("Summaries will be generated on first request instead.")
 
 
 if __name__ == "__main__":

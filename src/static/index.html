@@ -1360,6 +1360,133 @@
             font-size: 9px;
             opacity: 0.7;
         }
+
+        /* ── LOGIN OVERLAY ───────────────────────────────────────── */
+        .login-overlay {
+            position: fixed;
+            inset: 0;
+            z-index: 9999;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            background: var(--bg-primary);
+        }
+        .login-overlay.hidden { display: none; }
+
+        .login-card {
+            width: 380px;
+            max-width: 92vw;
+            background: var(--bg-secondary);
+            border: 1px solid var(--border-color);
+            border-radius: var(--radius);
+            padding: 40px 36px 32px;
+            box-shadow: var(--shadow-lg), var(--shadow-glow);
+            text-align: center;
+        }
+        .login-brand {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 14px;
+            margin-bottom: 28px;
+        }
+        .login-brand-icon {
+            width: 52px; height: 52px;
+            border-radius: 16px;
+            background: linear-gradient(135deg, var(--accent), #00b89c);
+            display: flex; align-items: center; justify-content: center;
+            font-size: 22px; color: #fff;
+            box-shadow: 0 0 25px rgba(0, 230, 195, 0.25);
+        }
+        .login-brand h2 {
+            font-size: 22px; font-weight: 700;
+            color: var(--text-primary); margin: 0;
+        }
+        .login-brand span {
+            font-size: 11px; color: var(--text-secondary);
+            letter-spacing: 1px; text-transform: uppercase;
+        }
+        .login-field {
+            margin-bottom: 16px; text-align: left;
+        }
+        .login-field label {
+            display: block; font-size: 11px; font-weight: 600;
+            color: var(--text-secondary); margin-bottom: 6px;
+            text-transform: uppercase; letter-spacing: 0.8px;
+        }
+        .login-field input, .login-field select {
+            width: 100%; padding: 11px 14px;
+            background: var(--bg-tertiary);
+            border: 1px solid var(--border-color);
+            border-radius: var(--radius-sm);
+            color: var(--text-primary); font-size: 14px;
+            font-family: 'Inter', sans-serif;
+            outline: none; transition: var(--transition);
+            box-sizing: border-box;
+        }
+        .login-field input:focus, .login-field select:focus {
+            border-color: var(--accent);
+            box-shadow: 0 0 0 3px rgba(0, 230, 195, 0.08);
+        }
+        .login-field select option { background: var(--bg-secondary); }
+
+        .login-btn {
+            width: 100%; padding: 13px;
+            background: linear-gradient(135deg, var(--accent), #00b89c);
+            border: none; border-radius: var(--radius-sm);
+            color: var(--bg-primary); font-size: 14px; font-weight: 700;
+            cursor: pointer; transition: var(--transition);
+            margin-top: 8px;
+        }
+        .login-btn:hover { transform: translateY(-1px); box-shadow: 0 4px 20px rgba(0, 230, 195, 0.3); }
+        .login-btn:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
+
+        .login-error {
+            color: var(--accent-red); font-size: 12px;
+            margin-top: 12px; min-height: 18px;
+        }
+        .login-hint {
+            margin-top: 20px; font-size: 11px;
+            color: var(--text-muted); line-height: 1.5;
+        }
+
+        /* ── USER INFO IN SIDEBAR ────────────────────────────────── */
+        .user-info {
+            display: flex; align-items: center; gap: 10px;
+            padding: 10px 14px;
+            margin: 0 10px 6px;
+            background: var(--accent-dim);
+            border: 1px solid var(--border-color);
+            border-radius: var(--radius-sm);
+        }
+        .user-info-avatar {
+            width: 32px; height: 32px; min-width: 32px;
+            border-radius: 50%;
+            background: linear-gradient(135deg, var(--accent), #00b89c);
+            display: flex; align-items: center; justify-content: center;
+            font-size: 13px; color: #fff; font-weight: 700;
+        }
+        .user-info-text { flex: 1; min-width: 0; }
+        .user-info-name {
+            font-size: 12px; font-weight: 600;
+            color: var(--text-primary);
+            white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+        }
+        .user-info-role {
+            font-size: 10px; color: var(--text-secondary);
+            text-transform: capitalize;
+        }
+        .logout-btn {
+            background: none; border: none; cursor: pointer;
+            color: var(--text-muted); font-size: 14px;
+            padding: 4px; transition: var(--transition);
+        }
+        .logout-btn:hover { color: var(--accent-red); }
+
+        /* ── STATUS DOT ANIMATIONS ───────────────────────────────── */
+        .status-dot.offline { background: var(--accent-red); box-shadow: 0 0 6px var(--accent-red); }
+        .status-dot.checking { background: var(--accent-amber); box-shadow: 0 0 6px var(--accent-amber); animation: pulse 1.5s infinite; }
+        @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.4; } }
     </style>
 </head>
 <body>
@@ -1369,7 +1496,42 @@
     <div class="bg-orb orb-2"></div>
     <div class="bg-orb orb-3"></div>
 
-    <div class="app-container">
+    <!-- ═══════════ LOGIN OVERLAY ═══════════ -->
+    <div class="login-overlay" id="loginOverlay">
+        <div class="login-card">
+            <div class="login-brand">
+                <div class="login-brand-icon"><i class="fa-solid fa-heart-pulse"></i></div>
+                <div>
+                    <h2>MedGraph AI</h2>
+                    <span>Clinical Intelligence Platform</span>
+                </div>
+            </div>
+            <form onsubmit="handleLogin(event)">
+                <div class="login-field">
+                    <label for="loginUserId">User ID</label>
+                    <input type="text" id="loginUserId" placeholder="e.g. dr.smith" required autocomplete="username">
+                </div>
+                <div class="login-field">
+                    <label for="loginRole">Role</label>
+                    <select id="loginRole">
+                        <option value="clinician">Clinician</option>
+                        <option value="nurse">Nurse</option>
+                        <option value="admin">Admin</option>
+                    </select>
+                </div>
+                <button type="submit" class="login-btn" id="loginBtn">
+                    <i class="fa-solid fa-right-to-bracket"></i>&nbsp; Sign In
+                </button>
+                <div class="login-error" id="loginError"></div>
+            </form>
+            <div class="login-hint">
+                <i class="fa-solid fa-shield-halved" style="color:var(--accent);"></i>
+                All sessions are authenticated with JWT tokens and audit-logged for HIPAA compliance.
+            </div>
+        </div>
+    </div>
+
+    <div class="app-container" id="appContainer" style="display:none;">
         <!-- ═══════════ SIDEBAR ═══════════ -->
         <aside class="sidebar">
             <div class="sidebar-header">
@@ -1382,27 +1544,39 @@
                 </div>
             </div>
 
+            <!-- User info (shown after login) -->
+            <div class="user-info" id="userInfo" style="display:none;">
+                <div class="user-info-avatar" id="userAvatar">?</div>
+                <div class="user-info-text">
+                    <div class="user-info-name" id="userName">—</div>
+                    <div class="user-info-role" id="userRole">—</div>
+                </div>
+                <button class="logout-btn" onclick="handleLogout()" title="Sign out">
+                    <i class="fa-solid fa-right-from-bracket"></i>
+                </button>
+            </div>
+
             <div class="system-status">
                 <div class="status-label">System Status</div>
                 <div class="status-item">
-                    <div class="status-dot"></div>
+                    <div class="status-dot checking" id="dotLLM"></div>
                     <span>LLM Engine</span>
-                    <span class="status-value" id="statusModel">GPT-4o-mini</span>
+                    <span class="status-value" id="statusModel">—</span>
                 </div>
                 <div class="status-item">
-                    <div class="status-dot"></div>
+                    <div class="status-dot checking" id="dotQdrant"></div>
                     <span>Vector Database</span>
-                    <span class="status-value">Online</span>
+                    <span class="status-value" id="statusQdrant">Checking...</span>
                 </div>
                 <div class="status-item">
-                    <div class="status-dot"></div>
+                    <div class="status-dot checking" id="dotEmbedding"></div>
                     <span>Embedding Model</span>
-                    <span class="status-value">3-large</span>
+                    <span class="status-value" id="statusEmbedding">—</span>
                 </div>
                 <div class="status-item">
                     <div class="status-dot amber"></div>
-                    <span>Web Search</span>
-                    <span class="status-value">Tavily</span>
+                    <span>Search Mode</span>
+                    <span class="status-value">Hybrid BM25+Dense</span>
                 </div>
             </div>
 
@@ -1416,7 +1590,7 @@
                     <div class="metric-label">Avg Latency</div>
                 </div>
                 <div class="metric-card">
-                    <div class="metric-value" id="metricVectors">66</div>
+                    <div class="metric-value" id="metricVectors">—</div>
                     <div class="metric-label">Vectors</div>
                 </div>
                 <div class="metric-card">
@@ -1445,12 +1619,18 @@
             <div class="sidebar-footer">
                 <div class="security-badge" id="hipaaBadge" title="Triple-click for dev tools">
                     <i class="fa-solid fa-shield-halved"></i>
-                    <span>HIPAA-Ready Architecture<br>End-to-end encrypted session</span>
+                    <span>HIPAA-Ready · JWT Auth · Audit Logged</span>
                 </div>
                 <div class="dev-tools" id="devTools" style="display:none;">
                     <div class="dev-tools-label"><i class="fa-solid fa-terminal"></i> Dev Tools</div>
                     <button class="dev-btn" onclick="clearSummaryCache()" title="Purge all cached patient summaries">
                         <i class="fa-solid fa-broom"></i> Clear Summary Cache
+                    </button>
+                    <button class="dev-btn" onclick="window.open('/metrics','_blank')" title="View Prometheus metrics">
+                        <i class="fa-solid fa-chart-line"></i> Prometheus Metrics
+                    </button>
+                    <button class="dev-btn" onclick="window.open('/api/health','_blank')" title="View health check JSON">
+                        <i class="fa-solid fa-heart-pulse"></i> Health Check
                     </button>
                 </div>
             </div>
@@ -1607,6 +1787,137 @@
         let lastUserQuery = '';           // for feedback context
         let selectedTool = 'auto';        // tool override: auto, vector_db, web_search, sql
         const startTime = Date.now();
+
+        // ── Authentication ────────────────────────────────────────
+        function getToken() { return localStorage.getItem('medgraph-token'); }
+        function setToken(t) { localStorage.setItem('medgraph-token', t); }
+        function clearToken() { localStorage.removeItem('medgraph-token'); localStorage.removeItem('medgraph-user'); }
+        function getUser() { try { return JSON.parse(localStorage.getItem('medgraph-user') || 'null'); } catch { return null; } }
+        function setUser(u) { localStorage.setItem('medgraph-user', JSON.stringify(u)); }
+
+        function authHeaders() {
+            const h = { 'Content-Type': 'application/json' };
+            const t = getToken();
+            if (t) h['Authorization'] = 'Bearer ' + t;
+            return h;
+        }
+
+        async function handleLogin(e) {
+            e.preventDefault();
+            const btn = document.getElementById('loginBtn');
+            const errEl = document.getElementById('loginError');
+            const userId = document.getElementById('loginUserId').value.trim();
+            const role = document.getElementById('loginRole').value;
+            if (!userId) { errEl.textContent = 'Please enter a User ID.'; return; }
+            btn.disabled = true;
+            errEl.textContent = '';
+            try {
+                const resp = await fetch('/api/auth/token', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ user_id: userId, role: role })
+                });
+                if (!resp.ok) {
+                    const d = await resp.json().catch(() => ({}));
+                    throw new Error(d.detail || `HTTP ${resp.status}`);
+                }
+                const data = await resp.json();
+                setToken(data.token);
+                setUser({ id: userId, role: role });
+                showApp();
+            } catch (err) {
+                errEl.textContent = 'Login failed: ' + err.message;
+            } finally {
+                btn.disabled = false;
+            }
+        }
+
+        function handleLogout() {
+            clearToken();
+            sessionId = null;
+            document.getElementById('appContainer').style.display = 'none';
+            document.getElementById('loginOverlay').classList.remove('hidden');
+            document.getElementById('loginUserId').value = '';
+            document.getElementById('loginError').textContent = '';
+        }
+
+        function showApp() {
+            document.getElementById('loginOverlay').classList.add('hidden');
+            document.getElementById('appContainer').style.display = '';
+            const user = getUser();
+            if (user) {
+                document.getElementById('userInfo').style.display = 'flex';
+                document.getElementById('userName').textContent = user.id;
+                document.getElementById('userRole').textContent = user.role;
+                document.getElementById('userAvatar').textContent = user.id.charAt(0).toUpperCase();
+            }
+            // Start polling system health
+            pollHealth();
+            setInterval(pollHealth, 30000);
+            loadChatHistory();
+        }
+
+        async function authFetch(url, options = {}) {
+            const token = getToken();
+            if (!options.headers) options.headers = {};
+            if (token) options.headers['Authorization'] = 'Bearer ' + token;
+            if (!options.headers['Content-Type'] && options.method && options.method !== 'GET') {
+                options.headers['Content-Type'] = 'application/json';
+            }
+            const resp = await fetch(url, options);
+            if (resp.status === 401) {
+                handleLogout();
+                throw new Error('Session expired. Please sign in again.');
+            }
+            return resp;
+        }
+
+        // ── Health check polling ──────────────────────────────────
+        async function pollHealth() {
+            try {
+                const resp = await fetch('/api/health');
+                if (!resp.ok) throw new Error('health endpoint failed');
+                const data = await resp.json();
+
+                // LLM Engine
+                const dotLLM = document.getElementById('dotLLM');
+                document.getElementById('statusModel').textContent = data.model || '—';
+                if (data.openai && data.openai.status === 'ok') {
+                    dotLLM.className = 'status-dot';
+                } else {
+                    dotLLM.className = 'status-dot offline';
+                }
+
+                // Qdrant
+                const dotQ = document.getElementById('dotQdrant');
+                if (data.qdrant && data.qdrant.status === 'ok') {
+                    dotQ.className = 'status-dot';
+                    document.getElementById('statusQdrant').textContent = 'Online';
+                    document.getElementById('metricVectors').textContent = data.qdrant.vectors || '—';
+                } else {
+                    dotQ.className = 'status-dot offline';
+                    document.getElementById('statusQdrant').textContent = 'Offline';
+                }
+
+                // Embedding model
+                const dotE = document.getElementById('dotEmbedding');
+                dotE.className = 'status-dot';
+                document.getElementById('statusEmbedding').textContent = 'PubMedBERT';
+
+            } catch (e) {
+                console.warn('Health poll failed:', e);
+                document.getElementById('dotLLM').className = 'status-dot offline';
+                document.getElementById('dotQdrant').className = 'status-dot offline';
+                document.getElementById('dotEmbedding').className = 'status-dot offline';
+            }
+        }
+
+        // ── Init: check if already logged in ──────────────────────
+        (function() {
+            if (getToken()) {
+                showApp();
+            }
+        })();
 
         // ── DOM refs ──────────────────────────────────────────────
         const chatArea = document.getElementById('chatArea');
@@ -1896,13 +2207,15 @@
                 console.log('[SSE] Sending request...');
                 const resp = await fetch('/api/chat/stream', {
                     method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
+                    headers: authHeaders(),
                     body: JSON.stringify({
                         message: text,
                         session_id: sessionId,
                         tool_override: selectedTool === 'auto' ? null : selectedTool
                     })
                 });
+
+                if (resp.status === 401) { handleLogout(); return; }
 
                 if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
                 console.log('[SSE] Stream connected, reading...');
@@ -1997,9 +2310,8 @@
         async function clearChat() {
             if (sessionId) {
                 try {
-                    await fetch('/api/clear', {
+                    await authFetch('/api/clear', {
                         method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
                         body: JSON.stringify({ session_id: sessionId })
                     });
                 } catch (e) { /* ignore */ }
@@ -2038,7 +2350,7 @@
         async function clearSummaryCache() {
             if (!confirm('Clear all cached patient summaries?\nNext summary will be regenerated fresh.')) return;
             try {
-                const resp = await fetch('/api/cache/clear', { method: 'POST' });
+                const resp = await authFetch('/api/cache/clear', { method: 'POST' });
                 const data = await resp.json();
                 if (data.status === 'ok') {
                     alert(`Cache cleared: ${data.deleted} file(s) removed.`);
@@ -2111,9 +2423,8 @@
 
             // Send to backend
             try {
-                await fetch('/api/feedback', {
+                await authFetch('/api/feedback', {
                     method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({
                         session_id: sessionId || 'unknown',
                         message_index: idx,
@@ -2133,7 +2444,7 @@
             historyList.innerHTML = '<div class="history-loading"><i class="fa-solid fa-spinner fa-spin"></i> Loading...</div>';
 
             try {
-                const resp = await fetch('/api/history/sessions');
+                const resp = await authFetch('/api/history/sessions');
                 if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
                 const data = await resp.json();
 
@@ -2205,7 +2516,7 @@
             try {
                 let url = `/api/history/load/${encodeURIComponent(sid)}`;
                 if (dateStr) url += `?date=${encodeURIComponent(dateStr)}`;
-                const resp = await fetch(url);
+                const resp = await authFetch(url);
                 if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
                 const data = await resp.json();
 
@@ -2236,17 +2547,15 @@
             }
         }
 
-        // Load chat history on page load
-        loadChatHistory();
+        // Chat history is loaded in showApp() after auth
 
         // ── Delete session from history ───────────────────────────
         async function deleteSession(sid, dateStr, btnEl) {
             const historyItem = btnEl.closest('.history-item');
 
             try {
-                const resp = await fetch('/api/history/delete', {
+                const resp = await authFetch('/api/history/delete', {
                     method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ session_id: sid, date: dateStr })
                 });
                 if (!resp.ok) throw new Error(`HTTP ${resp.status}`);

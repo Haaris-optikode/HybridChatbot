@@ -5,9 +5,25 @@ from pyprojroot import here
 
 load_dotenv()
 
-# Disable LangSmith tracing to prevent RunTree/Pydantic errors
-# (langsmith 0.7.3 has a bug where RunTree references undefined 'Path')
-os.environ["LANGCHAIN_TRACING_V2"] = "false"
+# ── LangSmith tracing (config-driven) ────────────────────────────────
+# Reads the langsmith.tracing flag from tools_config.yml.
+# Enable with "true" once langsmith RunTree bug is fixed, or leave "false".
+# The RunTree workaround in api.py provides graceful degradation either way.
+def _configure_langsmith():
+    """Set LangSmith env vars from tools_config.yml before any LangChain import."""
+    import yaml
+    with open(here("configs/tools_config.yml")) as f:
+        cfg = yaml.load(f, Loader=yaml.FullLoader)
+    ls_cfg = cfg.get("langsmith", {})
+    tracing = str(ls_cfg.get("tracing", "false")).lower() == "true"
+    os.environ["LANGCHAIN_TRACING_V2"] = "true" if tracing else "false"
+    if tracing:
+        os.environ["LANGCHAIN_PROJECT"] = ls_cfg.get("project_name", "rag_sqlagent_project")
+        # Ensure LANGCHAIN_API_KEY is set (from .env or environment)
+        if not os.environ.get("LANGCHAIN_API_KEY"):
+            os.environ["LANGCHAIN_API_KEY"] = os.getenv("LANGSMITH_API_KEY", "")
+
+_configure_langsmith()
 
 
 class LoadToolsConfig:
@@ -21,6 +37,8 @@ class LoadToolsConfig:
 
         # Primary agent
         self.primary_agent_llm = app_config["primary_agent"]["llm"]
+        self.primary_agent_router_llm = app_config["primary_agent"].get(
+            "router_llm", app_config["primary_agent"]["llm"])  # fast model for tool routing
         self.primary_agent_llm_temperature = app_config["primary_agent"]["llm_temperature"]
 
         # Internet Search config
@@ -51,11 +69,6 @@ class LoadToolsConfig:
             app_config["clinical_notes_rag"].get("reranker_top_k", 6))
         self.clinical_notes_rag_qdrant_url = app_config["clinical_notes_rag"].get("qdrant_url", "http://localhost:6333")
         self.clinical_notes_rag_qdrant_api_key = app_config["clinical_notes_rag"].get("qdrant_api_key") or os.getenv("QDRANT_API_KEY", "")
-
-        # Hospital SQL agent configs
-        self.hospital_sqlagent_llm = app_config["hospital_sqlagent_configs"]["llm"]
-        self.hospital_sqlagent_llm_temperature = float(
-            app_config["hospital_sqlagent_configs"]["llm_temperature"])
 
         # Graph configs
         self.thread_id = str(

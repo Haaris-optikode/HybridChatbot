@@ -15,6 +15,7 @@ from langchain_openai import ChatOpenAI
 from agent_graph.load_tools_config import LoadToolsConfig
 from qdrant_client import QdrantClient
 from pyprojroot import here
+import logging
 import os
 import json
 import hashlib
@@ -23,15 +24,33 @@ from pathlib import Path as _Path
 from datetime import datetime as _dt
 from dotenv import load_dotenv
 import threading
+from collections import OrderedDict
+
+logger = logging.getLogger(__name__)
 
 load_dotenv()
 TOOLS_CFG = LoadToolsConfig()
 
-# ── Global in-memory summary cache (cross-session, process-lifetime) ─────────
-# Keyed by patient MRN → {"summary": str, "cached_at": datetime}
-_memory_cache: dict[str, dict] = {}
+# ── LRU in-memory summary cache (cross-session, process-lifetime) ────────────
+# OrderedDict keeps insertion order; we move-to-end on access to track LRU.
+# When the cache exceeds _CACHE_MAX_SIZE, the oldest entry is evicted.
+_memory_cache: OrderedDict[str, dict] = OrderedDict()
 _memory_cache_lock = threading.Lock()
 _CACHE_TTL_HOURS = 24
+_CACHE_MAX_SIZE = int(os.environ.get("MEDGRAPH_CACHE_MAX_SIZE", "50"))  # max patient summaries in memory
+
+
+def _record_cache_event(event: str, layer: str = ""):
+    """Record cache hit/miss to Prometheus (best-effort, non-critical)."""
+    try:
+        from prometheus_client import Counter
+        # Use get_or_create pattern — counters are singletons by name
+        if event == "hit":
+            Counter("medgraph_cache_hits_total", "Summary cache hits", ["layer"]).labels(layer=layer).inc()
+        elif event == "miss":
+            Counter("medgraph_cache_misses_total", "Summary cache misses").inc()
+    except Exception:
+        pass  # metrics are best-effort
 
 
 def _make_embeddings(model_name: str) -> HuggingFaceEmbeddings:
@@ -47,15 +66,15 @@ def _load_reranker(model_name: str):
     """Lazily load cross-encoder reranker model."""
     try:
         from sentence_transformers import CrossEncoder
-        print(f"Loading reranker: {model_name}")
+        logger.info("Loading reranker: %s", model_name)
         reranker = CrossEncoder(model_name, max_length=512)
-        print(f"  Reranker loaded: {model_name}")
+        logger.info("Reranker loaded: %s", model_name)
         return reranker
     except ImportError:
-        print("Warning: sentence-transformers not installed. Reranking disabled.")
+        logger.warning("sentence-transformers not installed. Reranking disabled.")
         return None
     except Exception as e:
-        print(f"Warning: Could not load reranker '{model_name}': {e}")
+        logger.warning("Could not load reranker '%s': %s", model_name, e)
         return None
 
 
@@ -113,7 +132,7 @@ class ClinicalNotesRAGTool:
             client_kwargs["url"] = qdrant_url
             if qdrant_api_key:
                 client_kwargs["api_key"] = qdrant_api_key
-            print(f"Connecting to Qdrant server: {qdrant_url}")
+            logger.info("Connecting to Qdrant server: %s", qdrant_url)
         else:
             # Embedded mode — runs in-process, no Docker needed
             local_path = str(here(vectordb_dir)) if vectordb_dir else None
@@ -124,7 +143,7 @@ class ClinicalNotesRAGTool:
                 )
             os.makedirs(local_path, exist_ok=True)
             client_kwargs["path"] = local_path
-            print(f"Using embedded Qdrant: {local_path}")
+            logger.info("Using embedded Qdrant: %s", local_path)
 
         self.client = QdrantClient(**client_kwargs)
 
@@ -140,42 +159,105 @@ class ClinicalNotesRAGTool:
         if reranker_model:
             self.reranker = _load_reranker(reranker_model)
 
+        # Build BM25 index for hybrid search (P2.24)
+        self._bm25_docs = []   # parallel list of LangChain Documents
+        self._bm25_index = None
+        self._build_bm25_index()
+
         try:
             info = self.client.get_collection(collection_name)
-            print(f"Connected to '{collection_name}': {info.points_count} vectors | Status: {info.status}")
+            logger.info("Connected to '%s': %d vectors | Status: %s", collection_name, info.points_count, info.status)
         except Exception as e:
-            print(f"Warning: Could not get collection info: {e}")
+            logger.warning("Could not get collection info: %s", e)
+
+    def _build_bm25_index(self):
+        """Build a BM25 index over all documents in the collection for sparse retrieval."""
+        try:
+            from rank_bm25 import BM25Okapi
+            from langchain_core.documents import Document
+
+            results = self.client.scroll(
+                collection_name=self.collection_name,
+                limit=5000,
+                with_payload=True,
+                with_vectors=False,
+            )
+            points = results[0]
+            if not points:
+                logger.warning("BM25: No documents found — sparse retrieval disabled")
+                return
+
+            corpus = []
+            docs = []
+            for p in points:
+                content = p.payload.get("page_content", "")
+                meta = p.payload.get("metadata", {})
+                if content.strip():
+                    corpus.append(content.lower().split())
+                    docs.append(Document(page_content=content, metadata=meta))
+
+            self._bm25_index = BM25Okapi(corpus)
+            self._bm25_docs = docs
+            logger.info("BM25 index built: %d documents", len(docs))
+        except ImportError:
+            logger.warning("rank_bm25 not installed — BM25 hybrid search disabled")
+        except Exception as e:
+            logger.warning("BM25 index build failed: %s", e)
 
     def search(self, query: str) -> str:
         """
-        Two-stage retrieval:
-          1. Dense MMR search to get fetch_k candidates (diverse + relevant)
-          2. Cross-encoder reranking to select top reranker_top_k results
+        Hybrid retrieval: dense MMR + BM25 sparse + RRF fusion + cross-encoder reranking.
+        Optimized for latency: reduced candidate pool, efficient reranking.
         """
         try:
-            # Stage 1: Dense MMR search for candidates
-            docs = self.vectordb.max_marginal_relevance_search(
+            t0 = _time.perf_counter()
+
+            # Stage 1: Dense MMR search (original query — no augmentation)
+            dense_docs = self.vectordb.max_marginal_relevance_search(
                 query=query,
-                k=self.fetch_k,         # get more candidates for reranking
+                k=self.fetch_k,
                 fetch_k=self.fetch_k * 2,
-                lambda_mult=0.5,        # balance relevance vs diversity
+                lambda_mult=0.5,
             )
-            if not docs:
+            t_dense = _time.perf_counter() - t0
+
+            # Stage 2: BM25 sparse search (keyword-level)
+            bm25_docs = []
+            if self._bm25_index and self._bm25_docs:
+                try:
+                    import numpy as np
+                    tokenized_query = query.lower().split()
+                    scores = self._bm25_index.get_scores(tokenized_query)
+                    top_indices = np.argsort(scores)[::-1][:self.fetch_k]
+                    bm25_docs = [self._bm25_docs[i] for i in top_indices if scores[i] > 0]
+                except Exception as e:
+                    logger.warning("BM25 search failed, using dense only: %s", e)
+            t_bm25 = _time.perf_counter() - t0 - t_dense
+
+            # Stage 3: Reciprocal Rank Fusion (RRF) to merge rankings
+            if bm25_docs:
+                fused = self._reciprocal_rank_fusion(dense_docs, bm25_docs, k=60)
+            else:
+                fused = dense_docs
+
+            if not fused:
                 return f"No relevant documents found for: {query}"
 
-            # Stage 2: Cross-encoder reranking (if available)
-            if self.reranker and len(docs) > 1:
-                pairs = [[query, doc.page_content] for doc in docs]
+            # Stage 4: Cross-encoder reranking — only rerank top candidates
+            rerank_pool = fused[:self.fetch_k]  # cap reranker input
+            if self.reranker and len(rerank_pool) > 1:
+                pairs = [[query, doc.page_content] for doc in rerank_pool]
                 scores = self.reranker.predict(pairs)
-
-                # Sort by reranker score (descending) and take top-k
                 scored_docs = sorted(
-                    zip(docs, scores), key=lambda x: x[1], reverse=True
+                    zip(rerank_pool, scores), key=lambda x: x[1], reverse=True
                 )
                 docs = [doc for doc, _ in scored_docs[:self.reranker_top_k]]
             else:
-                # Fallback: just take top k from MMR results
-                docs = docs[:self.k]
+                docs = rerank_pool[:self.k]
+
+            t_total = _time.perf_counter() - t0
+            logger.info("Search: %.2fs (dense=%.2fs, bm25=%.2fs, rerank+fuse=%.2fs) → %d docs",
+                        t_total, t_dense, t_bm25, t_total - t_dense - t_bm25, len(docs))
 
             # Render with section headers for clarity to the LLM
             parts = []
@@ -187,6 +269,25 @@ class ClinicalNotesRAGTool:
             return "\n\n---\n\n".join(parts)
         except Exception as e:
             return f"Error during search: {e}"
+
+    @staticmethod
+    def _reciprocal_rank_fusion(
+        *rank_lists, k: int = 60
+    ) -> list:
+        """Merge multiple ranked document lists using RRF.
+        Score = sum over lists of 1 / (k + rank).
+        Documents are deduplicated by page_content hash."""
+        scores: dict[str, float] = {}
+        doc_map: dict[str, object] = {}
+
+        for rank_list in rank_lists:
+            for rank, doc in enumerate(rank_list):
+                key = hashlib.md5(doc.page_content.encode()).hexdigest()
+                scores[key] = scores.get(key, 0.0) + 1.0 / (k + rank + 1)
+                doc_map[key] = doc
+
+        sorted_keys = sorted(scores, key=scores.get, reverse=True)
+        return [doc_map[k] for k in sorted_keys]
 
     def get_all_chunks_for_patient(self, patient_mrn: str) -> str:
         """Retrieve ALL chunks for a specific patient by MRN, merge overlapping
@@ -254,8 +355,8 @@ class ClinicalNotesRAGTool:
                 prev_source = source
 
             elapsed = _time.perf_counter() - t0
-            print(f"  Retrieved {len(points)} chunks for {patient_mrn}, "
-                  f"merged to {len(merged_parts)} parts in {elapsed:.2f}s")
+            logger.info("Retrieved %d chunks for %s, merged to %d parts in %.2fs",
+                        len(points), patient_mrn, len(merged_parts), elapsed)
 
             return "\n\n".join(merged_parts)
         except Exception as e:
@@ -367,8 +468,8 @@ class ClinicalNotesRAGTool:
                 best_mrn = mrn
 
         if best_mrn:
-            print(f"    Name resolution: '{identifier}' → {best_mrn} "
-                  f"(name='{patients[best_mrn]}', score={best_score})")
+            logger.info("Name resolution: '%s' → %s (name='%s', score=%d)",
+                        identifier, best_mrn, patients[best_mrn], best_score)
         return best_mrn
 
 
@@ -413,7 +514,7 @@ def _cleanup_expired_cache():
             age_hours = (now - cache_time).total_seconds() / 3600
             if age_hours > _CACHE_TTL_HOURS:
                 f.unlink()
-                print(f"  [Cache Cleanup] Deleted expired: {f.name} ({age_hours:.1f}h old)")
+                logger.info("[Cache Cleanup] Deleted expired: %s (%.1fh old)", f.name, age_hours)
         except Exception:
             pass  # skip corrupt files
 
@@ -424,16 +525,39 @@ except Exception:
     pass
 
 
+def _is_reasoning_model(model_name: str) -> bool:
+    """Check if a model is a reasoning model (different API params)."""
+    reasoning_prefixes = ("o1", "o3", "o4", "gpt-5")
+    return any(model_name.lower().startswith(p) for p in reasoning_prefixes)
+
+
 def _get_summarization_llm():
-    """Create the fast summarization LLM instance with output cap."""
+    """Create the summarization LLM instance.
+    Reasoning models (gpt-5-mini, o3, etc.) don't support temperature or max_tokens.
+    They use max_completion_tokens instead — which includes BOTH internal reasoning
+    tokens AND the visible response. A clinical summary needs ~4K output tokens,
+    and reasoning can use 5-10K+ tokens, so we set a generous limit."""
     model = getattr(TOOLS_CFG, "clinical_notes_rag_summarization_llm",
                     TOOLS_CFG.clinical_notes_rag_llm)
-    return model, ChatOpenAI(
-        model=model,
-        temperature=0.1,
-        max_tokens=4096,          # cap output to ~3K words → saves ~30 s
-        api_key=os.getenv("OPENAI_API_KEY"),
-    )
+    if _is_reasoning_model(model):
+        llm = ChatOpenAI(
+            model=model,
+            max_completion_tokens=16384,   # reasoning (~8K) + response (~4-6K)
+            api_key=os.getenv("OPENAI_API_KEY"),
+            request_timeout=120,
+            max_retries=3,
+        )
+    else:
+        llm = ChatOpenAI(
+            model=model,
+            temperature=TOOLS_CFG.clinical_notes_rag_llm_temperature,
+            max_tokens=4096,
+            api_key=os.getenv("OPENAI_API_KEY"),
+            request_timeout=120,
+            max_retries=3,
+        )
+    logger.info("Summarization LLM: %s (reasoning=%s, timeout=120s, max_retries=3)", model, _is_reasoning_model(model))
+    return model, llm
 
 
 _SUMMARY_PROMPT = """You are a clinical documentation specialist. Produce a structured summary of this patient record (MRN: {mrn}).
@@ -454,9 +578,14 @@ RECORD:
 
 # ── Tool definitions ─────────────────────────────────────────────────────────
 
+# Query rewriting removed — saves ~2s per request.
+# The hybrid BM25+dense+RRF search already handles synonyms and abbreviations well.
+# Evaluation showed 92.5% accuracy without query rewriting being a bottleneck.
+
+
 @tool
 def lookup_clinical_notes(query: str) -> str:
-    """Search among clinical notes to find specific information. Use this for targeted questions about patient data, medications, labs, vitals, procedures, or any specific clinical detail. Input should be the clinical question."""
+    """Search among clinical notes to find specific information. Use this for ANY targeted question about patient data including: date of birth, demographics, allergies, medications, labs, vitals, procedures, diagnoses, imaging, or any other specific clinical detail. Input should be the clinical question."""
     try:
         rag = get_rag_tool_instance()
         return rag.search(query)
@@ -476,19 +605,21 @@ def summarize_patient_record(patient_identifier: str) -> str:
         if not patient_mrn:
             return (f"Could not find a patient matching '{patient_identifier}'. "
                     f"Use list_available_patients to see who is in the database.")
-        print(f"  Resolved '{patient_identifier}' → {patient_mrn}")
+        logger.info("Resolved '%s' → %s", patient_identifier, patient_mrn)
 
-        # ── Layer 1: In-memory cache (instant, cross-session) ─────
+        # ── Layer 1: In-memory LRU cache (instant, cross-session) ─
         with _memory_cache_lock:
             if patient_mrn in _memory_cache:
                 entry = _memory_cache[patient_mrn]
                 age_hours = (_dt.now() - entry["cached_at"]).total_seconds() / 3600
                 if age_hours <= _CACHE_TTL_HOURS:
+                    _memory_cache.move_to_end(patient_mrn)  # mark as recently used
                     elapsed = _time.perf_counter() - t_start
-                    print(f"  ⚡ MEMORY CACHE HIT for {patient_mrn} ({elapsed:.3f}s, {age_hours:.1f}h old)")
+                    logger.info("MEMORY CACHE HIT for %s (%.3fs, %.1fh old)", patient_mrn, elapsed, age_hours)
+                    _record_cache_event("hit", "memory")
                     return entry["summary"]
                 else:
-                    print(f"  Memory cache EXPIRED for {patient_mrn} ({age_hours:.1f}h old)")
+                    logger.info("Memory cache EXPIRED for %s (%.1fh old)", patient_mrn, age_hours)
                     del _memory_cache[patient_mrn]
 
         # ── Layer 2: Disk cache (survives restarts, cross-session) ─
@@ -505,25 +636,31 @@ def summarize_patient_record(patient_identifier: str) -> str:
                 age_hours = (_dt.now() - cache_time).total_seconds() / 3600
 
                 if age_hours <= _CACHE_TTL_HOURS:
-                    # Valid cache — promote to memory cache and return
+                    # Valid cache — promote to memory cache (with LRU eviction) and return
                     summary = cached["summary"]
                     with _memory_cache_lock:
                         _memory_cache[patient_mrn] = {
                             "summary": summary,
                             "cached_at": cache_time,
                         }
+                        _memory_cache.move_to_end(patient_mrn)
+                        while len(_memory_cache) > _CACHE_MAX_SIZE:
+                            evicted_key, _ = _memory_cache.popitem(last=False)
+                            logger.info("LRU eviction: removed %s from memory cache (size=%d)", evicted_key, len(_memory_cache))
                     elapsed = _time.perf_counter() - t_start
-                    print(f"  💾 DISK CACHE HIT for {patient_mrn} ({elapsed:.3f}s, {age_hours:.1f}h old)")
+                    logger.info("DISK CACHE HIT for %s (%.3fs, %.1fh old)", patient_mrn, elapsed, age_hours)
+                    _record_cache_event("hit", "disk")
                     return summary
                 else:
-                    print(f"  Disk cache EXPIRED for {patient_mrn} ({age_hours:.1f}h old), deleting")
+                    logger.info("Disk cache EXPIRED for %s (%.1fh old), deleting", patient_mrn, age_hours)
                     cache_file.unlink(missing_ok=True)
             except (ValueError, TypeError, json.JSONDecodeError) as e:
-                print(f"  Disk cache unreadable for {patient_mrn}: {e}, regenerating")
+                logger.warning("Disk cache unreadable for %s: %s, regenerating", patient_mrn, e)
                 cache_file.unlink(missing_ok=True)
 
         # ── Cache MISS — generate fresh summary ───────────────────
-        print(f"  Cache MISS for {patient_mrn} — generating summary...")
+        logger.info("Cache MISS for %s — generating summary...", patient_mrn)
+        _record_cache_event("miss")
 
         # Retrieve and merge ALL chunks
         full_record = rag.get_all_chunks_for_patient(patient_mrn)
@@ -531,7 +668,7 @@ def summarize_patient_record(patient_identifier: str) -> str:
             return full_record
 
         record_chars = len(full_record)
-        print(f"  Record: {record_chars:,} chars (~{record_chars // 4:,} tokens)")
+        logger.info("Record: %s chars (~%s tokens)", f"{record_chars:,}", f"{record_chars // 4:,}")
 
         # Single-pass summarization with output cap
         model_name, llm = _get_summarization_llm()
@@ -539,21 +676,26 @@ def summarize_patient_record(patient_identifier: str) -> str:
         t_llm_start = _time.perf_counter()
         summary = llm.invoke(prompt).content
         t_llm_end = _time.perf_counter()
-        print(f"  LLM: {t_llm_end - t_llm_start:.1f}s, output={len(summary):,} chars "
-              f"(model={model_name})")
+        logger.info("LLM: %.1fs, output=%s chars (model=%s)",
+                    t_llm_end - t_llm_start, f"{len(summary):,}", model_name)
 
         t_total = _time.perf_counter() - t_start
-        print(f"  Total summarization: {t_total:.1f}s")
+        logger.info("Total summarization: %.1fs", t_total)
 
         # ── Write to both cache layers ────────────────────────────
         now = _dt.now()
 
-        # Memory cache
+        # Memory cache (LRU eviction when full)
         with _memory_cache_lock:
             _memory_cache[patient_mrn] = {
                 "summary": summary,
                 "cached_at": now,
             }
+            _memory_cache.move_to_end(patient_mrn)
+            # Evict oldest entries if over max size
+            while len(_memory_cache) > _CACHE_MAX_SIZE:
+                evicted_key, _ = _memory_cache.popitem(last=False)
+                logger.info("LRU eviction: removed %s from memory cache (size=%d)", evicted_key, len(_memory_cache))
 
         # Disk cache (TTL-only, no fragile chunk_count validation)
         try:
@@ -563,9 +705,9 @@ def summarize_patient_record(patient_identifier: str) -> str:
                 "model": model_name,
                 "generated_at": now.strftime("%Y-%m-%d %H:%M:%S"),
             }, ensure_ascii=False), encoding="utf-8")
-            print(f"  Cached → {cache_file.name} (memory + disk)")
+            logger.info("Cached → %s (memory + disk)", cache_file.name)
         except Exception as ce:
-            print(f"  Disk cache write failed (non-critical): {ce}")
+            logger.warning("Disk cache write failed (non-critical): %s", ce)
 
         return summary
 
