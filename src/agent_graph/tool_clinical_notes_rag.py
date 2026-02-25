@@ -255,8 +255,15 @@ class ClinicalNotesRAGTool:
             else:
                 docs = rerank_pool[:self.k]
 
+            # Stage 5: Adjacent-chunk expansion
+            # SOAP notes and long sections often split across chunks.
+            # For each retrieved doc, also pull its chunk_index ± 1 neighbor
+            # from the same source file so the LLM gets complete context
+            # (e.g., full Day 7 SOAP with Assessment & Plan).
+            docs = self._expand_with_neighbors(docs)
+
             t_total = _time.perf_counter() - t0
-            logger.info("Search: %.2fs (dense=%.2fs, bm25=%.2fs, rerank+fuse=%.2fs) → %d docs",
+            logger.info("Search: %.2fs (dense=%.2fs, bm25=%.2fs, rerank+fuse+expand=%.2fs) → %d docs",
                         t_total, t_dense, t_bm25, t_total - t_dense - t_bm25, len(docs))
 
             # Render with section headers for clarity to the LLM
@@ -288,6 +295,89 @@ class ClinicalNotesRAGTool:
 
         sorted_keys = sorted(scores, key=scores.get, reverse=True)
         return [doc_map[k] for k in sorted_keys]
+
+    def _expand_with_neighbors(self, docs: list) -> list:
+        """Expand each retrieved document with its ±1 chunk-index neighbors.
+
+        Clinical SOAP notes and long sections often split across consecutive
+        chunks. A Day-specific query may retrieve the chunk that starts the
+        day entry but miss the chunk that contains the Assessment & Plan.
+
+        This method looks up neighbors from the BM25 docs cache (already in
+        memory), merges overlapping text between consecutive chunks, and
+        deduplicates by chunk_index to avoid sending duplicates to the LLM.
+
+        Returns a new list of Documents, ordered by (filename, chunk_index).
+        """
+        from langchain_core.documents import Document
+
+        if not self._bm25_docs:
+            return docs
+
+        # Build a lookup: (filename, chunk_index) → Document
+        idx_lookup: dict[tuple[str, int], object] = {}
+        for d in self._bm25_docs:
+            key = (d.metadata.get("filename", ""), d.metadata.get("chunk_index", -1))
+            idx_lookup[key] = d
+
+        # Collect original + neighbor chunk keys (deduplicated, preserving order)
+        seen_keys: set[tuple[str, int]] = set()
+        expanded_keys: list[tuple[str, int]] = []
+
+        for d in docs:
+            fname = d.metadata.get("filename", "")
+            cidx = d.metadata.get("chunk_index", -1)
+            if cidx < 0:
+                # No chunk_index metadata — keep original doc as-is
+                key = (fname, cidx)
+                if key not in seen_keys:
+                    seen_keys.add(key)
+                    expanded_keys.append(key)
+                    idx_lookup[key] = d
+                continue
+
+            # Add prev, current, next chunk (if they exist in the corpus)
+            for offset in (-1, 0, 1):
+                nkey = (fname, cidx + offset)
+                if nkey not in seen_keys and nkey in idx_lookup:
+                    seen_keys.add(nkey)
+                    expanded_keys.append(nkey)
+
+        # Sort by (filename, chunk_index) for coherent reading order
+        expanded_keys.sort(key=lambda k: (k[0], k[1]))
+
+        # Build expanded doc list, merging overlap between consecutive chunks
+        expanded: list[object] = []
+        prev_content: str | None = None
+        prev_key: tuple[str, int] | None = None
+
+        for key in expanded_keys:
+            d = idx_lookup[key]
+            content = d.page_content
+            fname, cidx = key
+
+            # If consecutive chunks from same file, strip overlap
+            if (prev_key and prev_key[0] == fname
+                    and prev_key[1] == cidx - 1 and prev_content):
+                overlap = self._find_overlap(prev_content, content)
+                if overlap > 0:
+                    content = content[overlap:]
+
+            if content.strip():
+                expanded.append(Document(
+                    page_content=content,
+                    metadata=d.metadata,
+                ))
+
+            prev_content = d.page_content  # original for overlap detection
+            prev_key = key
+
+        added = len(expanded) - len(docs)
+        if added > 0:
+            logger.info("Neighbor expansion: %d → %d chunks (+%d neighbors)",
+                        len(docs), len(expanded), added)
+
+        return expanded
 
     def get_all_chunks_for_patient(self, patient_mrn: str) -> str:
         """Retrieve ALL chunks for a specific patient by MRN, merge overlapping
@@ -361,6 +451,111 @@ class ClinicalNotesRAGTool:
             return "\n\n".join(merged_parts)
         except Exception as e:
             return f"Error retrieving patient data: {e}"
+
+    # ── Section-name patterns for "all orders" retrieval ──────────
+    ORDER_SECTION_PATTERNS: list[str] = [
+        "18a",                    # Laboratory Orders
+        "18b",                    # Medication Orders (New/Changed)
+        "18c",                    # Procedure Orders
+        "18d",                    # Referrals / Consultations Ordered
+        "19 DISCHARGE",           # Discharge Prescriptions (37 chunks)
+        "14 RECENT ORDERS",       # Recent outpatient orders
+        "22 DISCHARGE SUMMARY",   # Discharge disposition / dates
+        "1 PATIENT DEMOGRAPHICS", # Advance directive, code status
+    ]
+
+    def get_order_chunks_for_patient(self, patient_mrn: str) -> str:
+        """Retrieve ALL order-related chunks for a patient: labs, medications,
+        procedures, referrals, discharge prescriptions, care directives.
+
+        Uses metadata filtering on section_title to pull every chunk from
+        order-related sections, returning them organised by section.
+        """
+        try:
+            from qdrant_client.models import Filter, FieldCondition, MatchValue
+            import re as _re
+
+            t0 = _time.perf_counter()
+
+            results = self.client.scroll(
+                collection_name=self.collection_name,
+                scroll_filter=Filter(
+                    must=[
+                        FieldCondition(
+                            key="metadata.patient_mrn",
+                            match=MatchValue(value=patient_mrn),
+                        )
+                    ]
+                ),
+                limit=500,
+                with_payload=True,
+                with_vectors=False,
+            )
+
+            points = results[0]
+            if not points:
+                return f"No records found for patient MRN: {patient_mrn}"
+
+            # Filter to order-related sections (case-insensitive prefix match)
+            order_points = []
+            for p in points:
+                sec = p.payload.get("metadata", {}).get("section_title", "")
+                if any(sec.upper().startswith(pat.upper()) for pat in self.ORDER_SECTION_PATTERNS):
+                    order_points.append(p)
+
+            if not order_points:
+                return f"No order-related data found for patient MRN: {patient_mrn}"
+
+            # Sort by section_title then chunk_index for logical ordering
+            order_points.sort(
+                key=lambda p: (
+                    p.payload.get("metadata", {}).get("section_title", ""),
+                    p.payload.get("metadata", {}).get("chunk_index", 0),
+                )
+            )
+
+            # Group by section and merge overlapping text
+            current_section = None
+            parts: list[str] = []
+            prev_content: str | None = None
+            prev_source: str | None = None
+
+            for p in order_points:
+                meta = p.payload.get("metadata", {})
+                content = p.payload.get("page_content", "")
+                source = meta.get("filename", "")
+                sec = meta.get("section_title", "Section")
+
+                # Section separator for readability
+                if sec != current_section:
+                    if current_section is not None:
+                        parts.append("")  # blank line between sections
+                    current_section = sec
+                    prev_content = None  # reset overlap tracking at section boundary
+                    prev_source = None
+
+                # Strip overlap with previous chunk in same source
+                if prev_content and source == prev_source:
+                    overlap = self._find_overlap(prev_content, content)
+                    if overlap > 0:
+                        content = content[overlap:]
+
+                if content.strip():
+                    parts.append(f"[{sec}]\n{content}")
+
+                prev_content = p.payload.get("page_content", "")
+                prev_source = source
+
+            elapsed = _time.perf_counter() - t0
+            logger.info(
+                "Order retrieval: %d/%d chunks matched order sections for %s in %.2fs",
+                len(order_points), len(points), patient_mrn, elapsed,
+            )
+
+            return "\n\n".join(parts)
+
+        except Exception as e:
+            return f"Error retrieving order data: {e}"
 
     @staticmethod
     def _find_overlap(prev: str, curr: str, max_check: int = 250) -> int:
@@ -591,6 +786,30 @@ def lookup_clinical_notes(query: str) -> str:
         return rag.search(query)
     except Exception as e:
         return f"Error searching clinical notes: {e}. Ensure the vector database is initialized."
+
+
+@tool
+def lookup_patient_orders(patient_identifier: str) -> str:
+    """Retrieve ALL orders for a patient — laboratory orders (with CPT/LOINC codes), medication orders (with RxNorm codes), procedure orders (with CPT/SNOMED codes), referrals/consultations, discharge prescriptions, and care directives. Input is the patient name (e.g. 'Robert Whitfield') or MRN (e.g. 'MRN-2026-004782'). Use this when asked for 'all orders', 'complete order list', 'what was ordered', or any comprehensive orders query."""
+    try:
+        rag = get_rag_tool_instance()
+        t_start = _time.perf_counter()
+
+        # Resolve identifier to MRN
+        patient_mrn = rag.resolve_to_mrn(patient_identifier)
+        if not patient_mrn:
+            return (f"Could not find a patient matching '{patient_identifier}'. "
+                    f"Use list_available_patients to see who is in the database.")
+        logger.info("[Orders] Resolved '%s' → %s", patient_identifier, patient_mrn)
+
+        # Fetch all order-related chunks (section-filtered)
+        result = rag.get_order_chunks_for_patient(patient_mrn)
+
+        elapsed = _time.perf_counter() - t_start
+        logger.info("[Orders] Total retrieval: %.2fs for %s", elapsed, patient_mrn)
+        return result
+    except Exception as e:
+        return f"Error retrieving orders: {e}"
 
 
 @tool

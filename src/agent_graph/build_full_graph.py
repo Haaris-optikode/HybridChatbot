@@ -4,7 +4,7 @@ from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import StateGraph, START
 from langchain_openai import ChatOpenAI
 from langchain_core.messages import ToolMessage as _ToolMessage, AIMessage as _AIMessage
-from agent_graph.tool_clinical_notes_rag import lookup_clinical_notes, summarize_patient_record, list_available_patients
+from agent_graph.tool_clinical_notes_rag import lookup_clinical_notes, lookup_patient_orders, summarize_patient_record, list_available_patients
 from agent_graph.tool_tavily_search import load_tavily_search_tool
 from agent_graph.load_tools_config import LoadToolsConfig
 from agent_graph.agent_backend import State, BasicToolNode, route_tools, plot_agent_schema
@@ -86,16 +86,17 @@ def build_graph():
     synth_model = TOOLS_CFG.primary_agent_llm
 
     router_llm = _make_llm(router_model, timeout=15, max_tokens=300)
-    synth_llm = _make_llm(synth_model, timeout=30, max_tokens=2048)
+    synth_llm = _make_llm(synth_model, timeout=30, max_tokens=4096)
 
     logger.info("Router LLM: %s (timeout=15s)", router_model)
-    logger.info("Synthesizer LLM: %s (timeout=30s, max_tokens=2048)", synth_model)
+    logger.info("Synthesizer LLM: %s (timeout=30s, max_tokens=4096)", synth_model)
 
     # ── Build the graph ───────────────────────────────────────────────
     graph_builder = StateGraph(State)
     search_tool = load_tavily_search_tool(TOOLS_CFG.tavily_search_max_results)
     tools = [search_tool,
              lookup_clinical_notes,
+             lookup_patient_orders,
              summarize_patient_record,
              list_available_patients,
              ]
@@ -120,6 +121,7 @@ def build_graph():
         tools=[
             search_tool,
             lookup_clinical_notes,
+            lookup_patient_orders,
             summarize_patient_record,
             list_available_patients,
         ])

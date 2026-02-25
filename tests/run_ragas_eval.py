@@ -9,13 +9,13 @@ Measures retrieval and generation quality using RAGAS metrics:
 
 Usage:
     cd src
-    python ../eval/run_ragas_eval.py                     # evaluate with default test set
-    python ../eval/run_ragas_eval.py --output results.json  # save results to file
+    python ../tests/run_ragas_eval.py                      # evaluate with default test set
+    python ../tests/run_ragas_eval.py --output results.json # save results to file
 
 Requires:
     pip install ragas datasets
 
-The test dataset (eval/eval_dataset.json) contains sample Q&A pairs.
+The test dataset (tests/eval_dataset.json) contains sample Q&A pairs.
 Edit it with real clinical Q&A to get meaningful results.
 """
 import os
@@ -124,7 +124,7 @@ def evaluate_with_ragas(dataset: list[dict], contexts: list[list[str]], answers:
 
 def main():
     parser = argparse.ArgumentParser(description="RAGAS Evaluation for MedGraph AI")
-    parser.add_argument("--dataset", default=str(ROOT / "eval" / "eval_dataset.json"),
+    parser.add_argument("--dataset", default=str(ROOT / "tests" / "eval_dataset.json"),
                         help="Path to evaluation dataset JSON")
     parser.add_argument("--output", default=None, help="Save results to JSON file")
     parser.add_argument("--retrieval-only", action="store_true",

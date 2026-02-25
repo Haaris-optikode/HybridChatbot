@@ -393,6 +393,9 @@ class ClinicalNotesVectorizer:
 
             # ── Strategy 1: SOAP daily notes — split by Day boundaries
             is_soap = any(kw in section_title.upper() for kw in _SOAP_KEYWORDS)
+            # Also detect by content: if body contains "Day N —" SOAP boundaries
+            if not is_soap and len(SOAP_DAY_RE.findall(section_body)) >= 3:
+                is_soap = True
             if is_soap:
                 day_entries = _split_soap_daily_notes(section_body)
                 if day_entries:
