@@ -8,12 +8,6 @@
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
     <style>
-        /* â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
-           MedGraph AI â€” Professional Healthcare Platform Theme
-           Light-first design. Clean, clinical, trustworthy.
-           â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â• */
-
-        /* â”€â”€ LIGHT (default) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */
         :root,
         [data-theme="light"] {
             --bg-primary:    #f0f4f8;
@@ -47,7 +41,6 @@
             --transition:    0.15s ease;
         }
 
-        /* â”€â”€ DARK THEME â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */
         [data-theme="dark"] {
             --bg-primary:    #0f172a;
             --bg-secondary:  #1e293b;
@@ -76,9 +69,6 @@
             --shadow-lg:     0 8px 30px rgba(0,0,0,0.4);
         }
 
-        /* â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
-           RESET & BASE
-           â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â• */
         *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
 
         html, body {
@@ -96,9 +86,6 @@
         /* Hide legacy background elements */
         .bg-grid, .bg-orb { display: none !important; }
 
-        /* â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
-           LAYOUT
-           â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â• */
         .app-container {
             position: relative;
             z-index: 1;
@@ -106,9 +93,6 @@
             height: 100vh;
         }
 
-        /* â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
-           SIDEBAR
-           â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â• */
         .sidebar {
             width: 280px;
             min-width: 280px;
@@ -159,7 +143,6 @@
             font-weight: 500;
         }
 
-        /* â”€â”€ User info â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */
         .user-info {
             display: flex;
             align-items: center;
@@ -195,7 +178,7 @@
         }
         .logout-btn:hover { color: var(--red); background: var(--red-bg); }
 
-        /* â”€â”€ System status â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */
+
         .system-status {
             padding: 12px 18px;
             border-bottom: 1px solid var(--border-color);
@@ -1759,7 +1742,6 @@
         </main>
     </div>
     <script>
-        // ── Theme toggle ──────────────────────────────────────
         function toggleTheme() {
             const html = document.documentElement;
             const current = html.getAttribute('data-theme') || 'light';
@@ -1777,7 +1759,6 @@
             }
         })();
 
-        // ── State ─────────────────────────────────────────────────
         let sessionId = null;
         let queryCount = 0;
         let totalLatency = 0;
@@ -1786,7 +1767,6 @@
         let selectedTool = 'auto';        // tool override: auto, vector_db, web_search, sql
         const startTime = Date.now();
 
-        // ── Authentication ────────────────────────────────────────
         function getToken() { return localStorage.getItem('medgraph-token'); }
         function setToken(t) { localStorage.setItem('medgraph-token', t); }
         function clearToken() { localStorage.removeItem('medgraph-token'); localStorage.removeItem('medgraph-user'); }
@@ -1870,7 +1850,6 @@
             return resp;
         }
 
-        // ── Health check polling ──────────────────────────────────
         async function pollHealth() {
             try {
                 const resp = await fetch('/api/health');
@@ -1910,21 +1889,18 @@
             }
         }
 
-        // ── Init: check if already logged in ──────────────────────
         (function() {
             if (getToken()) {
                 showApp();
             }
         })();
 
-        // ── DOM refs ──────────────────────────────────────────────
         const chatArea = document.getElementById('chatArea');
         const welcomeScreen = document.getElementById('welcomeScreen');
         const messagesContainer = document.getElementById('messagesContainer');
         const messageInput = document.getElementById('messageInput');
         const sendBtn = document.getElementById('sendBtn');
 
-        // ── Uptime ticker ─────────────────────────────────────────
         setInterval(() => {
             const secs = Math.floor((Date.now() - startTime) / 1000);
             const m = Math.floor(secs / 60);
@@ -1932,7 +1908,6 @@
             document.getElementById('metricUptime').textContent = `${m}m ${s}s`;
         }, 1000);
 
-        // ── Input handling ────────────────────────────────────────
         messageInput.addEventListener('input', () => {
             sendBtn.disabled = !messageInput.value.trim();
         });
@@ -1957,7 +1932,6 @@
             sendMessage();
         }
 
-        // ── Markdown renderer (comprehensive) ────────────────────
         function renderMarkdown(text) {
             if (!text) return '';
 
@@ -2075,12 +2049,10 @@
             return text;
         }
 
-        // ── Time formatting ───────────────────────────────────────
         function formatTime(date) {
             return date.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
         }
 
-        // ── Add message to DOM ────────────────────────────────────
         function addMessage(role, content, latencyMs = null, timeStr = null) {
             welcomeScreen.style.display = 'none';
             messagesContainer.style.display = 'flex';
@@ -2147,7 +2119,6 @@
             return div.innerHTML;
         }
 
-        // ── Typing indicator ──────────────────────────────────────
         function showTyping() {
             const el = document.createElement('div');
             el.className = 'typing-indicator';
@@ -2263,7 +2234,6 @@
             });
         }
 
-        // ── Send message (SSE streaming) ──────────────────────────
         async function sendMessage() {
             const text = messageInput.value.trim();
             if (!text) return;
@@ -2391,7 +2361,6 @@
             sendBtn.disabled = !messageInput.value.trim();
         }
 
-        // ── Clear chat ────────────────────────────────────────────
         async function clearChat() {
             if (sessionId) {
                 try {
@@ -2417,7 +2386,6 @@
             document.querySelectorAll('.history-item.active').forEach(el => el.classList.remove('active'));
         }
 
-        // ── Dev tools (triple-click HIPAA badge to reveal) ──────
         (function() {
             let clickCount = 0, clickTimer = null;
             document.getElementById('hipaaBadge').addEventListener('click', () => {
@@ -2447,7 +2415,6 @@
             }
         }
 
-        // ── Export chat ───────────────────────────────────────────
         function exportChat() {
             const messages = messagesContainer.querySelectorAll('.message-row');
             if (messages.length === 0) return;
@@ -2468,10 +2435,8 @@
             a.click();
         }
 
-        // ── Focus input on load ───────────────────────────────────
         messageInput.focus();
 
-        // ── Feedback submission ───────────────────────────────────
         async function submitFeedback(btn, vote) {
             const actionsDiv = btn.parentElement;
             const allBtns = actionsDiv.querySelectorAll('.feedback-btn');
@@ -2523,7 +2488,6 @@
             }
         }
 
-        // ── Chat History ──────────────────────────────────────────
         async function loadChatHistory() {
             const historyList = document.getElementById('historyList');
             historyList.innerHTML = '<div class="history-loading"><i class="fa-solid fa-spinner fa-spin"></i> Loading...</div>';
@@ -2634,7 +2598,6 @@
 
         // Chat history is loaded in showApp() after auth
 
-        // ── Delete session from history ───────────────────────────
         async function deleteSession(sid, dateStr, btnEl) {
             const historyItem = btnEl.closest('.history-item');
 
@@ -2673,7 +2636,6 @@
             }
         }
 
-        // ── Tools selector ────────────────────────────────────────
         const TOOL_LABELS = {
             auto: 'Auto',
             vector_db: 'Clinical Notes',
