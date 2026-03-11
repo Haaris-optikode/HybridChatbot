@@ -36,7 +36,7 @@ import jwt
 import pandas as pd
 from pathlib import Path
 from datetime import datetime, date, timedelta
-from fastapi import FastAPI, Request, Depends, HTTPException, status
+from fastapi import FastAPI, Request, Depends, HTTPException, status, UploadFile, File
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
@@ -81,7 +81,7 @@ audit_logger.addHandler(_audit_file_handler)
 
 # ── LangGraph agent imports ──────────────────────────────────────────
 from chatbot.load_config import LoadProjectConfig
-from agent_graph.load_tools_config import LoadToolsConfig
+from agent_graph.load_tools_config import LoadToolsConfig, swap_google_api_key
 from agent_graph.build_full_graph import build_graph
 from utils.app_utils import create_directory
 from chatbot.memory import Memory
@@ -90,7 +90,8 @@ from langchain_core.messages import SystemMessage, HumanMessage, AIMessage
 PROJECT_CFG = LoadProjectConfig()
 TOOLS_CFG = LoadToolsConfig()
 
-graph = build_graph()
+graph = build_graph(thinking_mode=False)
+thinking_graph = build_graph(thinking_mode=True)
 create_directory("memory")
 
 MEMORY_DIR = str(PROJECT_CFG.memory_dir)
@@ -145,6 +146,27 @@ _cors_origins_raw = os.getenv("MEDGRAPH_CORS_ORIGINS", "http://localhost:7860,ht
 ALLOWED_ORIGINS = [o.strip() for o in _cors_origins_raw.split(",") if o.strip()]
 logger.info("CORS allowed origins: %s", ALLOWED_ORIGINS)
 
+
+def _normalize_content(content) -> str:
+    """Normalize LLM message content to a plain string.
+    Gemini returns content as a list of parts: [{"type": "text", "text": "..."}]
+    Gemini thinking models include [{"type":"thinking",...}, {"type":"text",...}]
+    OpenAI returns a plain string. This function handles all forms."""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = []
+        for item in content:
+            if isinstance(item, dict):
+                # Skip thinking/reasoning parts from Gemini thinking models
+                if item.get("type") == "thinking":
+                    continue
+                parts.append(item.get("text", ""))
+            elif isinstance(item, str):
+                parts.append(item)
+        return "".join(parts)
+    return str(content) if content else ""
+
 # ── Rate Limiting ────────────────────────────────────────────────────
 limiter = Limiter(key_func=get_remote_address)
 
@@ -162,7 +184,7 @@ async def _rate_limit_handler(request: Request, exc: RateLimitExceeded):
 app.add_middleware(
     CORSMiddleware,
     allow_origins=ALLOWED_ORIGINS,
-    allow_methods=["GET", "POST"],
+    allow_methods=["GET", "POST", "DELETE"],
     allow_headers=["Authorization", "Content-Type"],
     allow_credentials=True,
 )
@@ -229,13 +251,16 @@ SYSTEM_PROMPT = """You are MedGraph AI, a clinical intelligence assistant. Tools
 3. **summarize_patient_record(patient_identifier)** — ONLY for full clinical summaries/overviews. Accepts patient NAME or MRN.
 4. **list_available_patients()** — List all patients in the database.
 5. **tavily_search_results_json(query)** — Web search for general medical knowledge.
+6. **list_uploaded_documents()** — List all uploaded documents with their IDs, filenames, and processing status.
 
 TOOL SELECTION (strict):
 - ANY specific question about a patient (DOB, allergies, meds, labs, vitals, diagnoses, procedures, imaging, history) → `lookup_clinical_notes`
 - Queries asking for "all orders", "complete order list", "what was ordered", "list all medications/labs/procedures/referrals", or any COMPREHENSIVE orders request → `lookup_patient_orders`
-- ONLY when asked to "summarize", "overview", or "review the full record" → `summarize_patient_record`
+- ONLY when the user explicitly asks to "summarize the record", "give me an overview", or "review the full record" with NO specific analytical question → `summarize_patient_record`
+- ANALYTICAL questions that mention a patient (readmission risk, differential diagnosis, treatment effectiveness, drug interactions, risk factors, prognosis, clinical reasoning) → `lookup_clinical_notes` (use MULTIPLE targeted searches to gather all relevant data, then synthesize)
 - General medical knowledge → `tavily_search_results_json`
 - Do NOT use `summarize_patient_record` for specific factual lookups like DOB, allergies, or medication lists.
+- Do NOT use `summarize_patient_record` when the user asks an analytical or reasoning question — even if they say "synthesize" or "analyze". Use `lookup_clinical_notes` with multiple targeted queries instead.
 - Do NOT use `lookup_clinical_notes` when the user wants ALL orders — use `lookup_patient_orders` instead.
 
 ANSWER RULES:
@@ -244,8 +269,23 @@ ANSWER RULES:
 - When presenting orders, include ALL available details: CPT codes, LOINC codes, RxNorm codes, SNOMED codes, dosages, frequencies, dates, and descriptions. Present them in organized sections.
 - Include patient name and MRN when discussing patient data.
 - Pay careful attention to TEMPORAL context: distinguish between admission/home medications vs discharge/new medications. If the question asks about admission or home meds, report what the patient was taking BEFORE hospitalization, not what was started or changed during the stay.
-- When `summarize_patient_record` output is returned, pass it through verbatim.
+- When `summarize_patient_record` output is returned, use it as context to answer the user's original question. If the user asked an analytical question, DO NOT just pass through the raw summary — synthesize a targeted answer.
 - When `lookup_patient_orders` output is returned, organize the response by order category (Lab Orders, Medication Orders, Procedure Orders, Referrals, Discharge Prescriptions, Care Directives) and include ALL codes and details from the data.
+
+RESPONSE STYLE:
+- Write like a clinician briefing a colleague — clear, professional, concise.
+- Synthesize retrieved data into a coherent answer. Do NOT just repeat raw chunks or bullet-dump metadata.
+- Include reference ranges for abnormal lab values and flag severity (e.g., "BNP 1,842 pg/mL [Critical High, ref <100]").
+- Use bullet points and bold for key values. Use headers only when the answer has 3+ distinct categories.
+- For medication lists, include dose, route, frequency. Add indication only when the question asks about it.
+- Keep answers focused: answer what was asked, include essential clinical context, then stop. Do NOT exhaustively list every related finding unless specifically asked for a comprehensive review.
+- Target 80–150 words for simple queries, 200–500 words for complex multi-part questions. For comprehensive analytical questions (readmission risk, treatment analysis), use as many words as needed to be thorough.
+
+SOURCE GROUNDING (Critical — prevents hallucination):
+- Every factual claim MUST come from the retrieved sources. Cite as "(Source: [Section], Page X)" at the end of relevant paragraphs or sections, not after every single sentence.
+- If the sources do NOT contain the answer, say: "The available clinical records do not contain information about [topic]." Do NOT guess or fill gaps.
+- NEVER extrapolate beyond what is explicitly stated. If a value is not documented, do not estimate it.
+- When sources contain contradictory information, report both values and note the discrepancy.
 
 SEARCH QUERY TIPS (for `lookup_clinical_notes`):
 - Include specific clinical terms, day numbers, and section names in the query.
@@ -396,6 +436,7 @@ class ChatRequest(BaseModel):
     message: str
     session_id: Optional[str] = None
     tool_override: Optional[str] = None  # "vector_db", "web_search" or None (auto)
+    thinking: Optional[bool] = False     # use deeper reasoning model when True
 
 
 class ChatResponse(BaseModel):
@@ -458,6 +499,7 @@ async def generate_token(req: TokenRequest, request: Request):
 @app.post("/api/chat", response_model=ChatResponse)
 @limiter.limit("30/minute")
 async def chat(req: ChatRequest, request: Request, user: dict = Depends(get_current_user)):
+    global graph, thinking_graph
     t0 = time.perf_counter()
     validated_msg = _validate_message(req.message)
     _audit_log("chat_request", user, tool_override=req.tool_override or "auto")
@@ -482,17 +524,30 @@ async def chat(req: ChatRequest, request: Request, user: dict = Depends(get_curr
 
     # Run through LangGraph agent — with retry on transient LLM errors
     config = {"configurable": {"thread_id": sid}}
+    active_graph = thinking_graph if req.thinking else graph
     max_retries = 2
     for attempt in range(max_retries + 1):
         try:
-            events = list(graph.stream(
+            events = list(active_graph.stream(
                 {"messages": messages}, config, stream_mode="values"
             ))
-            reply = events[-1]["messages"][-1].content
+            reply = _normalize_content(events[-1]["messages"][-1].content)
             break
         except Exception as exc:
             exc_str = str(exc).lower()
-            is_transient = any(k in exc_str for k in ["rate limit", "429", "timeout", "timed out", "overloaded", "503"])
+            is_rate_limit = any(k in exc_str for k in ["rate limit", "429", "resource_exhausted", "quota"])
+            is_transient = is_rate_limit or any(k in exc_str for k in ["timeout", "timed out", "overloaded", "503"])
+            if is_rate_limit:
+                swapped = swap_google_api_key()
+                if swapped:
+                    graph = build_graph(thinking_mode=False)
+                    thinking_graph = build_graph(thinking_mode=True)
+                    active_graph = thinking_graph if req.thinking else graph
+                    logger.warning("Rebuilt graphs with backup API key after rate limit")
+                elif req.thinking and active_graph is not graph:
+                    # Thinking model quota exhausted on all keys — fall back to normal graph
+                    active_graph = graph
+                    logger.warning("Thinking model quota exhausted, falling back to normal graph")
             if is_transient and attempt < max_retries:
                 wait = (attempt + 1) * 5  # 5s, 10s
                 logger.warning("Transient LLM error (attempt %d/%d), retrying in %ds: %s",
@@ -540,6 +595,7 @@ _TOOL_STATUS = {
 @limiter.limit("30/minute")
 async def chat_stream(req: ChatRequest, request: Request, user: dict = Depends(get_current_user)):
     """SSE endpoint — runs graph in a thread, relays updates via queue."""
+    global graph, thinking_graph
     t0 = time.perf_counter()
     _audit_log("chat_stream_request", user, tool_override=req.tool_override or "auto")
 
@@ -562,20 +618,43 @@ async def chat_stream(req: ChatRequest, request: Request, user: dict = Depends(g
     messages.append(HumanMessage(content=validated_msg))
 
     config = {"configurable": {"thread_id": sid}}
+    active_graph = thinking_graph if req.thinking else graph
 
     # ── Thread-safe queue bridges sync graph → async SSE generator ──
     q: _queue_mod.Queue = _queue_mod.Queue()
+    _graph_holder = {"active": active_graph}
 
     def _run_graph():
-        """Runs the sync graph.stream() in a background thread."""
-        try:
-            for update in graph.stream(
-                {"messages": messages}, config, stream_mode="updates"
-            ):
-                q.put(("update", update))
-            q.put(("end", None))
-        except Exception as exc:
-            q.put(("error", str(exc)))
+        """Runs the sync graph.stream() in a background thread, with key-swap retry."""
+        global graph, thinking_graph
+        max_retries = 2
+        for attempt in range(max_retries + 1):
+            try:
+                for update in _graph_holder["active"].stream(
+                    {"messages": messages}, config, stream_mode="updates"
+                ):
+                    q.put(("update", update))
+                q.put(("end", None))
+                return
+            except Exception as exc:
+                exc_str = str(exc).lower()
+                is_rate_limit = any(k in exc_str for k in ["rate limit", "429", "resource_exhausted", "quota"])
+                if is_rate_limit and attempt < max_retries:
+                    swapped = swap_google_api_key()
+                    if swapped:
+                        graph = build_graph(thinking_mode=False)
+                        thinking_graph = build_graph(thinking_mode=True)
+                        _graph_holder["active"] = thinking_graph if req.thinking else graph
+                        logger.warning("Rebuilt graphs with backup API key (SSE), retrying...")
+                    elif req.thinking and _graph_holder["active"] is not graph:
+                        # Thinking model quota exhausted — fall back to normal graph
+                        _graph_holder["active"] = graph
+                        logger.warning("Thinking model quota exhausted (SSE), falling back to normal graph")
+                    import time as _t
+                    _t.sleep(3)
+                    continue
+                q.put(("error", str(exc)))
+                return
 
     async def event_generator():
         full_response = ""
@@ -605,29 +684,17 @@ async def chat_stream(req: ChatRequest, request: Request, user: dict = Depends(g
                 # router / synthesizer are the LLM nodes (split architecture)
                 if node_name in ("router", "synthesizer", "chatbot"):
                     for m in msgs:
-                        content = getattr(m, "content", "")
+                        content = _normalize_content(getattr(m, "content", ""))
                         tool_calls = getattr(m, "tool_calls", [])
                         if tool_calls:
                             for tc in tool_calls:
                                 tc_name = tc.get("name", "") if isinstance(tc, dict) else getattr(tc, "name", "")
                                 status = _TOOL_STATUS.get(tc_name, f"Running {tc_name}...")
                                 yield f"data: {json.dumps({'type': 'status', 'content': status})}\n\n"
-                        elif content:
+                        elif content and node_name != "router":
+                            # Only emit content from synthesizer — router is for tool selection only
                             full_response = content
                             yield f"data: {json.dumps({'type': 'token', 'content': content})}\n\n"
-
-                elif node_name == "summary_passthrough":
-                    for m in msgs:
-                        content = getattr(m, "content", "")
-                        if content:
-                            full_response = content
-                            # Stream the summary progressively in chunks (P2.20)
-                            # instead of dumping 15K+ chars as a single blob
-                            _CHUNK_SIZE = 120  # chars per SSE frame
-                            for i in range(0, len(content), _CHUNK_SIZE):
-                                chunk = content[i:i + _CHUNK_SIZE]
-                                yield f"data: {json.dumps({'type': 'token', 'content': chunk})}\n\n"
-                                await asyncio.sleep(0.01)  # ~10ms pacing for smooth render
 
         # ── Session & memory persistence ──────────────────────────
         elapsed_ms = int((time.perf_counter() - t0) * 1000)
@@ -691,22 +758,35 @@ async def health():
         checks["qdrant"] = {"status": "error", "detail": str(e)}
         checks["status"] = "degraded"
 
-    # ── OpenAI API check (lightweight models.list call) ──────────
+    # ── LLM API check (provider-aware) ──────────────────────────────
+    provider = getattr(TOOLS_CFG, "llm_provider", "openai")
     try:
         import httpx
-        api_key = os.getenv("OPENAI_API_KEY", "")
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            resp = await client.get(
-                "https://api.openai.com/v1/models",
-                headers={"Authorization": f"Bearer {api_key}"},
-            )
-            if resp.status_code == 200:
-                checks["openai"] = {"status": "ok"}
-            else:
-                checks["openai"] = {"status": "error", "http_status": resp.status_code}
-                checks["status"] = "degraded"
+        if provider == "google" or TOOLS_CFG.primary_agent_llm.startswith("gemini"):
+            api_key = os.getenv("GOOGLE_API_KEY", os.getenv("GOOGLE_AI_API_KEY", ""))
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                resp = await client.get(
+                    f"https://generativelanguage.googleapis.com/v1beta/models?key={api_key}",
+                )
+                if resp.status_code == 200:
+                    checks["llm"] = {"status": "ok", "provider": "google"}
+                else:
+                    checks["llm"] = {"status": "error", "provider": "google", "http_status": resp.status_code}
+                    checks["status"] = "degraded"
+        else:
+            api_key = os.getenv("OPENAI_API_KEY", "")
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                resp = await client.get(
+                    "https://api.openai.com/v1/models",
+                    headers={"Authorization": f"Bearer {api_key}"},
+                )
+                if resp.status_code == 200:
+                    checks["llm"] = {"status": "ok", "provider": "openai"}
+                else:
+                    checks["llm"] = {"status": "error", "provider": "openai", "http_status": resp.status_code}
+                    checks["status"] = "degraded"
     except Exception as e:
-        checks["openai"] = {"status": "error", "detail": str(e)}
+        checks["llm"] = {"status": "error", "detail": str(e)}
         checks["status"] = "degraded"
 
     return checks
@@ -876,6 +956,232 @@ async def load_session(session_id: str, date: Optional[str] = None, user: dict =
         sessions.set(session_id, restored)
 
     return {"messages": all_messages, "session_id": session_id}
+
+
+# ── Document Upload / Management ─────────────────────────────────────
+
+UPLOADS_DIR = TOOLS_CFG.clinical_notes_rag_uploads_directory
+os.makedirs(UPLOADS_DIR, exist_ok=True)
+_DOCUMENTS_META_PATH = os.path.join(UPLOADS_DIR, "documents.json")
+_documents_lock = _threading.Lock()
+
+MAX_UPLOAD_SIZE = TOOLS_CFG.clinical_notes_rag_max_upload_size_mb * 1024 * 1024
+SUPPORTED_FORMATS = set(TOOLS_CFG.clinical_notes_rag_supported_formats)
+
+
+def _load_documents_meta() -> Dict[str, dict]:
+    """Load the document metadata registry from disk."""
+    if os.path.exists(_DOCUMENTS_META_PATH):
+        with open(_DOCUMENTS_META_PATH, "r", encoding="utf-8") as f:
+            return json.load(f)
+    return {}
+
+
+def _save_documents_meta(meta: Dict[str, dict]) -> None:
+    """Persist the document metadata registry to disk."""
+    with open(_DOCUMENTS_META_PATH, "w", encoding="utf-8") as f:
+        json.dump(meta, f, indent=2, default=str)
+
+
+def _vectorize_in_background(document_id: str, pdf_path: str, collection_name: str):
+    """Run vectorization in a background thread and update metadata on completion."""
+    try:
+        from document_processing import process_document
+        from agent_graph.tool_clinical_notes_rag import get_rag_tool_instance
+        from langchain_qdrant import QdrantVectorStore
+
+        # Process PDF into chunks (no Qdrant client needed for this step)
+        documents = process_document(
+            pdf_path=pdf_path,
+            chunk_size=TOOLS_CFG.clinical_notes_rag_chunk_size,
+            chunk_overlap=TOOLS_CFG.clinical_notes_rag_chunk_overlap,
+            document_id=document_id,
+        )
+
+        # Reuse the RAG tool's existing Qdrant client and vector store
+        # (embedded mode only allows a single client instance per storage path)
+        rag = get_rag_tool_instance()
+        vector_store = QdrantVectorStore(
+            client=rag.client,
+            collection_name=collection_name,
+            embedding=rag.vectordb.embeddings,
+        )
+
+        batch_size = 20
+        for i in range(0, len(documents), batch_size):
+            batch = documents[i : i + batch_size]
+            vector_store.add_documents(batch)
+            logger.info("Uploaded %d/%d chunks for %s", min(i + batch_size, len(documents)), len(documents), document_id)
+
+        # Refresh the BM25 index
+        try:
+            rag._build_bm25_index()
+            logger.info("BM25 index refreshed after document upload: %s", document_id)
+        except Exception as e:
+            logger.warning("Could not refresh BM25 index: %s", e)
+
+        with _documents_lock:
+            meta = _load_documents_meta()
+            if document_id in meta:
+                meta[document_id]["status"] = "ready"
+                meta[document_id]["chunks"] = len(documents)
+                meta[document_id]["completed_at"] = datetime.utcnow().isoformat() + "Z"
+                _save_documents_meta(meta)
+
+        logger.info("Document vectorized successfully: %s (%d chunks)", document_id, len(documents))
+
+    except Exception as e:
+        logger.error("Vectorization failed for %s: %s", document_id, str(e))
+        with _documents_lock:
+            meta = _load_documents_meta()
+            if document_id in meta:
+                meta[document_id]["status"] = "error"
+                meta[document_id]["error"] = str(e)[:500]
+                _save_documents_meta(meta)
+
+
+@app.post("/api/documents/upload")
+@limiter.limit("10/minute")
+async def upload_document(
+    request: Request,
+    file: UploadFile = File(...),
+    user: dict = Depends(get_current_user),
+):
+    """Upload a PDF document for vectorization and RAG querying.
+
+    The file is saved to disk and vectorized in the background.
+    Returns a document_id that can be used to check status or delete the document.
+    """
+    # Validate file extension
+    filename = file.filename or "unknown"
+    ext = os.path.splitext(filename)[1].lower()
+    if ext not in SUPPORTED_FORMATS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unsupported file format '{ext}'. Supported: {', '.join(SUPPORTED_FORMATS)}",
+        )
+
+    # Read and validate file size
+    content = await file.read()
+    if len(content) > MAX_UPLOAD_SIZE:
+        raise HTTPException(
+            status_code=400,
+            detail=f"File too large ({len(content) / 1024 / 1024:.1f} MB). Max: {TOOLS_CFG.clinical_notes_rag_max_upload_size_mb} MB.",
+        )
+    if len(content) == 0:
+        raise HTTPException(status_code=400, detail="Empty file.")
+
+    # Generate document ID and save file
+    document_id = str(uuid.uuid4())
+    safe_filename = f"{document_id}{ext}"
+    pdf_path = os.path.join(UPLOADS_DIR, safe_filename)
+
+    with open(pdf_path, "wb") as f:
+        f.write(content)
+
+    # Register in metadata
+    with _documents_lock:
+        meta = _load_documents_meta()
+        meta[document_id] = {
+            "document_id": document_id,
+            "original_filename": filename,
+            "file_path": safe_filename,
+            "status": "processing",
+            "uploaded_at": datetime.utcnow().isoformat() + "Z",
+            "uploaded_by": user.get("sub", "unknown"),
+            "file_size_bytes": len(content),
+        }
+        _save_documents_meta(meta)
+
+    _audit_log("document_upload", user, document_id=document_id, filename=filename)
+
+    # Start vectorization in background
+    collection_name = TOOLS_CFG.clinical_notes_rag_collection_name
+    thread = _threading.Thread(
+        target=_vectorize_in_background,
+        args=(document_id, pdf_path, collection_name),
+        daemon=True,
+    )
+    thread.start()
+
+    return {
+        "document_id": document_id,
+        "filename": filename,
+        "status": "processing",
+        "message": "Document uploaded. Vectorization in progress.",
+    }
+
+
+@app.get("/api/documents")
+async def list_documents(user: dict = Depends(get_current_user)):
+    """List all uploaded documents with their processing status."""
+    with _documents_lock:
+        meta = _load_documents_meta()
+    documents = sorted(meta.values(), key=lambda d: d.get("uploaded_at", ""), reverse=True)
+    return {"documents": documents}
+
+
+@app.get("/api/documents/{document_id}")
+async def get_document_status(document_id: str, user: dict = Depends(get_current_user)):
+    """Get the status of a specific uploaded document."""
+    with _documents_lock:
+        meta = _load_documents_meta()
+    doc = meta.get(document_id)
+    if not doc:
+        raise HTTPException(status_code=404, detail="Document not found.")
+    return doc
+
+
+@app.delete("/api/documents/{document_id}")
+async def delete_document(document_id: str, user: dict = Depends(get_current_user)):
+    """Delete an uploaded document and its vectors from the collection."""
+    _audit_log("document_delete", user, document_id=document_id)
+
+    with _documents_lock:
+        meta = _load_documents_meta()
+        doc = meta.get(document_id)
+        if not doc:
+            raise HTTPException(status_code=404, detail="Document not found.")
+
+        # Remove file from disk
+        file_path = os.path.join(UPLOADS_DIR, doc.get("file_path", ""))
+        if os.path.exists(file_path):
+            os.remove(file_path)
+
+        # Remove from metadata
+        del meta[document_id]
+        _save_documents_meta(meta)
+
+    # Remove vectors from Qdrant (reuse RAG tool's client for embedded mode)
+    try:
+        from qdrant_client.models import Filter, FieldCondition, MatchValue
+        from agent_graph.tool_clinical_notes_rag import get_rag_tool_instance
+
+        rag = get_rag_tool_instance()
+        collection_name = TOOLS_CFG.clinical_notes_rag_collection_name
+        rag.client.delete(
+            collection_name=collection_name,
+            points_selector=Filter(
+                must=[
+                    FieldCondition(
+                        key="metadata.document_id",
+                        match=MatchValue(value=document_id),
+                    )
+                ]
+            ),
+        )
+        logger.info("Deleted vectors for document %s", document_id)
+
+        # Refresh BM25 index
+        try:
+            rag._build_bm25_index()
+        except Exception:
+            pass
+
+    except Exception as e:
+        logger.error("Failed to delete vectors for %s: %s", document_id, str(e))
+
+    return {"status": "deleted", "document_id": document_id}
 
 
 # ── Feedback API ─────────────────────────────────────────────────────

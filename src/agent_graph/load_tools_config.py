@@ -26,20 +26,56 @@ def _configure_langsmith():
 _configure_langsmith()
 
 
+# ── Google API key manager (automatic fallback) ─────────────────────
+import logging as _logging
+_key_logger = _logging.getLogger(__name__)
+
+_GOOGLE_API_KEYS = [
+    os.getenv("GOOGLE_AI_API_KEY", ""),
+    os.getenv("GOOGLE_AI_API_KEY2", ""),
+]
+_GOOGLE_API_KEYS = [k for k in _GOOGLE_API_KEYS if k]  # drop empty
+_active_key_index = 0
+
+
+def get_google_api_key() -> str:
+    """Return the currently active Google API key."""
+    if not _GOOGLE_API_KEYS:
+        return ""
+    return _GOOGLE_API_KEYS[_active_key_index]
+
+
+def swap_google_api_key() -> bool:
+    """Switch to the backup Google API key. Returns True if swap succeeded."""
+    global _active_key_index
+    next_idx = _active_key_index + 1
+    if next_idx < len(_GOOGLE_API_KEYS) and _GOOGLE_API_KEYS[next_idx]:
+        _active_key_index = next_idx
+        os.environ["GOOGLE_API_KEY"] = _GOOGLE_API_KEYS[next_idx]
+        _key_logger.warning("Switched to backup Google API key (index %d)", next_idx)
+        return True
+    _key_logger.warning("No more backup Google API keys available")
+    return False
+
+
 class LoadToolsConfig:
     def __init__(self) -> None:
         with open(here("configs/tools_config.yml")) as cfg:
             app_config = yaml.load(cfg, Loader=yaml.FullLoader)
 
-        # Set environment variables — use official OpenAI key
+        # Set environment variables
         os.environ['OPENAI_API_KEY'] = os.getenv("OPENAI_API_KEY", "")
+        os.environ['GOOGLE_API_KEY'] = os.getenv("GOOGLE_AI_API_KEY", os.getenv("GOOGLE_API_KEY", ""))
         os.environ['TAVILY_API_KEY'] = os.getenv("TAVILY_API_KEY", "")
 
         # Primary agent
         self.primary_agent_llm = app_config["primary_agent"]["llm"]
         self.primary_agent_router_llm = app_config["primary_agent"].get(
             "router_llm", app_config["primary_agent"]["llm"])  # fast model for tool routing
+        self.primary_agent_thinking_llm = app_config["primary_agent"].get(
+            "thinking_llm", "gemini-2.5-pro")  # deeper reasoning model
         self.primary_agent_llm_temperature = app_config["primary_agent"]["llm_temperature"]
+        self.llm_provider = app_config["primary_agent"].get("llm_provider", "openai")  # "google" or "openai"
 
         # Internet Search config
         self.tavily_search_max_results = int(
@@ -69,6 +105,12 @@ class LoadToolsConfig:
             app_config["clinical_notes_rag"].get("reranker_top_k", 6))
         self.clinical_notes_rag_qdrant_url = app_config["clinical_notes_rag"].get("qdrant_url", "http://localhost:6333")
         self.clinical_notes_rag_qdrant_api_key = app_config["clinical_notes_rag"].get("qdrant_api_key") or os.getenv("QDRANT_API_KEY", "")
+        self.clinical_notes_rag_uploads_directory = str(here(
+            app_config["clinical_notes_rag"].get("uploads_directory", "data/uploads")))
+        self.clinical_notes_rag_max_upload_size_mb = int(
+            app_config["clinical_notes_rag"].get("max_upload_size_mb", 50))
+        self.clinical_notes_rag_supported_formats = app_config["clinical_notes_rag"].get(
+            "supported_formats", [".pdf"])
 
         # Graph configs
         self.thread_id = str(

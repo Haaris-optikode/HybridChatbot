@@ -1,12 +1,14 @@
 primary_agent:
-  llm: gpt-4.1-mini            # Fast non-reasoning model for all LLM calls
-  router_llm: gpt-4.1-mini     # Same fast model for tool routing
-  llm_temperature: 0.0
+  llm: gemini-flash-latest        # Google Gemini Flash — auto-resolves to best available
+  router_llm: gemini-flash-latest
+  thinking_llm: gemini-2.5-pro    # Deeper reasoning model — used when "Thinking" toggle is on
+  llm_temperature: 0.3
+  llm_provider: google           # "google" for Gemini, "openai" for GPT models
 
 clinical_notes_rag:
-  llm: gpt-4.1-mini
-  summarization_llm: gpt-4.1-mini
-  llm_temperature: 0.0
+  llm: gemini-flash-latest
+  summarization_llm: gemini-flash-latest
+  llm_temperature: 0.2
   embedding_model: NeuML/pubmedbert-base-embeddings
   embedding_dimensions: 768
   vectordb: data/clinical_notes_vectordb
@@ -20,6 +22,10 @@ clinical_notes_rag:
   reranker_top_k: 8
   qdrant_url: ""  # empty = embedded mode (no Docker needed). Set to "http://localhost:6333" for Docker.
   qdrant_api_key: ""
+  uploads_directory: data/uploads  # where uploaded documents are stored
+  max_upload_size_mb: 50           # max file size per upload
+  supported_formats:               # accepted file extensions
+    - .pdf
 
 langsmith:
   tracing: "false"  # Set to "true" to enable LangSmith agent tracing. Requires LANGCHAIN_API_KEY in .env.

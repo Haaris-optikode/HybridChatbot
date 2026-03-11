@@ -27,6 +27,8 @@ sys.path.insert(0, str(SRC))
 
 # Patch env before any app imports
 os.environ.setdefault("OPENAI_API_KEY", "test-key-not-real")
+os.environ.setdefault("GOOGLE_API_KEY", "test-key-not-real")
+os.environ.setdefault("GOOGLE_AI_API_KEY", "test-key-not-real")
 os.environ.setdefault("TAVILY_API_KEY", "test-key-not-real")
 
 
@@ -227,16 +229,15 @@ class TestJWTAuth:
             self.verify("definitely-not-a-valid-token")
 
 
-class TestQueryRewriting:
-    """Test the LLM query rewrite function (P2.19)."""
+class TestRelevanceFiltering:
+    """Test that search rejects low-relevance results (replaces removed _rewrite_query)."""
 
-    def test_fallback_on_error(self):
-        """If the LLM call fails, should return original query."""
-        from agent_graph.tool_clinical_notes_rag import _rewrite_query
-        with patch("agent_graph.tool_clinical_notes_rag.ChatOpenAI") as mock_llm_cls:
-            mock_llm_cls.return_value.invoke.side_effect = Exception("API down")
-            result = _rewrite_query("patient medications")
-            assert result == "patient medications"
+    def test_min_reranker_score_threshold_exists(self):
+        """Verify the relevance filtering threshold is defined in the search method."""
+        import inspect
+        from agent_graph.tool_clinical_notes_rag import ClinicalNotesRAGTool
+        source = inspect.getsource(ClinicalNotesRAGTool.search)
+        assert "_MIN_RERANKER_SCORE" in source, "Relevance threshold should be defined in search()"
 
 
 class TestReciprocalRankFusion:
@@ -271,6 +272,46 @@ class TestReciprocalRankFusion:
         fused = ClinicalNotesRAGTool._reciprocal_rank_fusion(docs1, docs2)
         # 5 + 5 with 2 overlapping = 8 unique
         assert len(fused) == 8
+
+
+class TestMapReduceSummarization:
+    """Test the map-reduce parallel summarization (speed fix)."""
+
+    def test_map_reduce_threshold_defined(self):
+        """Verify the threshold constant exists."""
+        from agent_graph.tool_clinical_notes_rag import _MAP_REDUCE_THRESHOLD
+        assert _MAP_REDUCE_THRESHOLD == 30_000
+
+    def test_map_reduce_function_exists(self):
+        """Verify the map-reduce function is importable."""
+        from agent_graph.tool_clinical_notes_rag import _map_reduce_summarize
+        assert callable(_map_reduce_summarize)
+
+    def test_map_extract_prompt_has_grounding_rules(self):
+        """The MAP prompt must enforce brevity and factual extraction."""
+        from agent_graph.tool_clinical_notes_rag import _MAP_EXTRACT_PROMPT
+        assert "exact" in _MAP_EXTRACT_PROMPT.lower()
+        assert "bullet" in _MAP_EXTRACT_PROMPT.lower()
+
+    def test_summary_prompt_has_grounding_rules(self):
+        """The SUMMARY prompt must enforce strict source grounding."""
+        from agent_graph.tool_clinical_notes_rag import _SUMMARY_PROMPT
+        assert "STRICT GROUNDING RULES" in _SUMMARY_PROMPT
+        assert "No data documented" in _SUMMARY_PROMPT
+        assert "[ABNORMAL]" in _SUMMARY_PROMPT
+
+
+class TestCitationFormat:
+    """Test that search output includes source citations for grounding."""
+
+    def test_search_output_format_has_source_tags(self):
+        """Verify the search render format includes citation metadata."""
+        import inspect
+        from agent_graph.tool_clinical_notes_rag import ClinicalNotesRAGTool
+        source = inspect.getsource(ClinicalNotesRAGTool.search)
+        assert "Source" in source
+        assert "Page" in source
+        assert "Section:" in source
 
 
 class TestLangSmithConfig:
@@ -347,10 +388,10 @@ class TestHealthEndpoint:
         assert "qdrant" in data
         assert data["qdrant"]["status"] in ("ok", "error")
 
-    def test_health_has_openai_section(self, client):
+    def test_health_has_llm_section(self, client):
         r = client.get("/api/health")
         data = r.json()
-        assert "openai" in data
+        assert "llm" in data
 
     def test_health_has_model_field(self, client):
         r = client.get("/api/health")

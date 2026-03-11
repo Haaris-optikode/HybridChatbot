@@ -4,9 +4,9 @@ from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import StateGraph, START
 from langchain_openai import ChatOpenAI
 from langchain_core.messages import ToolMessage as _ToolMessage, AIMessage as _AIMessage
-from agent_graph.tool_clinical_notes_rag import lookup_clinical_notes, lookup_patient_orders, summarize_patient_record, list_available_patients
+from agent_graph.tool_clinical_notes_rag import lookup_clinical_notes, lookup_patient_orders, summarize_patient_record, list_available_patients, list_uploaded_documents
 from agent_graph.tool_tavily_search import load_tavily_search_tool
-from agent_graph.load_tools_config import LoadToolsConfig
+from agent_graph.load_tools_config import LoadToolsConfig, get_google_api_key
 from agent_graph.agent_backend import State, BasicToolNode, route_tools, plot_agent_schema
 import os
 import json as _json
@@ -25,8 +25,30 @@ def _is_reasoning_model(model_name: str) -> bool:
     return any(model_name.lower().startswith(p) for p in _reasoning_prefixes)
 
 
-def _make_llm(model_name: str, timeout: int = 60, max_tokens: int = None) -> ChatOpenAI:
-    """Create a ChatOpenAI instance with appropriate params for reasoning vs non-reasoning models."""
+def _make_llm(model_name: str, timeout: int = 60, max_tokens: int = None, thinking_budget: int = 0):
+    """Create a Chat LLM instance — auto-selects Google Gemini or OpenAI based on config."""
+    provider = getattr(TOOLS_CFG, "llm_provider", "openai")
+
+    if provider == "google" or model_name.startswith("gemini"):
+        from langchain_google_genai import ChatGoogleGenerativeAI
+        kwargs = dict(
+            model=model_name,
+            google_api_key=get_google_api_key(),
+            timeout=timeout,
+            max_retries=2,
+        )
+        if thinking_budget > 0:
+            # Thinking mode: temperature must be omitted or set by the API
+            kwargs["thinking_budget"] = thinking_budget
+        else:
+            kwargs["temperature"] = TOOLS_CFG.primary_agent_llm_temperature
+            kwargs["thinking_budget"] = 0
+        if max_tokens:
+            kwargs["max_output_tokens"] = max_tokens
+        llm = ChatGoogleGenerativeAI(**kwargs)
+        return llm
+
+    # OpenAI path (fallback)
     kwargs = dict(
         model=model_name,
         api_key=os.getenv("OPENAI_API_KEY"),
@@ -34,7 +56,6 @@ def _make_llm(model_name: str, timeout: int = 60, max_tokens: int = None) -> Cha
         max_retries=2,
     )
     if _is_reasoning_model(model_name):
-        # Reasoning models: max_completion_tokens instead of temperature + max_tokens
         kwargs["max_completion_tokens"] = 16384
     else:
         kwargs["temperature"] = TOOLS_CFG.primary_agent_llm_temperature
@@ -43,53 +64,37 @@ def _make_llm(model_name: str, timeout: int = 60, max_tokens: int = None) -> Cha
     return ChatOpenAI(**kwargs)
 
 
-def build_graph():
+def build_graph(thinking_mode: bool = False):
     """
     Builds an agent decision-making graph with a split router/synthesizer
     architecture for optimal latency:
 
-      router  (gpt-4.1-mini) — fast tool selection (~1s)
-      synthesizer (gpt-5-mini) — high-quality answer generation
+      router  (gemini-flash) — fast tool selection (~1s)
+      synthesizer (gemini-flash / gemini-2.5-pro) — answer generation
 
-    Includes a summary bypass: when summarize_patient_record is the only tool
-    called, the tool output is converted directly to an AIMessage (skipping
-    the synthesizer round-trip entirely).
+    When thinking_mode=True, the synthesizer uses a deeper reasoning model
+    with extended thinking budget for complex clinical queries.
+
+    The synthesizer always produces the final answer, even for summaries,
+    so it can tailor the response to the user's actual question.
     """
 
-    # ── Summary bypass helpers ────────────────────────────────────────
-    def route_after_tools(state: State):
-        """Route to summary_passthrough when summarize is the sole tool call."""
-        tool_msgs = []
-        for msg in reversed(state.get("messages", [])):
-            if isinstance(msg, _ToolMessage):
-                tool_msgs.append(msg)
-            else:
-                break
-        if len(tool_msgs) == 1 and tool_msgs[0].name == "summarize_patient_record":
-            return "summary_passthrough"
-        return "synthesizer"
-
-    def summary_passthrough(state: State):
-        """Convert the summarize ToolMessage to an AIMessage — zero LLM cost."""
-        for msg in reversed(state.get("messages", [])):
-            if isinstance(msg, _ToolMessage) and msg.name == "summarize_patient_record":
-                content = msg.content
-                try:
-                    content = _json.loads(content)
-                except (ValueError, TypeError):
-                    pass
-                return {"messages": [_AIMessage(content=content)]}
-        return {"messages": [_AIMessage(content="Summary generation completed.")]}
-
-    # ── Build the two LLMs ────────────────────────────────────────────
+    # ── Build the LLMs ────────────────────────────────────────────────
     router_model = getattr(TOOLS_CFG, "primary_agent_router_llm", TOOLS_CFG.primary_agent_llm)
-    synth_model = TOOLS_CFG.primary_agent_llm
 
+    # Router is always fast (same regardless of thinking mode)
     router_llm = _make_llm(router_model, timeout=15, max_tokens=300)
-    synth_llm = _make_llm(synth_model, timeout=30, max_tokens=4096)
 
-    logger.info("Router LLM: %s (timeout=15s)", router_model)
-    logger.info("Synthesizer LLM: %s (timeout=30s, max_tokens=4096)", synth_model)
+    if thinking_mode:
+        synth_model = getattr(TOOLS_CFG, "primary_agent_thinking_llm", "gemini-2.5-pro")
+        synth_llm = _make_llm(synth_model, timeout=120, max_tokens=16384, thinking_budget=8192)
+        logger.info("Router LLM: %s (timeout=15s)", router_model)
+        logger.info("Synthesizer LLM [THINKING]: %s (timeout=120s, max_tokens=16384, thinking=8192)", synth_model)
+    else:
+        synth_model = TOOLS_CFG.primary_agent_llm
+        synth_llm = _make_llm(synth_model, timeout=30, max_tokens=4096)
+        logger.info("Router LLM: %s (timeout=15s)", router_model)
+        logger.info("Synthesizer LLM: %s (timeout=30s, max_tokens=4096)", synth_model)
 
     # ── Build the graph ───────────────────────────────────────────────
     graph_builder = StateGraph(State)
@@ -99,16 +104,17 @@ def build_graph():
              lookup_patient_orders,
              summarize_patient_record,
              list_available_patients,
+             list_uploaded_documents,
              ]
 
     # Router: fast model with tools bound — decides WHICH tool to call
     router_with_tools = router_llm.bind_tools(tools)
 
     def router(state: State):
-        """Fast tool-routing: picks which tool to call (~1s with gpt-4.1-mini)."""
+        """Fast tool-routing: picks which tool to call."""
         return {"messages": [router_with_tools.invoke(state["messages"])]}
 
-    # Synthesizer: reasoning model — generates final answer from tool output
+    # Synthesizer: generates final answer from tool output
     synth_with_tools = synth_llm.bind_tools(tools)
 
     def synthesizer(state: State):
@@ -124,23 +130,20 @@ def build_graph():
             lookup_patient_orders,
             summarize_patient_record,
             list_available_patients,
+            list_uploaded_documents,
         ])
     graph_builder.add_node("tools", tool_node)
 
-    # Router decides: call a tool or respond directly
+    # Router decides: call a tool or pass to synthesizer
+    # Router NEVER goes to __end__ — synthesizer always generates the final answer
     graph_builder.add_conditional_edges(
         "router",
         route_tools,
-        {"tools": "tools", "__end__": "__end__"},
+        {"tools": "tools", "__end__": "synthesizer"},
     )
 
-    # After tools: summary bypass skips synthesizer; everything else → synthesizer
-    graph_builder.add_node("summary_passthrough", summary_passthrough)
-    graph_builder.add_conditional_edges(
-        "tools",
-        route_after_tools,
-        {"synthesizer": "synthesizer", "summary_passthrough": "summary_passthrough"},
-    )
+    # After tools: always go to synthesizer so it can answer the user's actual question
+    graph_builder.add_edge("tools", "synthesizer")
 
     # Synthesizer may call additional tools (multi-hop) or finish
     graph_builder.add_conditional_edges(
@@ -149,7 +152,6 @@ def build_graph():
         {"tools": "tools", "__end__": "__end__"},
     )
 
-    graph_builder.add_edge("summary_passthrough", "__end__")
     graph_builder.add_edge(START, "router")
     memory = MemorySaver()
     graph = graph_builder.compile(checkpointer=memory)

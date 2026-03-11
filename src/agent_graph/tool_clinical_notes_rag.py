@@ -12,7 +12,7 @@ from langchain_qdrant import QdrantVectorStore
 from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_core.tools import tool
 from langchain_openai import ChatOpenAI
-from agent_graph.load_tools_config import LoadToolsConfig
+from agent_graph.load_tools_config import LoadToolsConfig, get_google_api_key, swap_google_api_key
 from qdrant_client import QdrantClient
 from pyprojroot import here
 import logging
@@ -20,6 +20,8 @@ import os
 import json
 import hashlib
 import time as _time
+import re as _re
+import concurrent.futures as _futures
 from pathlib import Path as _Path
 from datetime import datetime as _dt
 from dotenv import load_dotenv
@@ -204,20 +206,40 @@ class ClinicalNotesRAGTool:
         except Exception as e:
             logger.warning("BM25 index build failed: %s", e)
 
-    def search(self, query: str) -> str:
+    def search(self, query: str, document_id: str = None) -> str:
         """
         Hybrid retrieval: dense MMR + BM25 sparse + RRF fusion + cross-encoder reranking.
         Optimized for latency: reduced candidate pool, efficient reranking.
+
+        Args:
+            query: The search query.
+            document_id: Optional. If provided, restricts search to chunks from this document only.
         """
         try:
             t0 = _time.perf_counter()
 
+            # Build optional Qdrant filter for document scoping
+            _qdrant_filter = None
+            if document_id:
+                from qdrant_client.models import Filter, FieldCondition, MatchValue
+                _qdrant_filter = Filter(
+                    must=[FieldCondition(
+                        key="metadata.document_id",
+                        match=MatchValue(value=document_id),
+                    )]
+                )
+
             # Stage 1: Dense MMR search (original query — no augmentation)
+            search_kwargs = {
+                "k": self.fetch_k,
+                "fetch_k": self.fetch_k * 2,
+                "lambda_mult": 0.5,
+            }
+            if _qdrant_filter:
+                search_kwargs["filter"] = _qdrant_filter
             dense_docs = self.vectordb.max_marginal_relevance_search(
                 query=query,
-                k=self.fetch_k,
-                fetch_k=self.fetch_k * 2,
-                lambda_mult=0.5,
+                **search_kwargs,
             )
             t_dense = _time.perf_counter() - t0
 
@@ -230,6 +252,10 @@ class ClinicalNotesRAGTool:
                     scores = self._bm25_index.get_scores(tokenized_query)
                     top_indices = np.argsort(scores)[::-1][:self.fetch_k]
                     bm25_docs = [self._bm25_docs[i] for i in top_indices if scores[i] > 0]
+                    # Filter by document_id if scoped
+                    if document_id:
+                        bm25_docs = [d for d in bm25_docs
+                                     if d.metadata.get("document_id") == document_id]
                 except Exception as e:
                     logger.warning("BM25 search failed, using dense only: %s", e)
             t_bm25 = _time.perf_counter() - t0 - t_dense
@@ -243,7 +269,10 @@ class ClinicalNotesRAGTool:
             if not fused:
                 return f"No relevant documents found for: {query}"
 
-            # Stage 4: Cross-encoder reranking — only rerank top candidates
+            # Stage 4: Cross-encoder reranking with relevance filtering
+            # NotebookLM-inspired: reject irrelevant chunks BEFORE they reach the LLM
+            # to prevent hallucination from noisy context.
+            _MIN_RERANKER_SCORE = 0.05  # cross-encoder threshold
             rerank_pool = fused[:self.fetch_k]  # cap reranker input
             if self.reranker and len(rerank_pool) > 1:
                 pairs = [[query, doc.page_content] for doc in rerank_pool]
@@ -251,6 +280,12 @@ class ClinicalNotesRAGTool:
                 scored_docs = sorted(
                     zip(rerank_pool, scores), key=lambda x: x[1], reverse=True
                 )
+                # Filter out chunks below relevance threshold
+                scored_docs = [(doc, s) for doc, s in scored_docs if s >= _MIN_RERANKER_SCORE]
+                if not scored_docs:
+                    return (f"No sufficiently relevant clinical data found for: {query}. "
+                            f"Try rephrasing with specific clinical terms "
+                            f"(e.g., medication names, lab tests, section names, dates).")
                 docs = [doc for doc, _ in scored_docs[:self.reranker_top_k]]
             else:
                 docs = rerank_pool[:self.k]
@@ -266,13 +301,15 @@ class ClinicalNotesRAGTool:
             logger.info("Search: %.2fs (dense=%.2fs, bm25=%.2fs, rerank+fuse+expand=%.2fs) → %d docs",
                         t_total, t_dense, t_bm25, t_total - t_dense - t_bm25, len(docs))
 
-            # Render with section headers for clarity to the LLM
+            # Render with source citations for LLM grounding (NotebookLM-style)
+            # Each chunk is tagged with section, page, and MRN so the LLM
+            # can cite exact sources — preventing hallucination.
             parts = []
-            for d in docs:
+            for i, d in enumerate(docs, 1):
                 sec = d.metadata.get("section_title", "Section")
-                src = os.path.basename(d.metadata.get("filename", ""))
+                page = d.metadata.get("page_number", "?")
                 mrn = d.metadata.get("patient_mrn", "")
-                parts.append(f"[{sec} — {src} | MRN: {mrn}]\n{d.page_content}")
+                parts.append(f"[Source {i} | Section: {sec} | Page {page} | MRN: {mrn}]\n{d.page_content}")
             return "\n\n---\n\n".join(parts)
         except Exception as e:
             return f"Error during search: {e}"
@@ -720,6 +757,43 @@ except Exception:
     pass
 
 
+def _extract_text_content(content) -> str:
+    """Normalize LLM .content to a plain string.
+    Gemini may return a list of part dicts (including 'thinking' parts)
+    instead of a plain string. This handles all forms."""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = []
+        for item in content:
+            if isinstance(item, dict):
+                if item.get("type") == "thinking":
+                    continue
+                parts.append(item.get("text", ""))
+            elif isinstance(item, str):
+                parts.append(item)
+        return "".join(parts)
+    return str(content) if content else ""
+
+
+def _is_quota_error(exc: Exception) -> bool:
+    s = str(exc).lower()
+    return any(k in s for k in ["rate limit", "429", "resource_exhausted", "quota"])
+
+
+def _llm_invoke_with_fallback(llm_factory, prompt):
+    """Invoke LLM; on quota exhaustion swap to backup API key and retry once."""
+    model_name, llm = llm_factory()
+    try:
+        return model_name, _extract_text_content(llm.invoke(prompt).content)
+    except Exception as e:
+        if _is_quota_error(e) and swap_google_api_key():
+            logger.warning("Quota exhausted — switched to backup API key, retrying")
+            model_name, llm = llm_factory()
+            return model_name, _extract_text_content(llm.invoke(prompt).content)
+        raise
+
+
 def _is_reasoning_model(model_name: str) -> bool:
     """Check if a model is a reasoning model (different API params)."""
     reasoning_prefixes = ("o1", "o3", "o4", "gpt-5")
@@ -727,17 +801,26 @@ def _is_reasoning_model(model_name: str) -> bool:
 
 
 def _get_summarization_llm():
-    """Create the summarization LLM instance.
-    Reasoning models (gpt-5-mini, o3, etc.) don't support temperature or max_tokens.
-    They use max_completion_tokens instead — which includes BOTH internal reasoning
-    tokens AND the visible response. A clinical summary needs ~4K output tokens,
-    and reasoning can use 5-10K+ tokens, so we set a generous limit."""
+    """Create the summarization LLM — supports both Google Gemini and OpenAI."""
     model = getattr(TOOLS_CFG, "clinical_notes_rag_summarization_llm",
                     TOOLS_CFG.clinical_notes_rag_llm)
-    if _is_reasoning_model(model):
+    provider = getattr(TOOLS_CFG, "llm_provider", "openai")
+
+    if provider == "google" or model.startswith("gemini"):
+        from langchain_google_genai import ChatGoogleGenerativeAI
+        llm = ChatGoogleGenerativeAI(
+            model=model,
+            google_api_key=get_google_api_key(),
+            temperature=TOOLS_CFG.clinical_notes_rag_llm_temperature,
+            max_output_tokens=8192,
+            timeout=120,
+            max_retries=3,
+            thinking_budget=0,
+        )
+    elif _is_reasoning_model(model):
         llm = ChatOpenAI(
             model=model,
-            max_completion_tokens=16384,   # reasoning (~8K) + response (~4-6K)
+            max_completion_tokens=16384,
             api_key=os.getenv("OPENAI_API_KEY"),
             request_timeout=120,
             max_retries=3,
@@ -751,24 +834,189 @@ def _get_summarization_llm():
             request_timeout=120,
             max_retries=3,
         )
-    logger.info("Summarization LLM: %s (reasoning=%s, timeout=120s, max_retries=3)", model, _is_reasoning_model(model))
+    logger.info("Summarization LLM: %s (provider=%s, timeout=120s, max_retries=3)", model, provider)
     return model, llm
 
 
-_SUMMARY_PROMPT = """You are a clinical documentation specialist. Produce a structured summary of this patient record (MRN: {mrn}).
+_SUMMARY_PROMPT = """You are a clinical documentation specialist. Produce a comprehensive, exhaustive structured summary of this patient record (MRN: {mrn}).
 
-Sections (skip any with no data):
-1. Demographics  2. Chief Complaint  3. HPI  4. PMH  5. Surgical Hx
-6. Family Hx  7. Social Hx  8. Allergies  9. Medications (admit & discharge)
-10. ROS  11. Physical Exam  12. Vital Signs (table)  13. Labs (flag abnormals)
-14. Imaging  15. Hospital Course  16. Procedures  17. Consults
-18. Discharge Summary  19. Education  20. Outstanding Issues
+Sections (extract ALL data present in the record for each section — search the ENTIRE record thoroughly):
+1. Demographics (name, DOB, age, sex, gender, race/ethnicity, marital status, blood type, BMI, advance directives)
+2. Chief Complaint & Admission Reason
+3. History of Present Illness
+4. Past Medical History (list ALL diagnoses)
+5. Surgical History (list ALL procedures — look for tables labeled surgical history, past surgical history, prior procedures)
+6. Family History (list ALL entries — look for tables with family member, condition, age columns)
+7. Social History (living situation, marital status, transportation, smoking/alcohol/drug use with pack-years, occupation, functional status ECOG/Karnofsky, mental health screenings PHQ-9/GAD-7, financial situation, support system)
+8. Allergies (list EVERY allergy with reaction type and severity — look for allergy tables/registries. This is PATIENT SAFETY CRITICAL — never skip)
+9. Medications (TWO separate complete lists: a) ALL home/admission medications with dose/route/frequency b) ALL discharge medications with dose/route/frequency. Include PRN medications, supplements, devices like CPAP)
+10. Review of Systems
+11. Physical Exam (admission — all systems documented)
+12. Vital Signs (table format — include ALL days documented, not just admission/discharge. Look for daily vital sign tables with BP, HR, Temp, RR, SpO2, weight, glucose)
+13. Laboratory Results (list ALL labs with values, units, reference ranges, and flags. Include ALL timepoints documented — admission, serial, discharge. Look for lab tables with columns. Flag abnormals with [ABNORMAL], criticals with [CRITICAL])
+14. Imaging & Diagnostics (with dates and key findings)
+15. Hospital Course (day-by-day key events, interventions, transitions)
+16. Procedures (with dates and findings)
+17. Consultations
+18. Discharge Summary & Disposition (include risk scores like LACE, readmission probability)
+19. Patient Education
+20. Outstanding Issues & Follow-up
 
-Rules: exact values/dates. Flag critical findings. No fabrication. Be comprehensive but concise.
+STRICT GROUNDING RULES:
+- Use ONLY information explicitly present in the record below. Never infer, estimate, or assume.
+- SCAN THE ENTIRE RECORD for each section — data may appear in unexpected locations (e.g., allergies in nursing notes, surgical history in a procedures table, family history in an oncology section).
+- Use exact values: lab numbers with units, medication dosages with route/frequency, exact dates.
+- For every key finding, note the source section in parentheses (e.g., "(from Vital Signs, Day 3)").
+- Flag critical/abnormal findings with [CRITICAL] or [ABNORMAL] markers.
+- Include ALL entries in tables — do not truncate or summarize tables. If there are 12 surgical procedures, list all 12. If there are 8 allergies, list all 8. If there are 38 lab values, list all 38.
+- When values changed over time, show the full trajectory with dates (not just admission → discharge).
+- Never round, paraphrase loosely, or omit documented details.
+- If a section truly has no data anywhere in the record, write "Not documented in record."
 
 RECORD:
 
 {record}"""
+
+
+# ── Map-reduce parallel summarization ────────────────────────────────────────
+# For large records (>30K chars), split → parallel extract → merge.
+# This cuts 60s+ single-pass summarization to ~15-20s via concurrent API calls.
+_MAP_REDUCE_THRESHOLD = 30_000  # chars — records above this use map-reduce
+
+_MAP_EXTRACT_PROMPT = """You are a clinical data extractor. Condense this section of patient record (MRN: {mrn}) into concise bullet points.
+
+RULES:
+- One bullet per fact. Combine related details on a single line.
+- Keep exact numbers, dates, units, dosages — but drop filler words and narrative prose.
+- Use abbreviations: pt, dx, hx, rx, prn, q4h, PO, IV, etc.
+- Skip section headers, formatting, and repetitive text.
+- NEVER drop table data. If this section contains tables (allergies, surgical history, family history, vitals, labs), extract EVERY row — do not summarize or skip any entries.
+- PATIENT SAFETY: Allergy lists, medication lists, and surgical history must be extracted COMPLETELY — every single entry.
+- Target ≤50% of original length (but preserve all discrete data points).
+
+EXAMPLE OUTPUT:
+• DOB 1958-11-03, Male, MRN-2026-004782
+• Admitted 2026-01-15 for acute decompensated HF (NYHA III→IV)
+• ALLERGIES: Penicillin→Anaphylaxis, Sulfa→Rash, Latex→Contact dermatitis
+• BNP 1842 pg/mL [ABNORMAL], Cr 1.8 mg/dL, K 3.2 mEq/L [LOW]
+• Furosemide 40mg IV q12h → transitioned PO 80mg daily day 3
+• Echo 2026-01-16: EF 25%, severe MR, dilated LV
+
+RECORD SECTION:
+
+{section}"""
+
+
+def _get_map_llm():
+    """Lighter LLM for the map phase — lower max_tokens to enforce brevity."""
+    model = getattr(TOOLS_CFG, "clinical_notes_rag_summarization_llm",
+                    TOOLS_CFG.clinical_notes_rag_llm)
+    provider = getattr(TOOLS_CFG, "llm_provider", "openai")
+
+    if provider == "google" or model.startswith("gemini"):
+        from langchain_google_genai import ChatGoogleGenerativeAI
+        llm = ChatGoogleGenerativeAI(
+            model=model,
+            google_api_key=get_google_api_key(),
+            temperature=0.0,
+            max_output_tokens=4000,     # enough to preserve all table data per group
+            timeout=60,
+            max_retries=2,
+            thinking_budget=0,
+        )
+        return model, llm
+    if _is_reasoning_model(model):
+        return model, ChatOpenAI(
+            model=model,
+            max_completion_tokens=4096,
+            api_key=os.getenv("OPENAI_API_KEY"),
+            request_timeout=60,
+            max_retries=2,
+        )
+    return model, ChatOpenAI(
+        model=model,
+        temperature=0.0,
+        max_tokens=3000,
+        api_key=os.getenv("OPENAI_API_KEY"),
+        request_timeout=60,
+        max_retries=2,
+    )
+
+
+def _map_reduce_summarize(patient_mrn: str, full_record: str) -> tuple:
+    """Map-reduce parallel summarization.
+
+    Strategy:
+      1. Split record into ≤4 groups at paragraph boundaries
+      2. MAP: Condense each group to concise bullet points (parallel, capped tokens)
+      3. REDUCE: Synthesize bullets into final structured summary
+
+    Target: map produces ~30-40% of original volume so reduce is fast.
+
+    Returns:
+        (summary_text, model_name)
+    """
+    model_name = getattr(TOOLS_CFG, "clinical_notes_rag_summarization_llm",
+                         TOOLS_CFG.clinical_notes_rag_llm)
+
+    # Split record into sections at paragraph boundaries
+    raw_sections = full_record.split("\n\n")
+    sections = [s.strip() for s in raw_sections if s.strip()]
+
+    # Use 3-4 groups (fewer = less API overhead, still parallelizable)
+    NUM_GROUPS = min(4, max(2, len(sections) // 6))
+    total_chars = sum(len(s) for s in sections)
+    target_group_size = total_chars // NUM_GROUPS
+
+    groups = []
+    current_group = []
+    current_size = 0
+    for sec in sections:
+        current_group.append(sec)
+        current_size += len(sec)
+        if current_size >= target_group_size and len(groups) < NUM_GROUPS - 1:
+            groups.append("\n\n".join(current_group))
+            current_group = []
+            current_size = 0
+    if current_group:
+        groups.append("\n\n".join(current_group))
+
+    logger.info("Map-reduce: %d chars → %d groups (target %d chars/group)",
+                total_chars, len(groups), target_group_size)
+
+    # ── MAP PHASE: Condense each group to bullet points in parallel ──
+    def extract_facts(group_text: str) -> str:
+        try:
+            prompt = _MAP_EXTRACT_PROMPT.format(mrn=patient_mrn, section=group_text)
+            _, text = _llm_invoke_with_fallback(_get_map_llm, prompt)
+            return text
+        except Exception as e:
+            logger.warning("Map phase failed for a group: %s", str(e)[:200])
+            # Fallback: return raw text (heavily truncated) so reduce still has something
+            return group_text[:2000]
+
+    t_map_start = _time.perf_counter()
+    with _futures.ThreadPoolExecutor(max_workers=min(len(groups), 3)) as pool:
+        partial_summaries = list(pool.map(extract_facts, groups))
+    t_map = _time.perf_counter() - t_map_start
+
+    # ── REDUCE PHASE: Merge bullets into structured summary ──
+    merged_facts = "\n\n".join(partial_summaries)
+    merged_chars = len(merged_facts)
+    compression = (1 - merged_chars / total_chars) * 100
+    logger.info("Map phase: %.1fs (%d groups), merged facts: %s chars (%.0f%% compression)",
+                t_map, len(groups), f"{merged_chars:,}", compression)
+
+    t_reduce_start = _time.perf_counter()
+    reduce_prompt = _SUMMARY_PROMPT.format(mrn=patient_mrn, record=merged_facts)
+    _, final_summary = _llm_invoke_with_fallback(_get_summarization_llm, reduce_prompt)
+    t_reduce = _time.perf_counter() - t_reduce_start
+
+    logger.info("Reduce phase: %.1fs, output: %s chars", t_reduce, f"{len(final_summary):,}")
+    logger.info("Map-reduce total: %.1fs (map=%.1fs + reduce=%.1fs)",
+                t_map + t_reduce, t_map, t_reduce)
+
+    return final_summary, model_name
 
 
 # ── Tool definitions ─────────────────────────────────────────────────────────
@@ -889,11 +1137,16 @@ def summarize_patient_record(patient_identifier: str) -> str:
         record_chars = len(full_record)
         logger.info("Record: %s chars (~%s tokens)", f"{record_chars:,}", f"{record_chars // 4:,}")
 
-        # Single-pass summarization with output cap
-        model_name, llm = _get_summarization_llm()
-        prompt = _SUMMARY_PROMPT.format(mrn=patient_mrn, record=full_record)
+        # Use map-reduce for large records (parallel processing: 60s → ~15-20s)
+        # Small records (<30K chars) use single-pass for simplicity
         t_llm_start = _time.perf_counter()
-        summary = llm.invoke(prompt).content
+        if record_chars > _MAP_REDUCE_THRESHOLD:
+            logger.info("Using MAP-REDUCE summarization (record > %d chars)", _MAP_REDUCE_THRESHOLD)
+            summary, model_name = _map_reduce_summarize(patient_mrn, full_record)
+        else:
+            logger.info("Using single-pass summarization (record <= %d chars)", _MAP_REDUCE_THRESHOLD)
+            prompt = _SUMMARY_PROMPT.format(mrn=patient_mrn, record=full_record)
+            model_name, summary = _llm_invoke_with_fallback(_get_summarization_llm, prompt)
         t_llm_end = _time.perf_counter()
         logger.info("LLM: %.1fs, output=%s chars (model=%s)",
                     t_llm_end - t_llm_start, f"{len(summary):,}", model_name)
@@ -942,3 +1195,28 @@ def list_available_patients() -> str:
         return rag.list_patients()
     except Exception as e:
         return f"Error listing patients: {e}"
+
+
+@tool
+def list_uploaded_documents() -> str:
+    """List all documents that have been uploaded to the system. Returns document IDs, filenames, processing status, and upload timestamps. Use this to see which documents are available for querying."""
+    try:
+        from pyprojroot import here
+        meta_path = str(here("data/uploads/documents.json"))
+        if not os.path.exists(meta_path):
+            return "No documents have been uploaded yet."
+        with open(meta_path, "r", encoding="utf-8") as f:
+            meta = json.load(f)
+        if not meta:
+            return "No documents have been uploaded yet."
+        lines = ["Uploaded Documents:\n"]
+        for doc_id, info in meta.items():
+            status = info.get("status", "unknown")
+            name = info.get("original_filename", "unknown")
+            uploaded = info.get("uploaded_at", "unknown")
+            chunks = info.get("chunks", "N/A")
+            lines.append(f"  • {name} (ID: {doc_id})")
+            lines.append(f"    Status: {status} | Chunks: {chunks} | Uploaded: {uploaded}")
+        return "\n".join(lines)
+    except Exception as e:
+        return f"Error listing documents: {e}"

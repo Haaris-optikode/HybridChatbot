@@ -485,6 +485,93 @@
             font-size: 12px;
         }
 
+        /* ── Document Upload Section ──────────────────────────── */
+        .upload-section {
+            padding: 0 14px;
+            margin-bottom: 8px;
+        }
+        .upload-section .status-label {
+            margin-bottom: 8px;
+        }
+        .upload-drop-zone {
+            border: 2px dashed var(--border-color);
+            border-radius: var(--radius);
+            padding: 16px 12px;
+            text-align: center;
+            cursor: pointer;
+            transition: all var(--transition);
+            background: var(--bg-tertiary);
+        }
+        .upload-drop-zone:hover, .upload-drop-zone.drag-over {
+            border-color: var(--accent);
+            background: var(--accent-bg);
+        }
+        .upload-drop-zone i {
+            font-size: 24px;
+            color: var(--text-muted);
+            display: block;
+            margin-bottom: 6px;
+        }
+        .upload-drop-zone.drag-over i { color: var(--accent); }
+        .upload-drop-zone .upload-text {
+            font-size: 12px;
+            color: var(--text-secondary);
+        }
+        .upload-drop-zone .upload-hint {
+            font-size: 10px;
+            color: var(--text-muted);
+            margin-top: 4px;
+        }
+        .upload-file-input { display: none; }
+
+        .uploaded-docs-list {
+            max-height: 150px;
+            overflow-y: auto;
+            margin-top: 8px;
+        }
+        .uploaded-doc-item {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            padding: 6px 8px;
+            border-radius: var(--radius-sm);
+            font-size: 11px;
+            color: var(--text-secondary);
+            background: var(--bg-tertiary);
+            margin-bottom: 4px;
+        }
+        .uploaded-doc-item .doc-icon {
+            flex-shrink: 0;
+            width: 20px;
+            text-align: center;
+        }
+        .uploaded-doc-item .doc-name {
+            flex: 1;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+        .uploaded-doc-item .doc-status {
+            flex-shrink: 0;
+            font-size: 10px;
+            padding: 2px 6px;
+            border-radius: 10px;
+            font-weight: 500;
+        }
+        .doc-status.processing { background: var(--amber-bg); color: var(--amber); }
+        .doc-status.ready { background: var(--green-bg); color: var(--green); }
+        .doc-status.error { background: var(--red-bg); color: var(--red); }
+        .uploaded-doc-item .doc-delete {
+            flex-shrink: 0;
+            background: none;
+            border: none;
+            color: var(--text-muted);
+            cursor: pointer;
+            font-size: 11px;
+            padding: 2px;
+        }
+        .uploaded-doc-item .doc-delete:hover { color: var(--red); }
+
         .sidebar::-webkit-scrollbar { width: 3px; }
         .sidebar::-webkit-scrollbar-thumb { background: var(--border-color); border-radius: 2px; }
 
@@ -1101,6 +1188,64 @@
 
         .tools-btn.active .tool-dot { display: block; }
 
+        /* ── Thinking Toggle ─────────────────────────────── */
+        .thinking-btn {
+            width: 38px;
+            height: 38px;
+            min-width: 38px;
+            border-radius: 8px;
+            border: 1.5px solid var(--border-color);
+            background: var(--bg-secondary);
+            color: var(--text-muted);
+            font-size: 15px;
+            cursor: pointer;
+            transition: var(--transition);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            position: relative;
+        }
+        .thinking-btn:hover {
+            border-color: #a855f7;
+            color: #a855f7;
+        }
+        .thinking-btn.active {
+            border-color: #a855f7;
+            color: #a855f7;
+            background: rgba(168, 85, 247, 0.1);
+        }
+        .thinking-btn .thinking-dot {
+            position: absolute;
+            top: 5px;
+            right: 5px;
+            width: 6px;
+            height: 6px;
+            border-radius: 50%;
+            background: #a855f7;
+            display: none;
+        }
+        .thinking-btn.active .thinking-dot { display: block; }
+        .thinking-tooltip {
+            position: absolute;
+            bottom: calc(100% + 8px);
+            left: 50%;
+            transform: translateX(-50%);
+            background: var(--bg-secondary);
+            border: 1px solid var(--border-color);
+            border-radius: 8px;
+            padding: 8px 12px;
+            font-size: 12px;
+            color: var(--text-primary);
+            white-space: nowrap;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+            opacity: 0;
+            pointer-events: none;
+            transition: opacity 0.15s;
+        }
+        .thinking-btn:hover .thinking-tooltip {
+            opacity: 1;
+        }
+
         .tools-popup {
             position: absolute;
             bottom: calc(100% + 8px);
@@ -1590,6 +1735,18 @@
                 <i class="fa-solid fa-plus"></i> New Conversation
             </button>
 
+            <!-- Document Upload -->
+            <div class="upload-section">
+                <div class="status-label">Upload Documents</div>
+                <div class="upload-drop-zone" id="uploadDropZone" onclick="document.getElementById('uploadFileInput').click()">
+                    <i class="fa-solid fa-cloud-arrow-up"></i>
+                    <div class="upload-text">Drop PDF here or click to browse</div>
+                    <div class="upload-hint">Max 50 MB &middot; PDF only</div>
+                </div>
+                <input type="file" id="uploadFileInput" class="upload-file-input" accept=".pdf" onchange="handleFileSelect(event)">
+                <div class="uploaded-docs-list" id="uploadedDocsList"></div>
+            </div>
+
             <!-- Chat History -->
             <div class="history-section">
                 <div class="history-header">
@@ -1722,6 +1879,13 @@
                             </div>
                         </div>
                     </div>
+                    <div style="position:relative;flex-shrink:0;">
+                        <button class="thinking-btn" id="thinkingBtn" onclick="toggleThinking()" title="Deep thinking mode">
+                            <i class="fa-solid fa-brain"></i>
+                            <span class="thinking-dot"></span>
+                            <div class="thinking-tooltip">Deep Thinking (Gemini 2.5 Pro)</div>
+                        </button>
+                    </div>
                     <div class="input-wrapper">
                         <textarea id="messageInput" rows="1" placeholder="Ask about patient records, medications, lab results..." 
                                   onkeydown="handleKey(event)" oninput="autoResize(this)"></textarea>
@@ -1765,6 +1929,7 @@
         let botMessageIndex = 0;          // tracks bot msg count for feedback
         let lastUserQuery = '';           // for feedback context
         let selectedTool = 'auto';        // tool override: auto, vector_db, web_search, sql
+        let thinkingMode = false;            // deep thinking toggle
         const startTime = Date.now();
 
         function getToken() { return localStorage.getItem('medgraph-token'); }
@@ -1803,6 +1968,7 @@
                 setToken(data.token);
                 setUser({ id: userId, role: role });
                 showApp();
+                loadUploadedDocs();
             } catch (err) {
                 errEl.textContent = 'Login failed: ' + err.message;
             } finally {
@@ -2123,13 +2289,14 @@
             const el = document.createElement('div');
             el.className = 'typing-indicator';
             el.id = 'typingIndicator';
+            const label = thinkingMode ? '<span style="margin-left:8px;font-size:12px;color:#a855f7;">Thinking deeply...</span>' : '';
             el.innerHTML = `
                 <div class="msg-avatar bot"><i class="fa-solid fa-robot"></i></div>
                 <div class="typing-dots">
                     <div class="typing-dot"></div>
                     <div class="typing-dot"></div>
                     <div class="typing-dot"></div>
-                </div>
+                </div>${label}
             `;
             messagesContainer.appendChild(el);
             scrollToBottom();
@@ -2248,8 +2415,9 @@
             showTyping();
 
             // Safety timeout — never leave typing indicator stuck
+            const safetyTimeout = thinkingMode ? 300000 : 120000;
             const safetyTimer = setTimeout(() => {
-                console.warn('[SSE] Safety timeout reached (120s)');
+                console.warn('[SSE] Safety timeout reached');
                 hideTyping();
                 if (!document.querySelector('.msg-bubble.streaming')) {
                     addMessage('bot', 'Request timed out. The server may still be processing — please try again.');
@@ -2266,7 +2434,8 @@
                     body: JSON.stringify({
                         message: text,
                         session_id: sessionId,
-                        tool_override: selectedTool === 'auto' ? null : selectedTool
+                        tool_override: selectedTool === 'auto' ? null : selectedTool,
+                        thinking: thinkingMode
                     })
                 });
 
@@ -2643,6 +2812,12 @@
             summarize: 'Summarize Patient'
         };
 
+        function toggleThinking() {
+            thinkingMode = !thinkingMode;
+            const btn = document.getElementById('thinkingBtn');
+            btn.classList.toggle('active', thinkingMode);
+        }
+
         function toggleToolsPopup() {
             const popup = document.getElementById('toolsPopup');
             popup.classList.toggle('show');
@@ -2686,6 +2861,117 @@
                 popup.classList.remove('show');
             }
         });
+
+        // ── Document Upload ──────────────────────────────────────
+        const uploadDropZone = document.getElementById('uploadDropZone');
+        const uploadFileInput = document.getElementById('uploadFileInput');
+
+        ['dragenter', 'dragover'].forEach(evt => {
+            uploadDropZone.addEventListener(evt, e => {
+                e.preventDefault();
+                uploadDropZone.classList.add('drag-over');
+            });
+        });
+        ['dragleave', 'drop'].forEach(evt => {
+            uploadDropZone.addEventListener(evt, e => {
+                e.preventDefault();
+                uploadDropZone.classList.remove('drag-over');
+            });
+        });
+        uploadDropZone.addEventListener('drop', e => {
+            const files = e.dataTransfer.files;
+            if (files.length > 0) uploadFile(files[0]);
+        });
+
+        function handleFileSelect(e) {
+            if (e.target.files.length > 0) uploadFile(e.target.files[0]);
+            e.target.value = '';
+        }
+
+        async function uploadFile(file) {
+            if (!file.name.toLowerCase().endsWith('.pdf')) {
+                alert('Only PDF files are supported.');
+                return;
+            }
+            if (file.size > 50 * 1024 * 1024) {
+                alert('File too large. Maximum size is 50 MB.');
+                return;
+            }
+            const formData = new FormData();
+            formData.append('file', file);
+
+            try {
+                const token = getToken();
+                const resp = await fetch('/api/documents/upload', {
+                    method: 'POST',
+                    headers: token ? { 'Authorization': 'Bearer ' + token } : {},
+                    body: formData,
+                });
+                if (!resp.ok) {
+                    const err = await resp.json().catch(() => ({}));
+                    alert('Upload failed: ' + (err.detail || resp.statusText));
+                    return;
+                }
+                const data = await resp.json();
+                loadUploadedDocs();
+                // Poll for processing completion
+                if (data.document_id) pollDocStatus(data.document_id);
+            } catch (e) {
+                alert('Upload error: ' + e.message);
+            }
+        }
+
+        function pollDocStatus(docId) {
+            const interval = setInterval(async () => {
+                try {
+                    const resp = await authFetch('/api/documents/' + docId);
+                    const doc = await resp.json();
+                    if (doc.status === 'ready' || doc.status === 'error') {
+                        clearInterval(interval);
+                        loadUploadedDocs();
+                    }
+                } catch {
+                    clearInterval(interval);
+                }
+            }, 3000);
+        }
+
+        async function loadUploadedDocs() {
+            const list = document.getElementById('uploadedDocsList');
+            try {
+                const resp = await authFetch('/api/documents');
+                const data = await resp.json();
+                if (!data.documents || data.documents.length === 0) {
+                    list.innerHTML = '';
+                    return;
+                }
+                list.innerHTML = data.documents.map(doc => `
+                    <div class="uploaded-doc-item">
+                        <div class="doc-icon"><i class="fa-solid fa-file-pdf" style="color:var(--red);"></i></div>
+                        <div class="doc-name" title="${doc.original_filename}">${doc.original_filename}</div>
+                        <span class="doc-status ${doc.status}">${doc.status === 'processing' ? '<i class="fa-solid fa-spinner fa-spin"></i> ' : ''}${doc.status}</span>
+                        <button class="doc-delete" onclick="deleteDocument('${doc.document_id}')" title="Delete document">
+                            <i class="fa-solid fa-trash-can"></i>
+                        </button>
+                    </div>
+                `).join('');
+            } catch {
+                list.innerHTML = '';
+            }
+        }
+
+        async function deleteDocument(docId) {
+            if (!confirm('Delete this document and its vectors?')) return;
+            try {
+                await authFetch('/api/documents/' + docId, { method: 'DELETE' });
+                loadUploadedDocs();
+            } catch (e) {
+                alert('Delete failed: ' + e.message);
+            }
+        }
+
+        // Load uploaded docs on page init
+        if (getToken()) loadUploadedDocs();
     </script>
 </body>
 </html>
