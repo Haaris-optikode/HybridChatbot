@@ -96,3 +96,24 @@ Once your databases are ready, you can either connect the current agents to the 
 - **OpenAI:** [Developer Quickstart](https://platform.openai.com/docs/quickstart?context=python)
 - **Tavily Search**
 ---
+
+## Production Token and Cost Tracking
+
+The API now tracks token usage and estimated model cost for every LLM request and persists aggregate totals.
+
+- **Per-request usage:** `POST /api/chat` now returns a `usage` object with `input_tokens`, `output_tokens`, `total_tokens`, `cost_usd`, `calls`, and `models`.
+- **Streaming usage:** `POST /api/chat/stream` includes `usage` in the final SSE `done` event.
+- **Global totals:** `GET /api/usage/summary` returns cumulative usage and cost across all sessions.
+- **Session totals:** `GET /api/usage/session/{session_id}` returns usage and cost for one session.
+- **Persistence:** Aggregate data is stored in `logs/token_usage_ledger.json`.
+
+### Pricing Configuration
+
+By default, the app uses an internal model pricing table (USD per 1M tokens).  
+For production billing alignment, override prices via environment variable:
+
+```bash
+MEDGRAPH_MODEL_PRICING_JSON='{"gemini-flash-latest":{"input_per_1m":0.35,"output_per_1m":1.05}}'
+```
+
+This allows updating prices without code changes when provider pricing changes.

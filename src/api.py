@@ -86,6 +86,7 @@ from agent_graph.build_full_graph import build_graph
 from utils.app_utils import create_directory
 from chatbot.memory import Memory
 from langchain_core.messages import SystemMessage, HumanMessage, AIMessage
+from observability.token_cost import RequestUsageCallback, summarize_request, LEDGER, PRICING_TABLE
 
 PROJECT_CFG = LoadProjectConfig()
 TOOLS_CFG = LoadToolsConfig()
@@ -126,6 +127,21 @@ PROM_CACHE_MISSES = Counter(
 PROM_ACTIVE_SESSIONS = Gauge(
     "medgraph_active_sessions",
     "Current number of active sessions",
+)
+PROM_LLM_INPUT_TOKENS = Counter(
+    "medgraph_llm_input_tokens_total",
+    "Total LLM input tokens",
+    ["endpoint"],
+)
+PROM_LLM_OUTPUT_TOKENS = Counter(
+    "medgraph_llm_output_tokens_total",
+    "Total LLM output tokens",
+    ["endpoint"],
+)
+PROM_LLM_COST_USD = Counter(
+    "medgraph_llm_cost_usd_total",
+    "Total estimated LLM cost in USD",
+    ["endpoint"],
 )
 
 # ── JWT Configuration ────────────────────────────────────────────────
@@ -443,6 +459,7 @@ class ChatResponse(BaseModel):
     reply: str
     session_id: str
     latency_ms: int
+    usage: Dict[str, object]
 
 
 class FeedbackRequest(BaseModel):
@@ -523,7 +540,8 @@ async def chat(req: ChatRequest, request: Request, user: dict = Depends(get_curr
     messages.append(HumanMessage(content=validated_msg))
 
     # Run through LangGraph agent — with retry on transient LLM errors
-    config = {"configurable": {"thread_id": sid}}
+    usage_cb = RequestUsageCallback(PRICING_TABLE)
+    config = {"configurable": {"thread_id": sid}, "callbacks": [usage_cb]}
     active_graph = thinking_graph if req.thinking else graph
     max_retries = 2
     for attempt in range(max_retries + 1):
@@ -576,9 +594,21 @@ async def chat(req: ChatRequest, request: Request, user: dict = Depends(get_curr
     )
 
     elapsed_ms = int((time.perf_counter() - t0) * 1000)
+    request_usage = summarize_request(usage_cb.records)
+    LEDGER.record_request(sid, request_usage)
+    PROM_LLM_INPUT_TOKENS.labels(endpoint="/api/chat").inc(request_usage["input_tokens"])
+    PROM_LLM_OUTPUT_TOKENS.labels(endpoint="/api/chat").inc(request_usage["output_tokens"])
+    PROM_LLM_COST_USD.labels(endpoint="/api/chat").inc(request_usage["cost_usd"])
     PROM_REQUEST_LATENCY.labels(endpoint="/api/chat", method="POST").observe(elapsed_ms / 1000)
-    _audit_log("chat_response", user, session_id=sid, latency_ms=elapsed_ms)
-    return ChatResponse(reply=reply, session_id=sid, latency_ms=elapsed_ms)
+    _audit_log(
+        "chat_response",
+        user,
+        session_id=sid,
+        latency_ms=elapsed_ms,
+        tokens_total=request_usage["total_tokens"],
+        cost_usd=request_usage["cost_usd"],
+    )
+    return ChatResponse(reply=reply, session_id=sid, latency_ms=elapsed_ms, usage=request_usage)
 
 
 # ── Streaming SSE endpoint ───────────────────────────────────────────
@@ -617,7 +647,8 @@ async def chat_stream(req: ChatRequest, request: Request, user: dict = Depends(g
             messages.append(AIMessage(content=msg.content))
     messages.append(HumanMessage(content=validated_msg))
 
-    config = {"configurable": {"thread_id": sid}}
+    usage_cb = RequestUsageCallback(PRICING_TABLE)
+    config = {"configurable": {"thread_id": sid}, "callbacks": [usage_cb]}
     active_graph = thinking_graph if req.thinking else graph
 
     # ── Thread-safe queue bridges sync graph → async SSE generator ──
@@ -714,9 +745,21 @@ async def chat_stream(req: ChatRequest, request: Request, user: dict = Depends(g
             thread_id=sid
         )
 
-        yield f"data: {json.dumps({'type': 'done', 'session_id': sid, 'latency_ms': elapsed_ms})}\n\n"
+        request_usage = summarize_request(usage_cb.records)
+        LEDGER.record_request(sid, request_usage)
+        PROM_LLM_INPUT_TOKENS.labels(endpoint="/api/chat/stream").inc(request_usage["input_tokens"])
+        PROM_LLM_OUTPUT_TOKENS.labels(endpoint="/api/chat/stream").inc(request_usage["output_tokens"])
+        PROM_LLM_COST_USD.labels(endpoint="/api/chat/stream").inc(request_usage["cost_usd"])
+        yield f"data: {json.dumps({'type': 'done', 'session_id': sid, 'latency_ms': elapsed_ms, 'usage': request_usage})}\n\n"
         PROM_REQUEST_LATENCY.labels(endpoint="/api/chat/stream", method="POST").observe(elapsed_ms / 1000)
-        _audit_log("chat_stream_response", user, session_id=sid, latency_ms=elapsed_ms)
+        _audit_log(
+            "chat_stream_response",
+            user,
+            session_id=sid,
+            latency_ms=elapsed_ms,
+            tokens_total=request_usage["total_tokens"],
+            cost_usd=request_usage["cost_usd"],
+        )
 
     return StreamingResponse(
         event_generator(),
@@ -790,6 +833,20 @@ async def health():
         checks["status"] = "degraded"
 
     return checks
+
+
+@app.get("/api/usage/summary")
+async def usage_summary(user: dict = Depends(get_current_user)):
+    """Global usage and cost totals across all requests."""
+    _audit_log("usage_summary_view", user)
+    return {"global": LEDGER.get_global()}
+
+
+@app.get("/api/usage/session/{session_id}")
+async def usage_session(session_id: str, user: dict = Depends(get_current_user)):
+    """Usage and cost totals for one chat session."""
+    _audit_log("usage_session_view", user, session_id=session_id)
+    return {"session_id": session_id, "usage": LEDGER.get_session(session_id)}
 
 
 # ── Prometheus Metrics Endpoint (P2.22) ───────────────────────────

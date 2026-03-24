@@ -156,6 +156,9 @@ src/prepare_vector_db_old2.py
 # Legacy Gradio UI (replaced by api.py + static frontend)
 src/app.py
 
+# Junk Text files
+todo.txt
+
 # Junk / unrelated files saved in images/
 images/STT tools - Google Search.html
 images/STT tools - Google Search_files/

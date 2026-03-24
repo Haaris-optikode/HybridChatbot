@@ -1,9 +1,9 @@
-﻿<!DOCTYPE html>
+<!DOCTYPE html>
 <html lang="en" data-theme="light">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>MedGraph AI â€” Clinical Intelligence Platform</title>
+    <title>MedGraph AI - Clinical Intelligence Platform</title>
     <link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
@@ -223,7 +223,7 @@
             font-weight: 500;
         }
 
-        /* â”€â”€ Metrics â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */
+        /* ── Metrics ───────────────────────────────────────────── */
         .metrics-grid {
             display: grid;
             grid-template-columns: 1fr 1fr;
@@ -256,8 +256,26 @@
             margin-top: 2px;
             font-weight: 500;
         }
+        .usage-inline {
+            display: flex;
+            gap: 8px;
+            flex-wrap: wrap;
+            margin-top: 6px;
+        }
+        .usage-pill {
+            display: inline-flex;
+            align-items: center;
+            gap: 4px;
+            padding: 3px 7px;
+            border-radius: 999px;
+            border: 1px solid var(--border-color);
+            background: var(--bg-tertiary);
+            font-size: 10px;
+            color: var(--text-muted);
+            font-family: 'JetBrains Mono', monospace;
+        }
 
-        /* â”€â”€ New chat button â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */
+        /* ── New chat button ───────────────────────────────────── */
         .new-chat-btn {
             margin: 12px 14px;
             padding: 9px;
@@ -281,7 +299,7 @@
             border-color: var(--accent);
         }
 
-        /* â”€â”€ Sidebar footer â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */
+        /* ── Sidebar footer ────────────────────────────────────── */
         .sidebar-footer {
             margin-top: auto;
             padding: 12px 14px;
@@ -306,7 +324,7 @@
             font-size: 12px;
         }
 
-        /* â”€â”€ Dev tools â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */
+        /* ── Dev tools ─────────────────────────────────────────── */
         .dev-tools {
             margin-top: 6px;
             padding: 8px 10px;
@@ -342,9 +360,9 @@
         }
         .dev-btn i { font-size: 10px; }
 
-        /* â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+        /* ══════════════════════════════════════════════════════════
            CHAT HISTORY
-           â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â• */
+           ══════════════════════════════════════════════════════════ */
         .history-section {
             flex: 1;
             min-height: 0;
@@ -576,9 +594,9 @@
         .sidebar::-webkit-scrollbar { width: 3px; }
         .sidebar::-webkit-scrollbar-thumb { background: var(--border-color); border-radius: 2px; }
 
-        /* â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+        /* ══════════════════════════════════════════════════════════
            MAIN CONTENT
-           â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â• */
+           ══════════════════════════════════════════════════════════ */
         .main-content {
             flex: 1;
             display: flex;
@@ -587,7 +605,7 @@
             background: var(--bg-primary);
         }
 
-        /* â”€â”€ Top bar â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */
+        /* ── Top bar ───────────────────────────────────────────── */
         .topbar {
             position: relative;
             display: flex;
@@ -668,12 +686,12 @@
         [data-theme="dark"] .theme-toggle .fa-sun { display: none; }
         [data-theme="dark"] .theme-toggle .fa-moon { display: inline; }
 
-        /* Heartbeat line â€” hidden */
+        /* Heartbeat line - hidden */
         .heartbeat-line { display: none; }
 
-        /* â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+        /* ══════════════════════════════════════════════════════════
            CHAT AREA
-           â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â• */
+           ══════════════════════════════════════════════════════════ */
         .chat-area {
             flex: 1;
             overflow-y: auto;
@@ -685,7 +703,7 @@
         .chat-area::-webkit-scrollbar-track { background: transparent; }
         .chat-area::-webkit-scrollbar-thumb { background: var(--border-color); border-radius: 3px; }
 
-        /* â”€â”€ Welcome screen â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */
+        /* ── Welcome screen ────────────────────────────────────── */
         .welcome-container {
             display: flex;
             flex-direction: column;
@@ -780,9 +798,9 @@
             font-weight: 500;
         }
 
-        /* â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+        /* ══════════════════════════════════════════════════════════
            MESSAGES
-           â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â• */
+           ══════════════════════════════════════════════════════════ */
         .messages-container {
             display: flex;
             flex-direction: column;
@@ -880,7 +898,7 @@
             border: 1px solid #334155;
         }
 
-        /* â”€â”€ Message content typography â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */
+        /* ── Message content typography ────────────────────────── */
         .msg-bubble p { margin-bottom: 8px; line-height: 1.7; }
         .msg-bubble p:last-child { margin-bottom: 0; }
         .msg-bubble strong { font-weight: 600; color: var(--text-primary); }
@@ -929,7 +947,7 @@
             color: var(--accent-text);
         }
 
-        /* â”€â”€ Latency badge â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */
+        /* ── Latency badge ─────────────────────────────────────── */
         .latency-badge {
             display: inline-flex;
             align-items: center;
@@ -945,7 +963,7 @@
         }
         .latency-badge i { font-size: 8px; color: var(--accent); }
 
-        /* â”€â”€ Typing indicator â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */
+        /* ── Typing indicator ──────────────────────────────────── */
         .typing-indicator {
             display: flex;
             gap: 12px;
@@ -978,7 +996,7 @@
             30% { opacity: 1; transform: scale(1.2); }
         }
 
-        /* â”€â”€ Streaming cursor â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */
+        /* ── Streaming cursor ──────────────────────────────────── */
         .msg-bubble.streaming::after {
             content: '\2588';
             display: inline;
@@ -1003,9 +1021,9 @@
             border-radius: var(--radius);
         }
 
-        /* â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+        /* ══════════════════════════════════════════════════════════
            FEEDBACK BUTTONS
-           â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â• */
+           ══════════════════════════════════════════════════════════ */
         .msg-actions {
             display: flex;
             align-items: center;
@@ -1053,9 +1071,9 @@
             font-family: 'JetBrains Mono', monospace;
         }
 
-        /* â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+        /* ══════════════════════════════════════════════════════════
            INPUT AREA
-           â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â• */
+           ══════════════════════════════════════════════════════════ */
         .input-area {
             padding: 14px 40px 18px;
             border-top: 1px solid var(--border-color);
@@ -1145,9 +1163,9 @@
             font-size: 9.5px;
         }
 
-        /* â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+        /* ══════════════════════════════════════════════════════════
            TOOLS SELECTOR
-           â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â• */
+           ══════════════════════════════════════════════════════════ */
         .tools-btn {
             width: 38px;
             height: 38px;
@@ -1390,9 +1408,9 @@
 
         .active-tool-badge .badge-x { font-size: 8px; opacity: 0.6; }
 
-        /* â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+        /* ══════════════════════════════════════════════════════════
            LOGIN OVERLAY
-           â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â• */
+           ══════════════════════════════════════════════════════════ */
         .login-overlay {
             position: fixed;
             inset: 0;
@@ -1479,9 +1497,9 @@
             color: var(--text-muted); line-height: 1.5;
         }
 
-        /* â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+        /* ══════════════════════════════════════════════════════════
            MARKDOWN EXTRAS
-           â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â• */
+           ══════════════════════════════════════════════════════════ */
         .msg-bubble h1 {
             font-size: 15px;
             font-weight: 700;
@@ -1571,7 +1589,7 @@
             line-height: 1.5;
         }
 
-        /* â”€â”€ Medical value badges â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */
+        /* ── Medical value badges ──────────────────────────────── */
         .val-high {
             color: var(--red);
             font-weight: 600;
@@ -1609,9 +1627,9 @@
             white-space: nowrap;
         }
 
-        /* â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+        /* ══════════════════════════════════════════════════════════
            RESPONSIVE
-           â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â• */
+           ══════════════════════════════════════════════════════════ */
         @media (max-width: 900px) {
             .sidebar { display: none; }
             .chat-area { padding: 16px; }
@@ -1629,7 +1647,7 @@
     <div class="bg-orb orb-2"></div>
     <div class="bg-orb orb-3"></div>
 
-    <!-- â•â•â•â•â•â•â•â•â•â•â• LOGIN OVERLAY â•â•â•â•â•â•â•â•â•â•â• -->
+    <!-- ═══════════ LOGIN OVERLAY ═══════════ -->
     <div class="login-overlay" id="loginOverlay">
         <div class="login-card">
             <div class="login-brand">
@@ -1665,7 +1683,7 @@
     </div>
 
     <div class="app-container" id="appContainer" style="display:none;">
-        <!-- â•â•â•â•â•â•â•â•â•â•â• SIDEBAR â•â•â•â•â•â•â•â•â•â•â• -->
+        <!-- ═══════════ SIDEBAR ═══════════ -->
         <aside class="sidebar">
             <div class="sidebar-header">
                 <div class="brand">
@@ -1681,8 +1699,8 @@
             <div class="user-info" id="userInfo" style="display:none;">
                 <div class="user-info-avatar" id="userAvatar">?</div>
                 <div class="user-info-text">
-                    <div class="user-info-name" id="userName">â€”</div>
-                    <div class="user-info-role" id="userRole">â€”</div>
+                    <div class="user-info-name" id="userName">-</div>
+                    <div class="user-info-role" id="userRole">-</div>
                 </div>
                 <button class="logout-btn" onclick="handleLogout()" title="Sign out">
                     <i class="fa-solid fa-right-from-bracket"></i>
@@ -1694,7 +1712,7 @@
                 <div class="status-item">
                     <div class="status-dot checking" id="dotLLM"></div>
                     <span>LLM Engine</span>
-                    <span class="status-value" id="statusModel">â€”</span>
+                    <span class="status-value" id="statusModel">-</span>
                 </div>
                 <div class="status-item">
                     <div class="status-dot checking" id="dotQdrant"></div>
@@ -1704,7 +1722,7 @@
                 <div class="status-item">
                     <div class="status-dot checking" id="dotEmbedding"></div>
                     <span>Embedding Model</span>
-                    <span class="status-value" id="statusEmbedding">â€”</span>
+                    <span class="status-value" id="statusEmbedding">-</span>
                 </div>
                 <div class="status-item">
                     <div class="status-dot amber"></div>
@@ -1719,16 +1737,28 @@
                     <div class="metric-label">Queries</div>
                 </div>
                 <div class="metric-card">
-                    <div class="metric-value" id="metricAvgLatency">â€”</div>
+                    <div class="metric-value" id="metricAvgLatency">-</div>
                     <div class="metric-label">Avg Latency</div>
                 </div>
                 <div class="metric-card">
-                    <div class="metric-value" id="metricVectors">â€”</div>
+                    <div class="metric-value" id="metricVectors">-</div>
                     <div class="metric-label">Vectors</div>
                 </div>
                 <div class="metric-card">
-                    <div class="metric-value" id="metricUptime">â€”</div>
+                    <div class="metric-value" id="metricUptime">-</div>
                     <div class="metric-label">Uptime</div>
+                </div>
+                <div class="metric-card">
+                    <div class="metric-value" id="metricSessionTokens">-</div>
+                    <div class="metric-label">Session Tokens</div>
+                </div>
+                <div class="metric-card">
+                    <div class="metric-value" id="metricSessionCost">-</div>
+                    <div class="metric-label">Session Cost</div>
+                </div>
+                <div class="metric-card">
+                    <div class="metric-value" id="metricTotalCost">-</div>
+                    <div class="metric-label">Total Cost</div>
                 </div>
             </div>
 
@@ -1781,11 +1811,11 @@
             </div>
         </aside>
 
-        <!-- â•â•â•â•â•â•â•â•â•â•â• MAIN â•â•â•â•â•â•â•â•â•â•â• -->
+        <!-- ═══════════ MAIN ═══════════ -->
         <main class="main-content">
             <div class="topbar">
                 <span class="topbar-title"><i class="fa-solid fa-message"></i>Clinical Query Console</span>
-                <span class="topbar-subtitle" id="sessionLabel">Session: â€”</span>
+                <span class="topbar-subtitle" id="sessionLabel">Session: -</span>
                 <div class="topbar-actions">
                     <button class="theme-toggle" title="Toggle theme" onclick="toggleTheme()">
                         <i class="fa-solid fa-moon"></i>
@@ -1932,6 +1962,7 @@
         let selectedTool = 'auto';        // tool override: auto, vector_db, web_search, sql
         let thinkingMode = false;            // deep thinking toggle
         const startTime = Date.now();
+        let lastUsage = null;
 
         function getToken() { return localStorage.getItem('medgraph-token'); }
         function setToken(t) { localStorage.setItem('medgraph-token', t); }
@@ -2000,6 +2031,58 @@
             pollHealth();
             setInterval(pollHealth, 30000);
             loadChatHistory();
+            refreshUsageMetrics();
+            setInterval(refreshUsageMetrics, 60000);
+        }
+
+        function formatUsd(v) {
+            const n = Number(v || 0);
+            return '$' + n.toFixed(6);
+        }
+
+        function formatInt(v) {
+            return Number(v || 0).toLocaleString('en-US');
+        }
+
+        function renderUsageInline(usage) {
+            if (!usage) return '';
+            return `
+                <div class="usage-inline">
+                    <span class="usage-pill"><i class="fa-solid fa-microchip"></i> ${formatInt(usage.total_tokens)} tokens</span>
+                    <span class="usage-pill"><i class="fa-solid fa-dollar-sign"></i> ${formatUsd(usage.cost_usd)}</span>
+                </div>
+            `;
+        }
+
+        async function refreshUsageMetrics() {
+            try {
+                const summaryResp = await authFetch('/api/usage/summary');
+                if (summaryResp.ok) {
+                    const summary = await summaryResp.json();
+                    const g = summary.global || {};
+                    document.getElementById('metricTotalCost').textContent = formatUsd(g.cost_usd);
+                }
+            } catch (e) {
+                console.warn('Usage summary load failed:', e);
+            }
+
+            if (!sessionId) return;
+            try {
+                const sessionResp = await authFetch(`/api/usage/session/${encodeURIComponent(sessionId)}`);
+                if (sessionResp.ok) {
+                    const data = await sessionResp.json();
+                    const s = data.usage || {};
+                    document.getElementById('metricSessionTokens').textContent = formatInt(s.total_tokens);
+                    document.getElementById('metricSessionCost').textContent = formatUsd(s.cost_usd);
+                }
+            } catch (e) {
+                console.warn('Session usage load failed:', e);
+            }
+        }
+
+        function applyRequestUsage(usage) {
+            if (!usage) return;
+            lastUsage = usage;
         }
 
         async function authFetch(url, options = {}) {
@@ -2220,7 +2303,7 @@
             return date.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
         }
 
-        function addMessage(role, content, latencyMs = null, timeStr = null) {
+        function addMessage(role, content, latencyMs = null, timeStr = null, usage = null) {
             welcomeScreen.style.display = 'none';
             messagesContainer.style.display = 'flex';
 
@@ -2263,6 +2346,7 @@
                         <span class="msg-time">${displayTime}</span>
                     </div>
                     <div class="msg-bubble">${role === 'bot' ? renderMarkdown(content) : escapeHtml(content)}</div>
+                    ${role === 'bot' ? renderUsageInline(usage) : ''}
                     ${latencyHtml}
                     ${feedbackHtml}
                 </div>
@@ -2367,11 +2451,16 @@
             return row;
         }
 
-        function finalizeStreamingMessage(row, fullContent, latencyMs) {
+        function finalizeStreamingMessage(row, fullContent, latencyMs, usage = null) {
             const body = row.querySelector('.msg-body');
             const bubble = row.querySelector('.msg-bubble');
             if (bubble) bubble.classList.remove('streaming');
             row.dataset.botContent = fullContent;
+            if (usage) {
+                const usageDiv = document.createElement('div');
+                usageDiv.innerHTML = renderUsageInline(usage);
+                body.appendChild(usageDiv.firstElementChild);
+            }
 
             if (latencyMs > 0) {
                 const secs = (latencyMs / 1000).toFixed(2);
@@ -2449,6 +2538,7 @@
                 const decoder = new TextDecoder();
                 let fullContent = '';
                 let latencyMs = 0;
+                let usage = null;
                 let buffer = '';
                 let messageRow = null;
 
@@ -2485,6 +2575,8 @@
                             } else if (payload.type === 'done') {
                                 sessionId = payload.session_id;
                                 latencyMs = payload.latency_ms;
+                                usage = payload.usage || null;
+                                applyRequestUsage(usage);
 
                             } else if (payload.type === 'error') {
                                 hideTyping();
@@ -2504,9 +2596,9 @@
                 // Finalize
                 hideTyping();
                 if (!messageRow) {
-                    addMessage('bot', fullContent || 'No response received.', latencyMs);
+                    addMessage('bot', fullContent || 'No response received.', latencyMs, null, usage);
                 } else {
-                    finalizeStreamingMessage(messageRow, fullContent, latencyMs);
+                    finalizeStreamingMessage(messageRow, fullContent, latencyMs, usage);
                 }
 
                 if (sessionId) {
@@ -2518,6 +2610,7 @@
                 document.getElementById('metricAvgLatency').textContent = (totalLatency / queryCount / 1000).toFixed(1) + 's';
 
                 loadChatHistory();
+                refreshUsageMetrics();
 
             } catch (err) {
                 clearTimeout(safetyTimer);
@@ -2549,11 +2642,15 @@
             totalLatency = 0;
             botMessageIndex = 0;
             lastUserQuery = '';
+            lastUsage = null;
             document.getElementById('metricQueries').textContent = '0';
             document.getElementById('metricAvgLatency').textContent = '—';
             document.getElementById('sessionLabel').textContent = 'Session: —';
+            document.getElementById('metricSessionTokens').textContent = '—';
+            document.getElementById('metricSessionCost').textContent = '—';
             // Deactivate history items
             document.querySelectorAll('.history-item.active').forEach(el => el.classList.remove('active'));
+            refreshUsageMetrics();
         }
 
         (function() {
@@ -2758,6 +2855,7 @@
 
                 queryCount = data.messages.length;
                 document.getElementById('metricQueries').textContent = queryCount;
+                refreshUsageMetrics();
                 scrollToBottom();
 
             } catch (e) {

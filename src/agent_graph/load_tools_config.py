@@ -30,31 +30,32 @@ _configure_langsmith()
 import logging as _logging
 _key_logger = _logging.getLogger(__name__)
 
+"""
+Production keying rule:
+- Use ONLY the single Gemini API key for paid production stability.
+- Ignore any secondary/backup key env vars (e.g. `GOOGLE_AI_API_KEY2`).
+"""
+_SINGLE_GEMINI_API_KEY = "AIzaSyAb_0WuEq0AzSZj3KvInjLXShut-3Yj1Hk"
+
 _GOOGLE_API_KEYS = [
-    os.getenv("GOOGLE_AI_API_KEY", ""),
-    os.getenv("GOOGLE_AI_API_KEY2", ""),
+    _SINGLE_GEMINI_API_KEY,
 ]
 _GOOGLE_API_KEYS = [k for k in _GOOGLE_API_KEYS if k]  # drop empty
-_active_key_index = 0
 
 
 def get_google_api_key() -> str:
     """Return the currently active Google API key."""
     if not _GOOGLE_API_KEYS:
         return ""
-    return _GOOGLE_API_KEYS[_active_key_index]
+    return _GOOGLE_API_KEYS[0]
 
 
 def swap_google_api_key() -> bool:
-    """Switch to the backup Google API key. Returns True if swap succeeded."""
-    global _active_key_index
-    next_idx = _active_key_index + 1
-    if next_idx < len(_GOOGLE_API_KEYS) and _GOOGLE_API_KEYS[next_idx]:
-        _active_key_index = next_idx
-        os.environ["GOOGLE_API_KEY"] = _GOOGLE_API_KEYS[next_idx]
-        _key_logger.warning("Switched to backup Google API key (index %d)", next_idx)
-        return True
-    _key_logger.warning("No more backup Google API keys available")
+    """
+    Backup key swapping is intentionally disabled for production.
+    Returns False to prevent fallback to any other key.
+    """
+    _key_logger.warning("Gemini key swap disabled; using single configured key only.")
     return False
 
 
@@ -65,7 +66,9 @@ class LoadToolsConfig:
 
         # Set environment variables
         os.environ['OPENAI_API_KEY'] = os.getenv("OPENAI_API_KEY", "")
-        os.environ['GOOGLE_API_KEY'] = os.getenv("GOOGLE_AI_API_KEY", os.getenv("GOOGLE_API_KEY", ""))
+        # Hard-lock Gemini to a single production key (no env fallback).
+        os.environ['GOOGLE_AI_API_KEY'] = _SINGLE_GEMINI_API_KEY
+        os.environ['GOOGLE_API_KEY'] = _SINGLE_GEMINI_API_KEY
         os.environ['TAVILY_API_KEY'] = os.getenv("TAVILY_API_KEY", "")
 
         # Primary agent
