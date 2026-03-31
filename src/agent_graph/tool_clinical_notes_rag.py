@@ -12,7 +12,12 @@ from langchain_qdrant import QdrantVectorStore
 from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_core.tools import tool
 from langchain_openai import ChatOpenAI
-from agent_graph.load_tools_config import LoadToolsConfig, get_google_api_key, swap_google_api_key
+from agent_graph.load_tools_config import (
+    LoadToolsConfig,
+    build_model_chain,
+    get_google_api_key,
+    swap_google_api_key,
+)
 from qdrant_client import QdrantClient
 from pyprojroot import here
 import logging
@@ -781,17 +786,45 @@ def _is_quota_error(exc: Exception) -> bool:
     return any(k in s for k in ["rate limit", "429", "resource_exhausted", "quota"])
 
 
-def _llm_invoke_with_fallback(llm_factory, prompt):
-    """Invoke LLM; on quota exhaustion swap to backup API key and retry once."""
-    model_name, llm = llm_factory()
-    try:
-        return model_name, _extract_text_content(llm.invoke(prompt).content)
-    except Exception as e:
-        if _is_quota_error(e) and swap_google_api_key():
-            logger.warning("Quota exhausted — switched to backup API key, retrying")
-            model_name, llm = llm_factory()
-            return model_name, _extract_text_content(llm.invoke(prompt).content)
-        raise
+def _is_server_overload(exc: Exception) -> bool:
+    """Detect Gemini 504 DEADLINE_EXCEEDED and similar server-side overloads."""
+    s = str(exc).lower()
+    return any(k in s for k in ["504", "deadline_exceeded", "deadline expired", "503", "overloaded", "502"])
+
+
+def _llm_invoke_with_fallback(llm_factory, prompt, max_retries: int = 2, model_chain=None):
+    """Invoke LLM with retry for quota exhaustion AND server-side 504/deadline errors.
+    
+    Retry strategy:
+    - Quota errors: swap API key, retry once
+    - 504/DEADLINE_EXCEEDED: exponential backoff (2s, 4s), retry up to max_retries
+    """
+    chain = model_chain or [None]
+    last_exc = None
+    model_attempt = 0
+    for model_override in chain:
+        model_attempt += 1
+        model_label = model_override or "configured-default"
+        for attempt in range(max_retries + 1):
+            model_name, llm = llm_factory(model_override=model_override)
+            try:
+                return model_name, _extract_text_content(llm.invoke(prompt).content)
+            except Exception as e:
+                last_exc = e
+                if _is_quota_error(e) and attempt == 0 and swap_google_api_key():
+                    logger.warning("Quota exhausted — switched to backup API key, retrying")
+                    continue
+                if _is_server_overload(e) and attempt < max_retries:
+                    wait = (attempt + 1) * 2  # 2s, 4s
+                    logger.warning("Server overload (model=%s, attempt %d/%d): %s — retrying in %ds",
+                                   model_label, attempt + 1, max_retries + 1, str(e)[:150], wait)
+                    _time.sleep(wait)
+                    continue
+                break
+        if model_attempt < len(chain):
+            logger.warning("Model fallback: switching from '%s' to next candidate after error: %s",
+                           model_label, str(last_exc)[:200])
+    raise last_exc  # should not reach here
 
 
 def _is_reasoning_model(model_name: str) -> bool:
@@ -800,10 +833,11 @@ def _is_reasoning_model(model_name: str) -> bool:
     return any(model_name.lower().startswith(p) for p in reasoning_prefixes)
 
 
-def _get_summarization_llm():
+def _get_summarization_llm(model_override: str = None):
     """Create the summarization LLM — supports both Google Gemini and OpenAI."""
-    model = getattr(TOOLS_CFG, "clinical_notes_rag_summarization_llm",
-                    TOOLS_CFG.clinical_notes_rag_llm)
+    base_model = getattr(TOOLS_CFG, "clinical_notes_rag_summarization_llm",
+                         TOOLS_CFG.clinical_notes_rag_llm)
+    model = model_override or base_model
     provider = getattr(TOOLS_CFG, "llm_provider", "openai")
 
     if provider == "google" or model.startswith("gemini"):
@@ -871,7 +905,7 @@ STRICT GROUNDING RULES:
 - Include ALL entries in tables — do not truncate or summarize tables. If there are 12 surgical procedures, list all 12. If there are 8 allergies, list all 8. If there are 38 lab values, list all 38.
 - When values changed over time, show the full trajectory with dates (not just admission → discharge).
 - Never round, paraphrase loosely, or omit documented details.
-- If a section truly has no data anywhere in the record, write "Not documented in record."
+- If a section truly has no data anywhere in the record, write "No data documented in record."
 
 RECORD:
 
@@ -907,10 +941,13 @@ RECORD SECTION:
 {section}"""
 
 
-def _get_map_llm():
-    """Lighter LLM for the map phase — lower max_tokens to enforce brevity."""
-    model = getattr(TOOLS_CFG, "clinical_notes_rag_summarization_llm",
-                    TOOLS_CFG.clinical_notes_rag_llm)
+def _get_map_llm(model_override: str = None):
+    """Lighter LLM for the map phase — lower max_tokens to enforce brevity.
+    Timeout set to 90s to give Gemini extra server-side processing time
+    and avoid 504 DEADLINE_EXCEEDED on large chunks."""
+    base_model = getattr(TOOLS_CFG, "clinical_notes_rag_summarization_llm",
+                         TOOLS_CFG.clinical_notes_rag_llm)
+    model = model_override or base_model
     provider = getattr(TOOLS_CFG, "llm_provider", "openai")
 
     if provider == "google" or model.startswith("gemini"):
@@ -919,8 +956,8 @@ def _get_map_llm():
             model=model,
             google_api_key=get_google_api_key(),
             temperature=0.0,
-            max_output_tokens=4000,     # enough to preserve all table data per group
-            timeout=60,
+            max_output_tokens=2048,     # reduced from 4000 to enforce conciseness
+            timeout=90,                 # increased from 60 to avoid Gemini 504s
             max_retries=2,
             thinking_budget=0,
         )
@@ -930,15 +967,15 @@ def _get_map_llm():
             model=model,
             max_completion_tokens=4096,
             api_key=os.getenv("OPENAI_API_KEY"),
-            request_timeout=60,
+            request_timeout=90,
             max_retries=2,
         )
     return model, ChatOpenAI(
         model=model,
         temperature=0.0,
-        max_tokens=3000,
+        max_tokens=2048,
         api_key=os.getenv("OPENAI_API_KEY"),
-        request_timeout=60,
+        request_timeout=90,
         max_retries=2,
     )
 
@@ -947,7 +984,8 @@ def _map_reduce_summarize(patient_mrn: str, full_record: str) -> tuple:
     """Map-reduce parallel summarization.
 
     Strategy:
-      1. Split record into ≤4 groups at paragraph boundaries
+      1. Split record into 6-8 groups at paragraph boundaries (small enough
+         to avoid Gemini 504 DEADLINE_EXCEEDED on any single call)
       2. MAP: Condense each group to concise bullet points (parallel, capped tokens)
       3. REDUCE: Synthesize bullets into final structured summary
 
@@ -956,15 +994,21 @@ def _map_reduce_summarize(patient_mrn: str, full_record: str) -> tuple:
     Returns:
         (summary_text, model_name)
     """
-    model_name = getattr(TOOLS_CFG, "clinical_notes_rag_summarization_llm",
-                         TOOLS_CFG.clinical_notes_rag_llm)
+    primary_model = getattr(TOOLS_CFG, "clinical_notes_rag_summarization_llm",
+                            TOOLS_CFG.clinical_notes_rag_llm)
+    model_chain = build_model_chain(
+        primary_model,
+        getattr(TOOLS_CFG, "clinical_notes_rag_summarization_fallback_llms", []),
+    )
+    model_name = primary_model
 
     # Split record into sections at paragraph boundaries
     raw_sections = full_record.split("\n\n")
     sections = [s.strip() for s in raw_sections if s.strip()]
 
-    # Use 3-4 groups (fewer = less API overhead, still parallelizable)
-    NUM_GROUPS = min(4, max(2, len(sections) // 6))
+    # Use 6-8 groups (more groups = smaller per-call token count = avoids Gemini 504s)
+    # Previous: 2-4 groups caused ~7-10K chars/group which overwhelmed Gemini's server
+    NUM_GROUPS = min(8, max(3, len(sections) // 4))
     total_chars = sum(len(s) for s in sections)
     target_group_size = total_chars // NUM_GROUPS
 
@@ -988,7 +1032,12 @@ def _map_reduce_summarize(patient_mrn: str, full_record: str) -> tuple:
     def extract_facts(group_text: str) -> str:
         try:
             prompt = _MAP_EXTRACT_PROMPT.format(mrn=patient_mrn, section=group_text)
-            _, text = _llm_invoke_with_fallback(_get_map_llm, prompt)
+            _, text = _llm_invoke_with_fallback(
+                _get_map_llm,
+                prompt,
+                max_retries=2,
+                model_chain=model_chain,
+            )
             return text
         except Exception as e:
             logger.warning("Map phase failed for a group: %s", str(e)[:200])
@@ -996,7 +1045,7 @@ def _map_reduce_summarize(patient_mrn: str, full_record: str) -> tuple:
             return group_text[:2000]
 
     t_map_start = _time.perf_counter()
-    with _futures.ThreadPoolExecutor(max_workers=min(len(groups), 3)) as pool:
+    with _futures.ThreadPoolExecutor(max_workers=min(len(groups), 4)) as pool:
         partial_summaries = list(pool.map(extract_facts, groups))
     t_map = _time.perf_counter() - t_map_start
 
@@ -1009,7 +1058,11 @@ def _map_reduce_summarize(patient_mrn: str, full_record: str) -> tuple:
 
     t_reduce_start = _time.perf_counter()
     reduce_prompt = _SUMMARY_PROMPT.format(mrn=patient_mrn, record=merged_facts)
-    _, final_summary = _llm_invoke_with_fallback(_get_summarization_llm, reduce_prompt)
+    model_name, final_summary = _llm_invoke_with_fallback(
+        _get_summarization_llm,
+        reduce_prompt,
+        model_chain=model_chain,
+    )
     t_reduce = _time.perf_counter() - t_reduce_start
 
     logger.info("Reduce phase: %.1fs, output: %s chars", t_reduce, f"{len(final_summary):,}")
@@ -1027,11 +1080,37 @@ def _map_reduce_summarize(patient_mrn: str, full_record: str) -> tuple:
 
 
 @tool
-def lookup_clinical_notes(query: str) -> str:
-    """Search among clinical notes to find specific information. Use this for ANY targeted question about patient data including: date of birth, demographics, allergies, medications, labs, vitals, procedures, diagnoses, imaging, or any other specific clinical detail. Input should be the clinical question."""
+def lookup_clinical_notes(query: str, document_id: str = "") -> str:
+    """Search among clinical notes to find specific information. Use this for ANY targeted question about patient data including: date of birth, demographics, allergies, medications, labs, vitals, procedures, diagnoses, imaging, or any other specific clinical detail. Input should be the clinical question. Optionally pass document_id to restrict search to a specific uploaded document (get IDs from list_uploaded_documents)."""
     try:
+        import signal
+        import threading
+        
         rag = get_rag_tool_instance()
-        return rag.search(query)
+        result = [None]
+        exception = [None]
+        
+        # Use document_id filter if provided (strip whitespace, treat empty as None)
+        doc_filter = document_id.strip() if document_id else None
+        
+        def _search_with_timeout():
+            try:
+                result[0] = rag.search(query, document_id=doc_filter)
+            except Exception as e:
+                exception[0] = e
+        
+        # Execute search with 15 second timeout
+        thread = threading.Thread(target=_search_with_timeout, daemon=False)
+        thread.start()
+        thread.join(timeout=15)
+        
+        if thread.is_alive():
+            return f"Clinical notes search exceeded 15 second timeout. Please refine your query to be more specific."
+        
+        if exception[0]:
+            return f"Error searching clinical notes: {exception[0]}. Ensure the vector database is initialized."
+        
+        return result[0] or "No results found."
     except Exception as e:
         return f"Error searching clinical notes: {e}. Ensure the vector database is initialized."
 
@@ -1040,22 +1119,43 @@ def lookup_clinical_notes(query: str) -> str:
 def lookup_patient_orders(patient_identifier: str) -> str:
     """Retrieve ALL orders for a patient — laboratory orders (with CPT/LOINC codes), medication orders (with RxNorm codes), procedure orders (with CPT/SNOMED codes), referrals/consultations, discharge prescriptions, and care directives. Input is the patient name (e.g. 'Robert Whitfield') or MRN (e.g. 'MRN-2026-004782'). Use this when asked for 'all orders', 'complete order list', 'what was ordered', or any comprehensive orders query."""
     try:
+        import threading
+        
         rag = get_rag_tool_instance()
         t_start = _time.perf_counter()
-
-        # Resolve identifier to MRN
-        patient_mrn = rag.resolve_to_mrn(patient_identifier)
-        if not patient_mrn:
-            return (f"Could not find a patient matching '{patient_identifier}'. "
-                    f"Use list_available_patients to see who is in the database.")
-        logger.info("[Orders] Resolved '%s' → %s", patient_identifier, patient_mrn)
-
-        # Fetch all order-related chunks (section-filtered)
-        result = rag.get_order_chunks_for_patient(patient_mrn)
-
+        
+        result = [None]
+        exception = [None]
+        
+        def _fetch_orders():
+            try:
+                # Resolve identifier to MRN
+                patient_mrn = rag.resolve_to_mrn(patient_identifier)
+                if not patient_mrn:
+                    exception[0] = f"Could not find a patient matching '{patient_identifier}'. Use list_available_patients to see who is in the database."
+                    return
+                logger.info("[Orders] Resolved '%s' → %s", patient_identifier, patient_mrn)
+                
+                # Fetch all order-related chunks (section-filtered)
+                result[0] = rag.get_order_chunks_for_patient(patient_mrn)
+            except Exception as e:
+                exception[0] = str(e)
+        
+        # Execute with 20 second timeout
+        thread = threading.Thread(target=_fetch_orders, daemon=False)
+        thread.start()
+        thread.join(timeout=20)
+        
+        if thread.is_alive():
+            return "Order retrieval exceeded 20 second timeout. Try querying a single order type instead."
+        
         elapsed = _time.perf_counter() - t_start
-        logger.info("[Orders] Total retrieval: %.2fs for %s", elapsed, patient_mrn)
-        return result
+        logger.info("[Orders] Total retrieval: %.2fs", elapsed)
+        
+        if exception[0]:
+            return f"Error retrieving orders: {exception[0]}"
+        
+        return result[0] or "No orders found."
     except Exception as e:
         return f"Error retrieving orders: {e}"
 
@@ -1146,7 +1246,15 @@ def summarize_patient_record(patient_identifier: str) -> str:
         else:
             logger.info("Using single-pass summarization (record <= %d chars)", _MAP_REDUCE_THRESHOLD)
             prompt = _SUMMARY_PROMPT.format(mrn=patient_mrn, record=full_record)
-            model_name, summary = _llm_invoke_with_fallback(_get_summarization_llm, prompt)
+            model_chain = build_model_chain(
+                getattr(TOOLS_CFG, "clinical_notes_rag_summarization_llm", TOOLS_CFG.clinical_notes_rag_llm),
+                getattr(TOOLS_CFG, "clinical_notes_rag_summarization_fallback_llms", []),
+            )
+            model_name, summary = _llm_invoke_with_fallback(
+                _get_summarization_llm,
+                prompt,
+                model_chain=model_chain,
+            )
         t_llm_end = _time.perf_counter()
         logger.info("LLM: %.1fs, output=%s chars (model=%s)",
                     t_llm_end - t_llm_start, f"{len(summary):,}", model_name)

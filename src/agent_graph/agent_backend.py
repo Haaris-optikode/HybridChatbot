@@ -57,9 +57,17 @@ class BasicToolNode:
             tool_result = self.tools_by_name[tool_call["name"]].invoke(
                 tool_call["args"]
             )
+            # Tools return strings (not dicts); serialize only when needed.
+            # Guard against None to prevent "null" reaching the LLM.
+            if tool_result is None:
+                content = ""
+            elif isinstance(tool_result, str):
+                content = tool_result
+            else:
+                content = json.dumps(tool_result)
             outputs.append(
                 ToolMessage(
-                    content=json.dumps(tool_result),
+                    content=content,
                     name=tool_call["name"],
                     tool_call_id=tool_call["id"],
                 )

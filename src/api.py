@@ -29,6 +29,7 @@ import uuid
 import csv
 import logging
 import asyncio
+import re
 import queue as _queue_mod
 import threading as _threading
 import uvicorn
@@ -81,7 +82,7 @@ audit_logger.addHandler(_audit_file_handler)
 
 # ── LangGraph agent imports ──────────────────────────────────────────
 from chatbot.load_config import LoadProjectConfig
-from agent_graph.load_tools_config import LoadToolsConfig, swap_google_api_key
+from agent_graph.load_tools_config import LoadToolsConfig, build_model_chain, swap_google_api_key
 from agent_graph.build_full_graph import build_graph
 from utils.app_utils import create_directory
 from chatbot.memory import Memory
@@ -90,6 +91,60 @@ from observability.token_cost import RequestUsageCallback, summarize_request, LE
 
 PROJECT_CFG = LoadProjectConfig()
 TOOLS_CFG = LoadToolsConfig()
+
+_ROUTER_MODEL_CHAIN = build_model_chain(
+    TOOLS_CFG.primary_agent_router_llm,
+    getattr(TOOLS_CFG, "primary_agent_router_fallback_llms", []),
+)
+_SYNTH_MODEL_CHAIN = build_model_chain(
+    TOOLS_CFG.primary_agent_llm,
+    getattr(TOOLS_CFG, "primary_agent_fallback_llms", []),
+)
+_THINKING_MODEL_CHAIN = build_model_chain(
+    TOOLS_CFG.primary_agent_thinking_llm,
+    getattr(TOOLS_CFG, "primary_agent_thinking_fallback_llms", []),
+)
+_MODEL_FALLBACK_STATE = {
+    "router_idx": 0,
+    "synth_idx": 0,
+    "thinking_idx": 0,
+}
+
+
+def _apply_graph_model_overrides() -> None:
+    """Apply current fallback-model indexes to graph build environment vars."""
+    os.environ["MEDGRAPH_ROUTER_MODEL_OVERRIDE"] = _ROUTER_MODEL_CHAIN[_MODEL_FALLBACK_STATE["router_idx"]]
+    os.environ["MEDGRAPH_SYNTH_MODEL_OVERRIDE"] = _SYNTH_MODEL_CHAIN[_MODEL_FALLBACK_STATE["synth_idx"]]
+    os.environ["MEDGRAPH_THINKING_MODEL_OVERRIDE"] = _THINKING_MODEL_CHAIN[_MODEL_FALLBACK_STATE["thinking_idx"]]
+
+
+def _advance_graph_model_fallback(thinking_mode: bool) -> bool:
+    """Advance to next configured model candidate. Returns True if advanced."""
+    if thinking_mode and _MODEL_FALLBACK_STATE["thinking_idx"] < len(_THINKING_MODEL_CHAIN) - 1:
+        _MODEL_FALLBACK_STATE["thinking_idx"] += 1
+        _apply_graph_model_overrides()
+        logger.warning("Model fallback advanced (thinking): router=%s synth=%s thinking=%s",
+                       os.environ.get("MEDGRAPH_ROUTER_MODEL_OVERRIDE"),
+                       os.environ.get("MEDGRAPH_SYNTH_MODEL_OVERRIDE"),
+                       os.environ.get("MEDGRAPH_THINKING_MODEL_OVERRIDE"))
+        return True
+    if not thinking_mode and _MODEL_FALLBACK_STATE["synth_idx"] < len(_SYNTH_MODEL_CHAIN) - 1:
+        _MODEL_FALLBACK_STATE["synth_idx"] += 1
+        _apply_graph_model_overrides()
+        logger.warning("Model fallback advanced (normal): router=%s synth=%s",
+                       os.environ.get("MEDGRAPH_ROUTER_MODEL_OVERRIDE"),
+                       os.environ.get("MEDGRAPH_SYNTH_MODEL_OVERRIDE"))
+        return True
+    if _MODEL_FALLBACK_STATE["router_idx"] < len(_ROUTER_MODEL_CHAIN) - 1:
+        _MODEL_FALLBACK_STATE["router_idx"] += 1
+        _apply_graph_model_overrides()
+        logger.warning("Model fallback advanced (router): router=%s",
+                       os.environ.get("MEDGRAPH_ROUTER_MODEL_OVERRIDE"))
+        return True
+    return False
+
+
+_apply_graph_model_overrides()
 
 graph = build_graph(thinking_mode=False)
 thinking_graph = build_graph(thinking_mode=True)
@@ -260,10 +315,19 @@ def _audit_log(event: str, user: dict, **extra):
     audit_logger.info(json.dumps(entry))
 
 # ── System prompt ────────────────────────────────────────────────────
-SYSTEM_PROMPT = """You are MedGraph AI, a clinical intelligence assistant. Tools:
+SYSTEM_PROMPT = """You are MedGraph AI, a clinical intelligence assistant for EHR systems.
 
-1. **lookup_clinical_notes(query)** — Search patient records for ANY specific detail: DOB, age, allergies, medications, labs, vitals, diagnoses, procedures, imaging, history.
-2. **lookup_patient_orders(patient_identifier)** — Retrieve ALL orders for a patient: lab orders (CPT/LOINC), medication orders (RxNorm), procedure orders (CPT/SNOMED), referrals, discharge prescriptions, and care directives. Accepts patient NAME or MRN.
+IMPORTANT DISCLAIMER: You are NOT a licensed physician. Never provide diagnoses, prescribe treatments, or advise patients to change medications. Always recommend consulting a qualified healthcare provider for clinical decisions. Your role is to retrieve and organize clinical data — not to practice medicine.
+
+CONVERSATION RULES:
+- For greetings and general conversation (hello, hi, how are you, what are you, etc.), respond naturally and warmly. Introduce yourself as MedGraph AI. Do NOT call any tools for these — answer directly.
+- For general medical knowledge questions that are NOT about a specific patient in the database, use `tavily_search_results_json`.
+- For all patient-specific clinical questions, use the appropriate tool below.
+
+Tools:
+
+1. **lookup_clinical_notes(query, document_id="")** — Search patient records for ANY specific detail: DOB, age, allergies, medications, labs, vitals, diagnoses, procedures, imaging, history. Pass optional `document_id` to restrict search to a specific uploaded document.
+2. **lookup_patient_orders(patient_identifier)** — Retrieve ALL orders for a patient: lab orders (CPT/LOINC), medication orders (RxNorm), procedure orders (CPT/SNOMED), referrals/consultations, discharge prescriptions, and care directives. Accepts patient NAME or MRN.
 3. **summarize_patient_record(patient_identifier)** — ONLY for full clinical summaries/overviews. Accepts patient NAME or MRN.
 4. **list_available_patients()** — List all patients in the database.
 5. **tavily_search_results_json(query)** — Web search for general medical knowledge.
@@ -278,6 +342,13 @@ TOOL SELECTION (strict):
 - Do NOT use `summarize_patient_record` for specific factual lookups like DOB, allergies, or medication lists.
 - Do NOT use `summarize_patient_record` when the user asks an analytical or reasoning question — even if they say "synthesize" or "analyze". Use `lookup_clinical_notes` with multiple targeted queries instead.
 - Do NOT use `lookup_clinical_notes` when the user wants ALL orders — use `lookup_patient_orders` instead.
+
+UPLOADED DOCUMENTS:
+- When the user says they "just uploaded" a document, "I uploaded a file", "I added a new doc", or asks about a "recently uploaded" or "new" document, you MUST FIRST call `list_uploaded_documents()` to get its document_id and confirm it is in "ready" status.
+- Then use `lookup_clinical_notes(query, document_id="<the_id>")` to search WITHIN that specific document. Never skip the document_id filter when the user is asking about a specific uploaded file.
+- If the user asks for "the updated patient list" or "new patients" after uploading, call `list_uploaded_documents()` to get the document_id, then call `lookup_clinical_notes("patient name MRN demographics", document_id="<the_id>")` to extract patient info from the new document. Do NOT rely on `list_available_patients()` alone — that only shows previously indexed records and may lag behind a fresh upload.
+- If a document status is "processing", tell the user it is still being indexed and to try again in a moment.
+- This workflow ensures newly uploaded documents are always correctly queried even when they would be outranked by existing records in a general search.
 
 ANSWER RULES:
 - ONLY state facts from retrieved sources. If data is missing, say so.
@@ -471,6 +542,46 @@ class FeedbackRequest(BaseModel):
     comment: Optional[str] = None
 
 
+def _simple_capabilities_text() -> str:
+    """Prebuilt capabilities response for low-latency conversational queries."""
+    return (
+        "I can help you with four main things:\n"
+        "1. Search specific patient details from clinical records (allergies, meds, labs, vitals, diagnoses, procedures).\n"
+        "2. Generate full patient summaries from complete records.\n"
+        "3. Retrieve patient order data (labs, meds, procedures, referrals, discharge prescriptions).\n"
+        "4. Do web-backed medical information lookups when needed.\n\n"
+        "Share a patient name or MRN and what you need, and I will fetch it."
+    )
+
+
+def _fast_path_reply(message: str) -> Optional[str]:
+    """Return an instant canned response for simple conversational requests.
+
+    This avoids unnecessary LLM/tool latency for greetings and capability prompts.
+    """
+    m = (message or "").strip().lower()
+    if not m:
+        return None
+
+    is_greeting = bool(re.search(r"\b(hi|hello|hey|good morning|good afternoon|good evening|how are you)\b", m))
+    asks_capabilities = (
+        "what can you do" in m
+        or "your capabilities" in m
+        or "help me" in m
+        or "who are you" in m
+        or "about yourself" in m
+    )
+
+    if asks_capabilities:
+        return _simple_capabilities_text()
+    if is_greeting:
+        return (
+            "Hello, I am MedGraph AI. I can search patient records, summarize full charts, "
+            "retrieve order history, and answer medical info questions with web search when needed."
+        )
+    return None
+
+
 # ── Tool override prompts ────────────────────────────────────────────
 TOOL_PROMPTS = {
     "vector_db": (
@@ -525,6 +636,47 @@ async def chat(req: ChatRequest, request: Request, user: dict = Depends(get_curr
     sid = req.session_id or str(uuid.uuid4())
     history: List[ChatMessage] = sessions.get(sid)
 
+    # Instant fast-path for simple conversational/capabilities requests.
+    fast_reply = _fast_path_reply(validated_msg)
+    if fast_reply and not req.tool_override:
+        now = time.time()
+        history.append(ChatMessage(role="user", content=validated_msg, timestamp=now))
+        history.append(ChatMessage(role="assistant", content=fast_reply, timestamp=time.time()))
+        sessions.set(sid, history)
+
+        full_history = sessions.get(sid)
+        gradio_format = [(h.content, full_history[i + 1].content)
+                         for i, h in enumerate(full_history)
+                         if h.role == "user" and i + 1 < len(full_history)]
+        Memory.write_chat_history_to_file(
+            gradio_chatbot=gradio_format,
+            folder_path=PROJECT_CFG.memory_dir,
+            thread_id=sid
+        )
+
+        elapsed_ms = int((time.perf_counter() - t0) * 1000)
+        request_usage = {
+            "provider": "fast-path",
+            "model": "rule-based",
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "total_tokens": 0,
+            "cost_usd": 0.0,
+            "records": [],
+        }
+        LEDGER.record_request(sid, request_usage)
+        PROM_REQUEST_LATENCY.labels(endpoint="/api/chat", method="POST").observe(elapsed_ms / 1000)
+        _audit_log(
+            "chat_response",
+            user,
+            session_id=sid,
+            latency_ms=elapsed_ms,
+            tokens_total=0,
+            cost_usd=0.0,
+            fast_path=True,
+        )
+        return ChatResponse(reply=fast_reply, session_id=sid, latency_ms=elapsed_ms, usage=request_usage)
+
     # Build LangChain message list (trimmed to last N turns)
     system_prompt = SYSTEM_PROMPT
     if req.tool_override and req.tool_override in TOOL_PROMPTS:
@@ -541,7 +693,7 @@ async def chat(req: ChatRequest, request: Request, user: dict = Depends(get_curr
 
     # Run through LangGraph agent — with retry on transient LLM errors
     usage_cb = RequestUsageCallback(PRICING_TABLE)
-    config = {"configurable": {"thread_id": sid}, "callbacks": [usage_cb]}
+    config = {"callbacks": [usage_cb]}
     active_graph = thinking_graph if req.thinking else graph
     max_retries = 2
     for attempt in range(max_retries + 1):
@@ -567,6 +719,12 @@ async def chat(req: ChatRequest, request: Request, user: dict = Depends(get_curr
                     active_graph = graph
                     logger.warning("Thinking model quota exhausted, falling back to normal graph")
             if is_transient and attempt < max_retries:
+                advanced_model = _advance_graph_model_fallback(req.thinking)
+                if advanced_model:
+                    graph = build_graph(thinking_mode=False)
+                    thinking_graph = build_graph(thinking_mode=True)
+                    active_graph = thinking_graph if req.thinking else graph
+                    logger.warning("Rebuilt graphs with fallback model after transient error")
                 wait = (attempt + 1) * 5  # 5s, 10s
                 logger.warning("Transient LLM error (attempt %d/%d), retrying in %ds: %s",
                                attempt + 1, max_retries + 1, wait, str(exc)[:200])
@@ -616,7 +774,9 @@ async def chat(req: ChatRequest, request: Request, user: dict = Depends(get_curr
 _TOOL_STATUS = {
     "summarize_patient_record": "Generating clinical summary...",
     "lookup_clinical_notes": "Searching clinical notes...",
+    "lookup_patient_orders": "Retrieving patient orders...",
     "list_available_patients": "Listing patients...",
+    "list_uploaded_documents": "Checking uploaded documents...",
     "tavily_search_results_json": "Searching the web...",
 }
 
@@ -634,6 +794,60 @@ async def chat_stream(req: ChatRequest, request: Request, user: dict = Depends(g
     sid = req.session_id or str(uuid.uuid4())
     history: List[ChatMessage] = sessions.get(sid)
 
+    # Instant fast-path for simple conversational/capabilities requests.
+    fast_reply = _fast_path_reply(validated_msg)
+    if fast_reply and not req.tool_override:
+        async def _fast_stream():
+            now = time.time()
+            history.append(ChatMessage(role="user", content=validated_msg, timestamp=now))
+            history.append(ChatMessage(role="assistant", content=fast_reply, timestamp=time.time()))
+            sessions.set(sid, history)
+
+            full_history = sessions.get(sid)
+            gradio_format = [(h.content, full_history[i + 1].content)
+                             for i, h in enumerate(full_history)
+                             if h.role == "user" and i + 1 < len(full_history)]
+            Memory.write_chat_history_to_file(
+                gradio_chatbot=gradio_format,
+                folder_path=PROJECT_CFG.memory_dir,
+                thread_id=sid
+            )
+
+            elapsed_ms = int((time.perf_counter() - t0) * 1000)
+            usage = {
+                "provider": "fast-path",
+                "model": "rule-based",
+                "input_tokens": 0,
+                "output_tokens": 0,
+                "total_tokens": 0,
+                "cost_usd": 0.0,
+                "records": [],
+            }
+            LEDGER.record_request(sid, usage)
+            PROM_REQUEST_LATENCY.labels(endpoint="/api/chat/stream", method="POST").observe(elapsed_ms / 1000)
+
+            yield f"data: {json.dumps({'type': 'token', 'content': fast_reply})}\n\n"
+            yield f"data: {json.dumps({'type': 'done', 'session_id': sid, 'latency_ms': elapsed_ms, 'usage': usage})}\n\n"
+            _audit_log(
+                "chat_stream_response",
+                user,
+                session_id=sid,
+                latency_ms=elapsed_ms,
+                tokens_total=0,
+                cost_usd=0.0,
+                fast_path=True,
+            )
+
+        return StreamingResponse(
+            _fast_stream(),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive",
+                "X-Accel-Buffering": "no",
+            },
+        )
+
     system_prompt = SYSTEM_PROMPT
     if req.tool_override and req.tool_override in TOOL_PROMPTS:
         system_prompt += " " + TOOL_PROMPTS[req.tool_override]
@@ -648,7 +862,7 @@ async def chat_stream(req: ChatRequest, request: Request, user: dict = Depends(g
     messages.append(HumanMessage(content=validated_msg))
 
     usage_cb = RequestUsageCallback(PRICING_TABLE)
-    config = {"configurable": {"thread_id": sid}, "callbacks": [usage_cb]}
+    config = {"callbacks": [usage_cb]}
     active_graph = thinking_graph if req.thinking else graph
 
     # ── Thread-safe queue bridges sync graph → async SSE generator ──
@@ -656,45 +870,115 @@ async def chat_stream(req: ChatRequest, request: Request, user: dict = Depends(g
     _graph_holder = {"active": active_graph}
 
     def _run_graph():
-        """Runs the sync graph.stream() in a background thread, with key-swap retry."""
+        """Runs the sync graph.stream() in a background thread, with key-swap retry and outer timeout."""
+        import threading
         global graph, thinking_graph
         max_retries = 2
-        for attempt in range(max_retries + 1):
-            try:
-                for update in _graph_holder["active"].stream(
-                    {"messages": messages}, config, stream_mode="updates"
-                ):
-                    q.put(("update", update))
-                q.put(("end", None))
-                return
-            except Exception as exc:
-                exc_str = str(exc).lower()
-                is_rate_limit = any(k in exc_str for k in ["rate limit", "429", "resource_exhausted", "quota"])
-                if is_rate_limit and attempt < max_retries:
-                    swapped = swap_google_api_key()
-                    if swapped:
-                        graph = build_graph(thinking_mode=False)
-                        thinking_graph = build_graph(thinking_mode=True)
-                        _graph_holder["active"] = thinking_graph if req.thinking else graph
-                        logger.warning("Rebuilt graphs with backup API key (SSE), retrying...")
-                    elif req.thinking and _graph_holder["active"] is not graph:
-                        # Thinking model quota exhausted — fall back to normal graph
-                        _graph_holder["active"] = graph
-                        logger.warning("Thinking model quota exhausted (SSE), falling back to normal graph")
-                    import time as _t
-                    _t.sleep(3)
-                    continue
-                q.put(("error", str(exc)))
-                return
+        _ended = False  # Track whether we already sent end/error
+        
+        def _stream_with_timeout():
+            """Execute stream with 180s outer timeout to prevent indefinite hangs.
+            
+            The summarize_patient_record tool runs map-reduce LLM calls that
+            take 30-90s total, so the timeout must be generous enough for the
+            heaviest tool.  180s covers: map phase (~30s) + reduce phase (~60s)
+            + synthesizer (~30s) + network variance.
+            """
+            result_holder = []
+            exception_holder = []
+            
+            def stream_thread():
+                try:
+                    for update in _graph_holder["active"].stream(
+                        {"messages": messages}, config, stream_mode="updates"
+                    ):
+                        result_holder.append(("update", update))
+                except Exception as e:
+                    exception_holder.append(e)
+            
+            t = threading.Thread(target=stream_thread, daemon=False)
+            t.start()
+            t.join(timeout=180)  # 180s — enough for map-reduce summarization + synthesis
+            
+            if t.is_alive():
+                raise TimeoutError("Graph stream exceeded 180 second timeout")
+            
+            if exception_holder:
+                raise exception_holder[0]
+            return result_holder
+        
+        try:
+            for attempt in range(max_retries + 1):
+                try:
+                    updates = _stream_with_timeout()
+                    for update in updates:
+                        q.put(update)
+                    q.put(("end", None))
+                    _ended = True
+                    return
+                except TimeoutError as exc:
+                    logger.error(f"Graph execution timeout on attempt {attempt + 1}: {exc}")
+                    if attempt < max_retries:
+                        logger.info("Retrying with backup API key after timeout...")
+                        swapped = swap_google_api_key()
+                        if swapped:
+                            graph = build_graph(thinking_mode=False)
+                            thinking_graph = build_graph(thinking_mode=True)
+                            _graph_holder["active"] = thinking_graph if req.thinking else graph
+                            import time as _t
+                            _t.sleep(2)
+                            continue
+                    q.put(("error", f"Request timeout: {str(exc)}"))
+                    _ended = True
+                    return
+                except Exception as exc:
+                    exc_str = str(exc).lower()
+                    is_rate_limit = any(k in exc_str for k in ["rate limit", "429", "resource_exhausted", "quota"])
+                    is_transient = any(k in exc_str for k in ["timeout", "503", "504", "deadline"])
+                    
+                    if (is_rate_limit or is_transient) and attempt < max_retries:
+                        swapped = swap_google_api_key()
+                        if swapped:
+                            graph = build_graph(thinking_mode=False)
+                            thinking_graph = build_graph(thinking_mode=True)
+                            _graph_holder["active"] = thinking_graph if req.thinking else graph
+                            logger.warning(f"Rebuilt graphs with backup API key (SSE), retrying... [{exc_str}]")
+                        elif req.thinking and _graph_holder["active"] is not graph:
+                            _graph_holder["active"] = graph
+                            logger.warning("Thinking model quota exhausted (SSE), falling back to normal graph")
+                        elif is_transient and _advance_graph_model_fallback(req.thinking):
+                            graph = build_graph(thinking_mode=False)
+                            thinking_graph = build_graph(thinking_mode=True)
+                            _graph_holder["active"] = thinking_graph if req.thinking else graph
+                            logger.warning("Rebuilt graphs with fallback model (SSE), retrying...")
+                        import time as _t
+                        _t.sleep((attempt + 1) * 2)
+                        continue
+                    q.put(("error", str(exc)))
+                    _ended = True
+                    return
+        finally:
+            # SAFETY NET: guarantee the queue always gets a terminal message
+            if not _ended:
+                logger.error("_run_graph exited without sending end/error — sending error now")
+                q.put(("error", "Internal error: graph execution failed unexpectedly"))
 
     async def event_generator():
         full_response = ""
+        _last_ai_content = ""   # tracks latest non-empty AI text from ANY node (safety net)
+        _STREAM_TIMEOUT_S = 180  # max seconds — must exceed graph timeout (180s) for summarization
 
         # Start graph in background thread (sync graph.stream is proven reliable)
         thread = _threading.Thread(target=_run_graph, daemon=True)
         thread.start()
 
+        stream_start = time.perf_counter()
         while True:
+            # Timeout guard: send explicit error instead of hanging indefinitely
+            if time.perf_counter() - stream_start > _STREAM_TIMEOUT_S:
+                yield f"data: {json.dumps({'type': 'error', 'content': 'Request timed out. Please try again.'})}\n\n"
+                return
+
             # Poll queue without blocking the event loop
             try:
                 kind, data = q.get_nowait()
@@ -712,20 +996,53 @@ async def chat_stream(req: ChatRequest, request: Request, user: dict = Depends(g
             for node_name, node_output in data.items():
                 msgs = node_output.get("messages", [])
 
-                # router / synthesizer are the LLM nodes (split architecture)
+                # Emit responses from router, synthesizer, chatbot nodes
                 if node_name in ("router", "synthesizer", "chatbot"):
                     for m in msgs:
                         content = _normalize_content(getattr(m, "content", ""))
                         tool_calls = getattr(m, "tool_calls", [])
+
+                        # Always track the latest non-empty AI content as safety net
+                        if content and content.strip():
+                            _last_ai_content = content
+
+                        # Emit tool call status
                         if tool_calls:
                             for tc in tool_calls:
                                 tc_name = tc.get("name", "") if isinstance(tc, dict) else getattr(tc, "name", "")
-                                status = _TOOL_STATUS.get(tc_name, f"Running {tc_name}...")
-                                yield f"data: {json.dumps({'type': 'status', 'content': status})}\n\n"
-                        elif content and node_name != "router":
-                            # Only emit content from synthesizer — router is for tool selection only
+                                status_msg = _TOOL_STATUS.get(tc_name, f"Running {tc_name}...")
+                                yield f"data: {json.dumps({'type': 'status', 'content': status_msg})}\n\n"
+
+                        # Emit content from synthesizer — ONLY when it has a final text
+                        # answer (no tool_calls). If tool_calls exist on synthesizer,
+                        # this is an intermediate multi-hop step, not the final answer.
+                        if content and node_name in ("synthesizer", "chatbot") and not tool_calls:
                             full_response = content
                             yield f"data: {json.dumps({'type': 'token', 'content': content})}\n\n"
+                        elif content and node_name == "router" and not tool_calls:
+                            # Router answered directly (no tool calls) — this IS the
+                            # final response (e.g., greetings, simple conversation).
+                            full_response = content
+                            yield f"data: {json.dumps({'type': 'token', 'content': content})}\n\n"
+                        elif content and tool_calls:
+                            # Intermediate step (tool invocation) — don't emit as answer,
+                            # but keep tracking in _last_ai_content (already done above).
+                            logger.debug("[SSE] Skipping intermediate content from %s (has tool_calls): %s…",
+                                         node_name, content[:60])
+
+        # ── Safety net: if no final token was emitted, use the last captured AI text ──
+        # This handles edge cases where Gemini returns content only on intermediate
+        # steps (e.g., tool-calling + reasoning in the same message) or where the
+        # synthesizer's final pass was missed.
+        if not full_response.strip() and _last_ai_content.strip():
+            logger.warning("[SSE] full_response empty after graph — using _last_ai_content fallback")
+            full_response = _last_ai_content
+            yield f"data: {json.dumps({'type': 'token', 'content': full_response})}\n\n"
+
+        # ── Fallback: if no content was collected at all ──
+        if not full_response.strip():
+            full_response = "I was unable to generate a response. Please try rephrasing your question or try again."
+            yield f"data: {json.dumps({'type': 'token', 'content': full_response})}\n\n"
 
         # ── Session & memory persistence ──────────────────────────
         elapsed_ms = int((time.perf_counter() - t0) * 1000)

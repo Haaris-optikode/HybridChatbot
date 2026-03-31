@@ -2,6 +2,7 @@ import os
 import yaml
 from dotenv import load_dotenv
 from pyprojroot import here
+from typing import List
 
 load_dotenv()
 
@@ -35,12 +36,62 @@ Production keying rule:
 - Use ONLY the single Gemini API key for paid production stability.
 - Ignore any secondary/backup key env vars (e.g. `GOOGLE_AI_API_KEY2`).
 """
-_SINGLE_GEMINI_API_KEY = "AIzaSyAb_0WuEq0AzSZj3KvInjLXShut-3Yj1Hk"
+def _as_list(value) -> List[str]:
+    """Normalize config values that may be either a scalar or list."""
+    if value is None:
+        return []
+    if isinstance(value, list):
+        return [str(v).strip() for v in value if str(v).strip()]
+    s = str(value).strip()
+    return [s] if s else []
 
-_GOOGLE_API_KEYS = [
-    _SINGLE_GEMINI_API_KEY,
-]
-_GOOGLE_API_KEYS = [k for k in _GOOGLE_API_KEYS if k]  # drop empty
+
+def _build_google_api_key_pool() -> List[str]:
+    """Build ordered Google key pool from environment variables."""
+    candidates = [
+        os.getenv("GOOGLE_AI_API_KEY", "").strip(),
+        os.getenv("GOOGLE_API_KEY", "").strip(),
+        os.getenv("GOOGLE_API_KEY_BACKUP", "").strip(),
+        os.getenv("GOOGLE_API_KEY_BACKUP_2", "").strip(),
+    ]
+
+    pool = []
+    seen = set()
+    for key in candidates:
+        if not key:
+            continue
+        # Skip obvious non-Google keys (e.g., OpenAI sk-...)
+        if key.startswith("sk-"):
+            continue
+        if key in seen:
+            continue
+        seen.add(key)
+        pool.append(key)
+    return pool
+
+
+_GOOGLE_API_KEYS = _build_google_api_key_pool()
+
+
+def build_model_chain(primary_model: str, configured_fallbacks: List[str] | None = None) -> List[str]:
+    """Build deterministic model failover chain (primary first, then fallbacks)."""
+    configured_fallbacks = configured_fallbacks or []
+    chain = []
+
+    def _add(model_name: str):
+        m = (model_name or "").strip()
+        if m and m not in chain:
+            chain.append(m)
+
+    _add(primary_model)
+    for m in configured_fallbacks:
+        _add(m)
+
+    # Default Gemini production-stable fallbacks for resilience.
+    if str(primary_model).startswith("gemini"):
+        for m in ["gemini-2.5-flash", "gemini-2.5-flash-lite"]:
+            _add(m)
+    return chain
 
 
 def get_google_api_key() -> str:
@@ -52,11 +103,39 @@ def get_google_api_key() -> str:
 
 def swap_google_api_key() -> bool:
     """
-    Backup key swapping is intentionally disabled for production.
-    Returns False to prevent fallback to any other key.
+    Enable backup API key swapping for resilience.
+    Only swaps to valid Google API keys (not OpenAI keys).
     """
-    _key_logger.warning("Gemini key swap disabled; using single configured key only.")
-    return False
+    if len(_GOOGLE_API_KEYS) <= 1:
+        _key_logger.warning("No valid backup Google API key available")
+        return False
+
+    current = _GOOGLE_API_KEYS.pop(0)
+    _GOOGLE_API_KEYS.append(current)
+    next_key = _GOOGLE_API_KEYS[0]
+    os.environ["GOOGLE_AI_API_KEY"] = next_key
+    os.environ["GOOGLE_API_KEY"] = next_key
+    _key_logger.info("Swapped to backup Google API key for resilience")
+    return True
+
+
+def set_active_google_api_key(explicit_key: str) -> bool:
+    """Set an explicit key as active if present in the key pool."""
+    key = (explicit_key or "").strip()
+    if not key:
+        return False
+    if key not in _GOOGLE_API_KEYS:
+        return False
+    while _GOOGLE_API_KEYS and _GOOGLE_API_KEYS[0] != key:
+        _GOOGLE_API_KEYS.append(_GOOGLE_API_KEYS.pop(0))
+    os.environ["GOOGLE_AI_API_KEY"] = _GOOGLE_API_KEYS[0]
+    os.environ["GOOGLE_API_KEY"] = _GOOGLE_API_KEYS[0]
+    return True
+
+
+def get_google_api_key_pool() -> List[str]:
+    """Expose the configured Google key pool for diagnostics."""
+    return list(_GOOGLE_API_KEYS)
 
 
 class LoadToolsConfig:
@@ -66,9 +145,10 @@ class LoadToolsConfig:
 
         # Set environment variables
         os.environ['OPENAI_API_KEY'] = os.getenv("OPENAI_API_KEY", "")
-        # Hard-lock Gemini to a single production key (no env fallback).
-        os.environ['GOOGLE_AI_API_KEY'] = _SINGLE_GEMINI_API_KEY
-        os.environ['GOOGLE_API_KEY'] = _SINGLE_GEMINI_API_KEY
+        # Use first configured Google key; supports key rotation/fallback.
+        active_google_key = get_google_api_key()
+        os.environ['GOOGLE_AI_API_KEY'] = active_google_key
+        os.environ['GOOGLE_API_KEY'] = active_google_key
         os.environ['TAVILY_API_KEY'] = os.getenv("TAVILY_API_KEY", "")
 
         # Primary agent
@@ -77,6 +157,9 @@ class LoadToolsConfig:
             "router_llm", app_config["primary_agent"]["llm"])  # fast model for tool routing
         self.primary_agent_thinking_llm = app_config["primary_agent"].get(
             "thinking_llm", "gemini-2.5-pro")  # deeper reasoning model
+        self.primary_agent_fallback_llms = _as_list(app_config["primary_agent"].get("fallback_llms"))
+        self.primary_agent_router_fallback_llms = _as_list(app_config["primary_agent"].get("router_fallback_llms"))
+        self.primary_agent_thinking_fallback_llms = _as_list(app_config["primary_agent"].get("thinking_fallback_llms"))
         self.primary_agent_llm_temperature = app_config["primary_agent"]["llm_temperature"]
         self.llm_provider = app_config["primary_agent"].get("llm_provider", "openai")  # "google" or "openai"
 
@@ -88,6 +171,10 @@ class LoadToolsConfig:
         self.clinical_notes_rag_llm = app_config["clinical_notes_rag"]["llm"]
         self.clinical_notes_rag_summarization_llm = app_config["clinical_notes_rag"].get(
             "summarization_llm", app_config["clinical_notes_rag"]["llm"])
+        self.clinical_notes_rag_fallback_llms = _as_list(app_config["clinical_notes_rag"].get("fallback_llms"))
+        self.clinical_notes_rag_summarization_fallback_llms = _as_list(
+            app_config["clinical_notes_rag"].get("summarization_fallback_llms")
+        )
         self.clinical_notes_rag_llm_temperature = float(
             app_config["clinical_notes_rag"]["llm_temperature"])
         self.clinical_notes_rag_embedding_model = app_config["clinical_notes_rag"]["embedding_model"]

@@ -29,12 +29,12 @@ def _load_pricing_table() -> Dict[str, Dict[str, float]]:
     Model pricing in USD per 1M tokens.
     Override with MEDGRAPH_MODEL_PRICING_JSON env var containing:
     {
-      "gemini-flash-latest": {"input_per_1m": 0.35, "output_per_1m": 1.05},
+      \"gemini-3-flash-preview\": {\"input_per_1m\": 0.075, \"output_per_1m\": 0.30},
       ...
     }
     """
     default_prices: Dict[str, Dict[str, float]] = {
-        "gemini-flash-latest": {"input_per_1m": 0.35, "output_per_1m": 1.05},
+        "gemini-3-flash-preview": {"input_per_1m": 0.075, "output_per_1m": 0.30},
         "gemini-2.5-pro": {"input_per_1m": 3.50, "output_per_1m": 10.50},
         "gpt-4o-mini": {"input_per_1m": 0.15, "output_per_1m": 0.60},
         "gpt-4o": {"input_per_1m": 5.00, "output_per_1m": 15.00},

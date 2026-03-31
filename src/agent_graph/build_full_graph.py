@@ -1,6 +1,6 @@
 import logging
 
-from langgraph.checkpoint.memory import MemorySaver
+
 from langgraph.graph import StateGraph, START
 from langchain_openai import ChatOpenAI
 from langchain_core.messages import ToolMessage as _ToolMessage, AIMessage as _AIMessage
@@ -80,21 +80,25 @@ def build_graph(thinking_mode: bool = False):
     """
 
     # ── Build the LLMs ────────────────────────────────────────────────
-    router_model = getattr(TOOLS_CFG, "primary_agent_router_llm", TOOLS_CFG.primary_agent_llm)
+    router_model = os.getenv("MEDGRAPH_ROUTER_MODEL_OVERRIDE", "").strip() or getattr(
+        TOOLS_CFG, "primary_agent_router_llm", TOOLS_CFG.primary_agent_llm
+    )
 
     # Router is always fast (same regardless of thinking mode)
-    router_llm = _make_llm(router_model, timeout=15, max_tokens=300)
+    router_llm = _make_llm(router_model, timeout=20, max_tokens=300)
 
     if thinking_mode:
-        synth_model = getattr(TOOLS_CFG, "primary_agent_thinking_llm", "gemini-2.5-pro")
-        synth_llm = _make_llm(synth_model, timeout=120, max_tokens=16384, thinking_budget=8192)
-        logger.info("Router LLM: %s (timeout=15s)", router_model)
-        logger.info("Synthesizer LLM [THINKING]: %s (timeout=120s, max_tokens=16384, thinking=8192)", synth_model)
+        synth_model = os.getenv("MEDGRAPH_THINKING_MODEL_OVERRIDE", "").strip() or getattr(
+            TOOLS_CFG, "primary_agent_thinking_llm", "gemini-2.5-pro"
+        )
+        synth_llm = _make_llm(synth_model, timeout=180, max_tokens=16384, thinking_budget=8192)
+        logger.info("Router LLM: %s (timeout=20s)", router_model)
+        logger.info("Synthesizer LLM [THINKING]: %s (timeout=180s, max_tokens=16384, thinking=8192)", synth_model)
     else:
-        synth_model = TOOLS_CFG.primary_agent_llm
-        synth_llm = _make_llm(synth_model, timeout=30, max_tokens=4096)
-        logger.info("Router LLM: %s (timeout=15s)", router_model)
-        logger.info("Synthesizer LLM: %s (timeout=30s, max_tokens=4096)", synth_model)
+        synth_model = os.getenv("MEDGRAPH_SYNTH_MODEL_OVERRIDE", "").strip() or TOOLS_CFG.primary_agent_llm
+        synth_llm = _make_llm(synth_model, timeout=60, max_tokens=4096)
+        logger.info("Router LLM: %s (timeout=20s)", router_model)
+        logger.info("Synthesizer LLM: %s (timeout=60s, max_tokens=4096)", synth_model)
 
     # ── Build the graph ───────────────────────────────────────────────
     graph_builder = StateGraph(State)
@@ -114,12 +118,31 @@ def build_graph(thinking_mode: bool = False):
         """Fast tool-routing: picks which tool to call."""
         return {"messages": [router_with_tools.invoke(state["messages"])]}
 
-    # Synthesizer: generates final answer from tool output
+    # Synthesizer: generates final answer from tool output.
+    # Binds tools so it CAN call more if needed (multi-hop), but we prefer
+    # it to synthesize from the tool results already in the message history.
     synth_with_tools = synth_llm.bind_tools(tools)
+
+    # Prepend a lightweight synthesis instruction to guide the synthesizer.
+    from langchain_core.messages import SystemMessage as _SysMsg
+    _SYNTH_HINT = _SysMsg(content=(
+        "Tool results are now in the conversation above. "
+        "Synthesize a clear, grounded answer to the user's original question "
+        "using those results. Only call additional tools if the existing results "
+        "are truly insufficient to answer. When in doubt, answer from what you have."
+    ))
 
     def synthesizer(state: State):
         """High-quality answer synthesis from retrieved context."""
-        return {"messages": [synth_with_tools.invoke(state["messages"])]}
+        msgs = state["messages"]
+        # Inject synthesis hint right before synthesizer's call (idempotent for multi-hop).
+        if not any(
+            isinstance(m, _SysMsg) and "Synthesize a clear" in str(getattr(m, "content", ""))
+            for m in msgs
+        ):
+            msgs = [msgs[0], _SYNTH_HINT] + list(msgs[1:])
+        return {"messages": [synth_with_tools.invoke(msgs)]}
+
 
     graph_builder.add_node("router", router)
     graph_builder.add_node("synthesizer", synthesizer)
@@ -134,12 +157,13 @@ def build_graph(thinking_mode: bool = False):
         ])
     graph_builder.add_node("tools", tool_node)
 
-    # Router decides: call a tool or pass to synthesizer
-    # Router NEVER goes to __end__ — synthesizer always generates the final answer
+    # Router decides: call a tool or end directly
+    # When no tools needed (greetings, simple conversation), router's response
+    # IS the final answer — skip synthesizer to avoid redundant LLM call
     graph_builder.add_conditional_edges(
         "router",
         route_tools,
-        {"tools": "tools", "__end__": "synthesizer"},
+        {"tools": "tools", "__end__": "__end__"},
     )
 
     # After tools: always go to synthesizer so it can answer the user's actual question
@@ -153,7 +177,6 @@ def build_graph(thinking_mode: bool = False):
     )
 
     graph_builder.add_edge(START, "router")
-    memory = MemorySaver()
-    graph = graph_builder.compile(checkpointer=memory)
+    graph = graph_builder.compile()
     plot_agent_schema(graph)
     return graph

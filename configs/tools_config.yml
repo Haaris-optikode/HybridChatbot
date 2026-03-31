@@ -1,13 +1,27 @@
 primary_agent:
-  llm: gemini-flash-latest        # Google Gemini Flash — auto-resolves to best available
-  router_llm: gemini-flash-latest
+  llm: gemini-2.5-flash            # Stable low-latency production model
+  router_llm: gemini-2.5-flash
   thinking_llm: gemini-2.5-pro    # Deeper reasoning model — used when "Thinking" toggle is on
+  fallback_llms:
+    - gemini-2.5-flash
+    - gemini-2.5-flash-lite
+  router_fallback_llms:
+    - gemini-2.5-flash-lite
+  thinking_fallback_llms:
+    - gemini-2.5-pro
+    - gemini-2.5-flash
   llm_temperature: 0.3
   llm_provider: google           # "google" for Gemini, "openai" for GPT models
 
 clinical_notes_rag:
-  llm: gemini-flash-latest
-  summarization_llm: gemini-flash-latest
+  llm: gemini-2.5-flash
+  summarization_llm: gemini-2.5-flash
+  fallback_llms:
+    - gemini-2.5-flash
+    - gemini-2.5-flash-lite
+  summarization_fallback_llms:
+    - gemini-2.5-pro
+    - gemini-2.5-flash
   llm_temperature: 0.2
   embedding_model: NeuML/pubmedbert-base-embeddings
   embedding_dimensions: 768

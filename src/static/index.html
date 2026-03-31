@@ -2505,7 +2505,8 @@
             showTyping();
 
             // Safety timeout — never leave typing indicator stuck
-            const safetyTimeout = thinkingMode ? 300000 : 120000;
+            // 180s for normal mode (summarization takes 30-90s + synthesis), 300s for thinking
+            const safetyTimeout = thinkingMode ? 300000 : 180000;
             const safetyTimer = setTimeout(() => {
                 console.warn('[SSE] Safety timeout reached');
                 hideTyping();
@@ -2514,7 +2515,7 @@
                 }
                 messageInput.disabled = false;
                 messageInput.focus();
-            }, 120000);
+            }, safetyTimeout);
 
             try {
                 console.log('[SSE] Sending request...');
