@@ -16,6 +16,7 @@ from agent_graph.load_tools_config import (
     LoadToolsConfig,
     build_model_chain,
     get_google_api_key,
+    get_active_llm_provider,
     swap_google_api_key,
 )
 from qdrant_client import QdrantClient
@@ -32,6 +33,7 @@ from datetime import datetime as _dt
 from dotenv import load_dotenv
 import threading
 from collections import OrderedDict
+from contextvars import ContextVar
 
 logger = logging.getLogger(__name__)
 
@@ -45,6 +47,24 @@ _memory_cache: OrderedDict[str, dict] = OrderedDict()
 _memory_cache_lock = threading.Lock()
 _CACHE_TTL_HOURS = 24
 _CACHE_MAX_SIZE = int(os.environ.get("MEDGRAPH_CACHE_MAX_SIZE", "50"))  # max patient summaries in memory
+_SUMMARY_REQUEST_MODE: ContextVar[str] = ContextVar("summary_request_mode", default="normal")
+
+
+def set_summary_request_mode(mode: str):
+    """Set request-scoped summary mode ('normal' or 'thinking')."""
+    return _SUMMARY_REQUEST_MODE.set(mode if mode in ("normal", "thinking") else "normal")
+
+
+def reset_summary_request_mode(token) -> None:
+    """Reset request-scoped summary mode token."""
+    try:
+        _SUMMARY_REQUEST_MODE.reset(token)
+    except Exception:
+        pass
+
+
+def _current_summary_mode() -> str:
+    return _SUMMARY_REQUEST_MODE.get()
 
 
 def _record_cache_event(event: str, layer: str = ""):
@@ -494,6 +514,146 @@ class ClinicalNotesRAGTool:
         except Exception as e:
             return f"Error retrieving patient data: {e}"
 
+    def get_all_chunks_for_patient_structured(self, patient_mrn: str) -> list[tuple[str, dict]]:
+        """Retrieve all patient chunks with metadata, ordered and overlap-trimmed.
+
+        This is used by the structured summarization pipeline that requires
+        stable source IDs and per-chunk citations.
+        """
+        try:
+            from qdrant_client.models import Filter, FieldCondition, MatchValue
+            mrn = (patient_mrn or "").strip()
+            if not mrn:
+                return []
+
+            all_points = []
+            next_offset = None
+            while True:
+                results = self.client.scroll(
+                    collection_name=self.collection_name,
+                    scroll_filter=Filter(
+                        must=[
+                            FieldCondition(
+                                key="metadata.patient_mrn",
+                                match=MatchValue(value=mrn),
+                            )
+                        ]
+                    ),
+                    limit=512,
+                    with_payload=True,
+                    with_vectors=False,
+                    offset=next_offset,
+                )
+                points, next_offset = results[0], results[1]
+                if points:
+                    all_points.extend(points)
+                if not next_offset:
+                    break
+
+            if not all_points:
+                return []
+
+            all_points.sort(
+                key=lambda p: (
+                    p.payload.get("metadata", {}).get("filename", ""),
+                    p.payload.get("metadata", {}).get("page_number", 0),
+                    p.payload.get("metadata", {}).get("chunk_index", 0),
+                )
+            )
+
+            out: list[tuple[str, dict]] = []
+            prev_content: str | None = None
+            prev_source: str | None = None
+            for p in all_points:
+                meta = p.payload.get("metadata", {}) or {}
+                content = p.payload.get("page_content", "") or ""
+                source = meta.get("filename", "")
+                if prev_content and source and source == prev_source:
+                    overlap = self._find_overlap(prev_content, content)
+                    if overlap > 0:
+                        content = content[overlap:]
+                if content.strip():
+                    out.append((content, meta))
+                prev_content = p.payload.get("page_content", "") or ""
+                prev_source = source
+            return out
+        except Exception as e:
+            logger.warning("Error retrieving patient chunks for %s: %s", patient_mrn, str(e)[:200])
+            return []
+
+    def get_all_chunks_for_document(self, document_id: str) -> list[tuple[str, dict]]:
+        """Retrieve ALL chunks for a specific uploaded document_id.
+
+        Returns:
+            List of (page_content, metadata) tuples ordered by (page_number, chunk_index).
+        """
+        try:
+            from qdrant_client.models import Filter, FieldCondition, MatchValue
+
+            doc_id = (document_id or "").strip()
+            if not doc_id:
+                return []
+
+            all_points = []
+            next_offset = None
+            # Use paginated scroll to avoid missing >500 chunks documents.
+            while True:
+                results = self.client.scroll(
+                    collection_name=self.collection_name,
+                    scroll_filter=Filter(
+                        must=[
+                            FieldCondition(
+                                key="metadata.document_id",
+                                match=MatchValue(value=doc_id),
+                            )
+                        ]
+                    ),
+                    limit=512,
+                    with_payload=True,
+                    with_vectors=False,
+                    offset=next_offset,
+                )
+                points, next_offset = results[0], results[1]
+                if points:
+                    all_points.extend(points)
+                if not next_offset:
+                    break
+
+            if not all_points:
+                return []
+
+            # Order by page then chunk_index for coherent reading order.
+            all_points.sort(
+                key=lambda p: (
+                    p.payload.get("metadata", {}).get("page_number", 0),
+                    p.payload.get("metadata", {}).get("chunk_index", 0),
+                )
+            )
+
+            out: list[tuple[str, dict]] = []
+            prev_content: str | None = None
+            prev_source: str | None = None
+            for p in all_points:
+                meta = p.payload.get("metadata", {}) or {}
+                content = p.payload.get("page_content", "") or ""
+                source = meta.get("filename", "")
+
+                # Strip overlap when consecutive chunks from same source file
+                if prev_content and source and source == prev_source:
+                    overlap = self._find_overlap(prev_content, content)
+                    if overlap > 0:
+                        content = content[overlap:]
+
+                if content.strip():
+                    out.append((content, meta))
+                prev_content = p.payload.get("page_content", "") or ""
+                prev_source = source
+
+            return out
+        except Exception as e:
+            logger.warning("Error retrieving document chunks for %s: %s", document_id, str(e)[:200])
+            return []
+
     # ── Section-name patterns for "all orders" retrieval ──────────
     ORDER_SECTION_PATTERNS: list[str] = [
         "18a",                    # Laboratory Orders
@@ -838,7 +998,7 @@ def _get_summarization_llm(model_override: str = None):
     base_model = getattr(TOOLS_CFG, "clinical_notes_rag_summarization_llm",
                          TOOLS_CFG.clinical_notes_rag_llm)
     model = model_override or base_model
-    provider = getattr(TOOLS_CFG, "llm_provider", "openai")
+    provider = get_active_llm_provider(getattr(TOOLS_CFG, "llm_provider", "openai"))
 
     if provider == "google" or model.startswith("gemini"):
         from langchain_google_genai import ChatGoogleGenerativeAI
@@ -911,6 +1071,575 @@ RECORD:
 
 {record}"""
 
+# ── Uploaded-document summarization (document_id-scoped) ─────────────────────
+#
+# Goal: reliably summarize ANY uploaded document regardless of length, with
+# clinician-safe completeness for "can't miss" domains (allergies, meds,
+# critical labs, key imaging impressions, procedures, disposition/follow-up).
+#
+# Approach:
+# - Retrieve ALL chunks for the uploaded document_id (not MRN-scoped).
+# - MAP: per-group structured extraction → strict JSON with citations to Source IDs
+# - MERGE: deterministic merge + dedupe across groups
+# - REDUCE: generate clinician-friendly summary from merged JSON, with citations
+# - VERIFY: rule-based + LLM check for missing can't-miss categories; retry targeted extraction once
+#
+
+_DOC_SUMMARY_CACHE: OrderedDict[str, dict] = OrderedDict()  # document_id -> {summary, cached_at}
+_DOC_SUMMARY_CACHE_LOCK = threading.Lock()
+_DOC_SUMMARY_CACHE_MAX_SIZE = int(os.environ.get("MEDGRAPH_DOC_CACHE_MAX_SIZE", "100"))
+_SUMMARY_PIPELINE_VERSION = "v3_fast_adaptive"
+
+
+def _get_doc_reduce_llm(model_override: str = None):
+    """Higher-accuracy model for document reduce/verification."""
+    provider = get_active_llm_provider(getattr(TOOLS_CFG, "llm_provider", "openai"))
+    default_model = "gpt-4.1" if provider == "openai" else "gemini-2.5-pro"
+    preferred = os.environ.get("MEDGRAPH_DOCUMENT_SUMMARY_REDUCE_LLM", "").strip() or default_model
+    model = model_override or preferred
+    mode = _current_summary_mode()
+    max_out = 4096 if mode == "thinking" else 2400
+    timeout_s = 120 if mode == "thinking" else 90
+    thinking_budget = 1024 if ("2.5-pro" in model) else 0
+    if provider == "google" or model.startswith("gemini"):
+        from langchain_google_genai import ChatGoogleGenerativeAI
+        llm = ChatGoogleGenerativeAI(
+            model=model,
+            google_api_key=get_google_api_key(),
+            temperature=0.0,
+            max_output_tokens=max_out,
+            timeout=timeout_s,
+            max_retries=2,
+            thinking_budget=thinking_budget,
+        )
+        return model, llm
+    return _get_summarization_llm(model_override=model)
+
+
+def _get_doc_map_llm(model_override: str = None):
+    """Fast extractor for map phase."""
+    provider = get_active_llm_provider(getattr(TOOLS_CFG, "llm_provider", "openai"))
+    default_model = "gpt-4.1-mini" if provider == "openai" else "gemini-2.5-flash"
+    preferred = os.environ.get("MEDGRAPH_DOCUMENT_SUMMARY_MAP_LLM", "").strip() or default_model
+    model = model_override or preferred
+    mode = _current_summary_mode()
+    max_out = 3072 if mode == "thinking" else 2200
+    timeout_s = 120 if mode == "thinking" else 90
+    thinking_budget = 1024 if ("2.5-pro" in model) else 0
+
+    if provider == "google" or model.startswith("gemini"):
+        from langchain_google_genai import ChatGoogleGenerativeAI
+        llm = ChatGoogleGenerativeAI(
+            model=model,
+            google_api_key=get_google_api_key(),
+            temperature=0.0,
+            max_output_tokens=max_out,
+            timeout=timeout_s,
+            max_retries=2,
+            thinking_budget=thinking_budget,
+        )
+        return model, llm
+
+    # Fallback to OpenAI if configured (keeps repo portable)
+    if _is_reasoning_model(model):
+        return model, ChatOpenAI(
+            model=model,
+            max_completion_tokens=8192,
+            api_key=os.getenv("OPENAI_API_KEY"),
+            request_timeout=120,
+            max_retries=2,
+        )
+    return model, ChatOpenAI(
+        model=model,
+        temperature=0.0,
+        max_tokens=4096,
+        api_key=os.getenv("OPENAI_API_KEY"),
+        request_timeout=120,
+        max_retries=2,
+    )
+
+
+def _safe_json_loads(text: str) -> dict:
+    """Best-effort JSON parse: trims fences, extracts first {...} block."""
+    if not text:
+        return {}
+    t = text.strip()
+    # Strip markdown fences if present
+    t = _re.sub(r"^```(?:json)?\s*", "", t, flags=_re.IGNORECASE).strip()
+    t = _re.sub(r"\s*```$", "", t).strip()
+    # If there's leading commentary, extract first JSON object
+    if not t.startswith("{"):
+        m = _re.search(r"\{[\s\S]*\}", t)
+        if m:
+            t = m.group(0)
+    try:
+        obj = json.loads(t)
+        return obj if isinstance(obj, dict) else {}
+    except Exception:
+        return {}
+
+
+def _norm_key(s: str) -> str:
+    s = (s or "").strip().lower()
+    s = _re.sub(r"\s+", " ", s)
+    return s
+
+
+def _merge_lists_unique(items: list, key_fields: list[str]) -> list:
+    """Merge a list of dict items using a composite normalized key."""
+    out = []
+    seen = set()
+    for it in items or []:
+        if not isinstance(it, dict):
+            continue
+        key_parts = []
+        for f in key_fields:
+            key_parts.append(_norm_key(str(it.get(f, ""))))
+        key = "||".join(key_parts)
+        if not key.strip("|"):
+            continue
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(it)
+    return out
+
+
+def _merge_doc_extractions(extractions: list[dict]) -> dict:
+    """Deterministically merge per-group extraction JSONs into one."""
+    merged: dict = {
+        "document": {},
+        "patient": {},
+        "allergies": [],
+        "problems": [],
+        "medications": [],
+        "labs": [],
+        "vitals": [],
+        "imaging": [],
+        "procedures": [],
+        "hospital_course": [],
+        "disposition_followup": [],
+        "other_key_findings": [],
+        "missing_or_unclear": [],
+    }
+
+    for ex in extractions or []:
+        if not isinstance(ex, dict):
+            continue
+        merged["document"] = {**merged.get("document", {}), **(ex.get("document") or {})}
+        merged["patient"] = {**merged.get("patient", {}), **(ex.get("patient") or {})}
+
+        merged["allergies"].extend(ex.get("allergies") or [])
+        merged["problems"].extend(ex.get("problems") or [])
+        merged["medications"].extend(ex.get("medications") or [])
+        merged["labs"].extend(ex.get("labs") or [])
+        merged["vitals"].extend(ex.get("vitals") or [])
+        merged["imaging"].extend(ex.get("imaging") or [])
+        merged["procedures"].extend(ex.get("procedures") or [])
+        merged["hospital_course"].extend(ex.get("hospital_course") or [])
+        merged["disposition_followup"].extend(ex.get("disposition_followup") or [])
+        merged["other_key_findings"].extend(ex.get("other_key_findings") or [])
+        merged["missing_or_unclear"].extend(ex.get("missing_or_unclear") or [])
+
+    # Deduplicate with conservative keys (avoid accidental drops)
+    merged["allergies"] = _merge_lists_unique(merged["allergies"], ["substance", "reaction", "severity"])
+    merged["problems"] = _merge_lists_unique(merged["problems"], ["problem", "status"])
+    merged["medications"] = _merge_lists_unique(merged["medications"], ["name", "dose", "route", "frequency", "context"])
+    merged["labs"] = _merge_lists_unique(merged["labs"], ["test", "value", "unit", "date_time"])
+    merged["vitals"] = _merge_lists_unique(merged["vitals"], ["type", "value", "unit", "date_time"])
+    merged["imaging"] = _merge_lists_unique(merged["imaging"], ["study", "date", "impression"])
+    merged["procedures"] = _merge_lists_unique(merged["procedures"], ["procedure", "date", "result"])
+    merged["hospital_course"] = _merge_lists_unique(merged["hospital_course"], ["date", "event"])
+    merged["disposition_followup"] = _merge_lists_unique(merged["disposition_followup"], ["item", "date", "details"])
+    merged["other_key_findings"] = _merge_lists_unique(merged["other_key_findings"], ["finding"])
+    merged["missing_or_unclear"] = _merge_lists_unique(merged["missing_or_unclear"], ["topic", "note"])
+
+    return merged
+
+
+def _is_sparse_merged_payload(merged: dict) -> bool:
+    """Detect pathological under-extraction."""
+    if not isinstance(merged, dict):
+        return True
+    signal_counts = 0
+    for key in ("problems", "allergies", "medications", "labs", "imaging", "procedures", "hospital_course"):
+        signal_counts += len(merged.get(key) or [])
+    patient = merged.get("patient") or {}
+    has_patient_anchor = bool((patient.get("name") or "").strip() or (patient.get("mrn") or "").strip())
+    return signal_counts < 3 and not has_patient_anchor
+
+
+_DOC_MAP_JSON_PROMPT = """You are a clinical data extraction engine.
+
+Extract clinically relevant facts from the provided SOURCES (an excerpt of an uploaded medical document) into STRICT JSON.
+
+CRITICAL RULES:
+- Output MUST be valid JSON (no markdown, no commentary, no trailing commas).
+- Only extract facts explicitly present in the sources. If uncertain, put it in missing_or_unclear.
+- Be exhaustive for patient-safety domains: allergies, medications, anticoagulants/insulin/opioids, critical labs, imaging impressions, procedures, and discharge/follow-up.
+- Explicitly capture high-risk context often missed in physician summaries: prior CAD/MI/PCI/CABG history, OSA/CKD/COPD/diabetes comorbid burden, ECG findings, echocardiogram metrics, catheterization hemodynamics, recurrence events, treatment response, and discharge-limiting complications.
+- Preserve exact numbers, units, dates, and medication dose/route/frequency.
+- Every item MUST include a `citations` array listing the Source IDs that support it (e.g., ["S3","S4"]). If unsure, omit the item.
+
+JSON SCHEMA (top-level keys required; use [] when none found):
+{{
+  "document": {{"document_id": "{document_id}", "doc_type": "", "encounter_date": ""}},
+  "patient": {{"name": "", "mrn": "", "dob": "", "sex": ""}},
+  "allergies": [{{"substance": "", "reaction": "", "severity": "", "citations": ["S1"]}}],
+  "problems": [{{"problem": "", "status": "", "onset_or_date": "", "citations": ["S1"]}}],
+  "medications": [{{"name": "", "dose": "", "route": "", "frequency": "", "context": "home|inpatient|discharge|unknown", "start_stop_change": "", "citations": ["S2"]}}],
+  "labs": [{{"test": "", "value": "", "unit": "", "ref_range": "", "flag": "ABNORMAL|CRITICAL|", "date_time": "", "citations": ["S5"]}}],
+  "vitals": [{{"type": "BP|HR|Temp|RR|SpO2|Weight|Other", "value": "", "unit": "", "date_time": "", "citations": ["S6"]}}],
+  "imaging": [{{"study": "", "date": "", "key_findings": "", "impression": "", "citations": ["S7"]}}],
+  "procedures": [{{"procedure": "", "date": "", "result": "", "complications": "", "citations": ["S8"]}}],
+  "hospital_course": [{{"date": "", "event": "", "citations": ["S9"]}}],
+  "disposition_followup": [{{"item": "", "date": "", "details": "", "citations": ["S10"]}}],
+  "other_key_findings": [{{"finding": "", "citations": ["S11"]}}],
+  "missing_or_unclear": [{{"topic": "", "note": "", "citations": ["S12"]}}]
+}}
+
+SOURCES:
+{sources}
+"""
+
+
+_DOC_REDUCE_PROMPT = """You are MedGraph AI generating a clinician-facing summary of an uploaded medical document.
+
+Use ONLY the extracted JSON facts below. Do not invent. If a key domain is missing, explicitly say "Not documented in provided document."
+
+OUTPUT REQUIREMENTS:
+- Produce a concise but comprehensive clinical summary suitable for an EHR sidebar.
+- Choose section headers ADAPTIVELY based on what is present in the document; do not force empty sections.
+- Never output repetitive "Not documented" lines for many categories. Mention missing data only when safety-critical (e.g., allergies unknown).
+- Prefer compact bullets and short paragraphs; prioritize clinically decisive facts and management impact.
+- Include clinically decisive detail when present: EF trajectory, ECG findings, cath/hemodynamic numbers, significant procedures (e.g., thoracentesis), rhythm events/treatments, renal complications that changed discharge plan, final discharge labs/vitals, and scheduled follow-up services.
+- Cite sources at the end of claims/sections as [S#] (e.g., [S3][S7]).
+
+EXTRACTED_JSON:
+{json_blob}
+"""
+
+_DOC_REDUCE_PROMPT_THINKING_APPEND = """
+
+THINKING MODE REQUIREMENTS (higher depth):
+- Build a decision-grade physician summary with explicit chronology (admission -> major events -> discharge).
+- Include nuanced causal links when documented (e.g., recurrence trigger, treatment response, dose changes due to complications).
+- Explicitly include complete allergy specificity and major background context impacting management.
+- Include final discharge objective status (key vitals/labs/functional disposition) when present.
+- Keep concise but do not compress away clinically actionable details.
+"""
+
+_DOC_AUGMENT_JSON_PROMPT = """You are a senior clinical abstraction QA pass.
+
+You are given:
+1) EXISTING_EXTRACTED_JSON produced from the full document.
+2) SOURCES likely to contain nuanced/high-impact details.
+
+Task:
+- Return STRICT JSON in the same schema, containing ONLY additional facts that are missing or more precise than EXISTING_EXTRACTED_JSON.
+- Focus on physician-critical details often omitted: full allergy specificity, major comorbid/cardiac history, ECG/echo/cath numbers, procedure outputs, complications and their management, discharge-limiting events, and final discharge status/follow-up.
+- Every item must include citations.
+- Do not repeat existing facts unless adding precision (e.g., exact value/date/treatment).
+
+JSON schema: same as prior extraction schema.
+
+EXISTING_EXTRACTED_JSON:
+{existing_json}
+
+SOURCES:
+{sources}
+"""
+
+
+def _doc_needs_keyword_retry(raw_text: str, merged: dict) -> list[str]:
+    """Heuristic: detect missing can't-miss domains when source contains signals."""
+    raw = (raw_text or "").lower()
+    missing = []
+    if ("allerg" in raw or "nka" in raw or "no known allergy" in raw) and not (merged.get("allergies") or []):
+        missing.append("allergies")
+    if ("medication" in raw or "rx" in raw or "sig" in raw or "discharge medications" in raw) and not (merged.get("medications") or []):
+        missing.append("medications")
+    if ("lab" in raw or "cbc" in raw or "bmp" in raw or "cmp" in raw) and not (merged.get("labs") or []):
+        missing.append("labs")
+    if ("impression" in raw or "ct" in raw or "mri" in raw or "x-ray" in raw or "ultrasound" in raw) and not (merged.get("imaging") or []):
+        missing.append("imaging")
+    if ("ecg" in raw or "ekg" in raw or "echo" in raw or "ejection fraction" in raw or "rvsp" in raw) and not (merged.get("imaging") or []):
+        missing.append("imaging")
+    if ("procedure" in raw or "operative" in raw or "surgery" in raw) and not (merged.get("procedures") or []):
+        missing.append("procedures")
+    if ("catheter" in raw or "thoracentesis" in raw or "pcwp" in raw or "cardiac index" in raw or "pvr" in raw) and not (merged.get("procedures") or []):
+        missing.append("procedures")
+    if ("discharge" in raw or "follow-up" in raw or "appointment" in raw) and not (merged.get("disposition_followup") or []):
+        missing.append("disposition_followup")
+    return missing
+
+
+def _build_sources_for_groups(chunks: list[tuple[int, str, dict]], max_group_chars: int = 22_000) -> list[str]:
+    """Create grouped source strings with globally stable Source IDs.
+
+    Args:
+        chunks: list of (global_source_index, text, metadata) tuples.
+                global_source_index must be stable across the whole document (1..N).
+        max_group_chars: approximate per-group context budget.
+    """
+    groups: list[list[tuple[int, str, dict]]] = []
+    cur: list[tuple[int, str, dict]] = []
+    cur_chars = 0
+    for global_idx, txt, meta in chunks:
+        t = txt or ""
+        if cur and cur_chars + len(t) > max_group_chars:
+            groups.append(cur)
+            cur = []
+            cur_chars = 0
+        cur.append((int(global_idx), t, meta))
+        cur_chars += len(t)
+    if cur:
+        groups.append(cur)
+
+    rendered = []
+    for g in groups:
+        parts = []
+        for global_idx, txt, meta in g:
+            sid = f"S{global_idx}"
+            sec = (meta or {}).get("section_title", "Section")
+            page = (meta or {}).get("page_number", "?")
+            parts.append(f"[{sid} | Section: {sec} | Page {page}]\n{txt}")
+        rendered.append("\n\n---\n\n".join(parts))
+    return rendered
+
+
+def _run_structured_summary_pipeline(entity_id: str, indexed_chunks: list[tuple[int, str, dict]]) -> tuple[str, str]:
+    """Unified structured summary pipeline used by both patient and document summaries.
+
+    Returns:
+        (summary_text, model_name)
+    """
+    if not indexed_chunks:
+        return "No indexed chunks available for summarization.", "none"
+
+    mode = _current_summary_mode()
+    provider = get_active_llm_provider(getattr(TOOLS_CFG, "llm_provider", "openai"))
+    default_map = "gpt-4.1-mini" if provider == "openai" else "gemini-2.5-flash"
+    default_reduce = "gpt-4.1-mini" if provider == "openai" else "gemini-2.5-flash"
+    thinking_model = "gpt-4.1" if provider == "openai" else "gemini-2.5-pro"
+    map_primary = thinking_model if mode == "thinking" else os.environ.get("MEDGRAPH_DOCUMENT_SUMMARY_MAP_LLM", default_map)
+    reduce_primary = thinking_model if mode == "thinking" else default_reduce
+    is_fast_mode = mode != "thinking"
+    max_group_chars = 32000 if is_fast_mode else 22000
+    sources_groups = _build_sources_for_groups(indexed_chunks, max_group_chars=max_group_chars)
+
+    if is_fast_mode:
+        # Fast path: single-pass adaptive synthesis directly from sources.
+        # This avoids fragile, token-heavy strict JSON extraction in normal mode.
+        selected_groups = sources_groups[:2]
+        if len(sources_groups) > 2:
+            high_signal = []
+            for global_idx, txt, meta in indexed_chunks:
+                low = (txt or "").lower()
+                if any(k in low for k in [
+                    "allerg", "medication", "discharge", "follow-up", "echo", "ecg", "ekg",
+                    "catheter", "thoracentesis", "bnp", "creatinine", "proteinuria", "afib", "rvr"
+                ]):
+                    high_signal.append((global_idx, txt, meta))
+            if high_signal:
+                selected_groups.extend(_build_sources_for_groups(high_signal[:30], max_group_chars=18000)[:1])
+        fast_sources = "\n\n====\n\n".join(selected_groups)
+        fast_prompt = f"""You are MedGraph AI.
+
+Create a fast, clinically useful summary for EHR use from SOURCES only.
+
+Rules:
+- Use adaptive headings only for data that exists; do not include empty sections.
+- Prioritize patient-safety and decision-making details (diagnoses, allergies, meds, critical labs/imaging/procedures, major complications, discharge status/follow-up).
+- Keep concise (about 250-500 words unless clearly needed).
+- Use Source IDs for support (e.g., [S12], [S4][S9]).
+- If allergies are not present in sources, say "Allergies: not found in provided excerpts."
+- Do not invent facts.
+
+SOURCES:
+{fast_sources}
+"""
+        reduce_chain = build_model_chain(
+            reduce_primary,
+            ["gemini-2.5-flash-lite"],
+        )
+        model_name, summary = _llm_invoke_with_fallback(
+            _get_doc_reduce_llm,
+            fast_prompt,
+            max_retries=2,
+            model_chain=reduce_chain,
+        )
+        return summary, model_name
+
+    def _extract_group(sources_text: str) -> dict:
+        base_prompt = _DOC_MAP_JSON_PROMPT.format(document_id=entity_id, sources=sources_text)
+        model_chain = build_model_chain(
+            map_primary,
+            ["gemini-2.5-flash-lite"],
+        )
+        _, text = _llm_invoke_with_fallback(
+            _get_doc_map_llm,
+            base_prompt,
+            max_retries=2,
+            model_chain=model_chain,
+        )
+        obj = _safe_json_loads(text)
+        if obj:
+            return obj
+        strict_prompt = (
+            base_prompt
+            + "\n\nIMPORTANT: Your previous output was not valid JSON. "
+              "Return ONLY valid JSON matching the schema."
+        )
+        _, text2 = _llm_invoke_with_fallback(
+            _get_doc_map_llm,
+            strict_prompt,
+            max_retries=1,
+            model_chain=model_chain,
+        )
+        return _safe_json_loads(text2)
+
+    with _futures.ThreadPoolExecutor(max_workers=min(len(sources_groups), 3 if is_fast_mode else 4)) as pool:
+        extractions = list(pool.map(_extract_group, sources_groups))
+    merged = _merge_doc_extractions(extractions)
+    if _is_sparse_merged_payload(merged):
+        # Emergency fallback: force extraction on condensed high-signal chunks.
+        focus_chunks = []
+        for gi, txt, meta in indexed_chunks:
+            low = (txt or "").lower()
+            if any(k in low for k in [
+                "allerg", "medication", "discharge", "history", "assessment", "plan",
+                "echo", "ecg", "ekg", "procedure", "catheter", "lab", "vital",
+            ]):
+                focus_chunks.append((gi, txt, meta))
+        if not focus_chunks:
+            focus_chunks = indexed_chunks[: min(18, len(indexed_chunks))]
+        focus_groups = _build_sources_for_groups(focus_chunks, max_group_chars=18000)
+        with _futures.ThreadPoolExecutor(max_workers=min(len(focus_groups), 3)) as pool:
+            focus_extractions = list(pool.map(_extract_group, focus_groups))
+        merged = _merge_doc_extractions([merged, _merge_doc_extractions(focus_extractions)])
+
+    # Build domain-signal text from all chunks (truncated per chunk for memory safety)
+    signal_text = "\n".join((txt[:600] if txt else "") for _, txt, _ in indexed_chunks)
+    missing_domains = _doc_needs_keyword_retry(signal_text, merged)
+
+    if missing_domains:
+        keyword_map = {
+            "allergies": ["allerg", "nka", "reaction", "anaphyl", "urticaria", "angioedema", "contrast"],
+            "medications": ["med", "medication", "rx", "sig", "dose", "tablet", "capsule", "discharge rx"],
+            "labs": ["lab", "cbc", "bmp", "cmp", "mg/dl", "mmol", "wbc", "hgb", "plt", "bnp", "creatinine"],
+            "imaging": ["impression", "ct", "mri", "x-ray", "ultrasound", "echo", "ecg", "ekg", "rvsp", "ef"],
+            "procedures": ["procedure", "operative", "surgery", "biopsy", "endoscopy", "thoracentesis", "catheter", "pcwp", "pvr", "cardiac index"],
+            "disposition_followup": ["discharge", "follow-up", "appointment", "return to", "home health", "pt", "ot", "icd"],
+        }
+        want = set(missing_domains)
+        filtered = []
+        for global_idx, txt, meta in indexed_chunks:
+            low = (txt or "").lower()
+            if any(any(k in low for k in keyword_map.get(dom, [])) for dom in want):
+                filtered.append((global_idx, txt, meta))
+        if filtered:
+            retry_groups = _build_sources_for_groups(filtered, max_group_chars=22_000)
+            with _futures.ThreadPoolExecutor(max_workers=min(len(retry_groups), 3)) as pool:
+                retry_extractions = list(pool.map(_extract_group, retry_groups))
+            merged = _merge_doc_extractions([merged, _merge_doc_extractions(retry_extractions)])
+
+    # Augmentation pass: capture nuanced high-impact details even if domain isn't empty
+    # Skip in fast mode for latency.
+    if not is_fast_mode:
+        augment_keywords = [
+            "allerg", "anaphyl", "angioedema", "contrast", "premedication",
+            "nstemi", "cad", "pci", "stent", "lad", "mi",
+            "ecg", "ekg", "echo", "ejection fraction", "rvsp", "q wave", "st depression", "qtc",
+            "thoracentesis", "catheter", "right-heart", "pcwp", "pvr", "cardiac index", "ra ", "pa ",
+            "afib", "atrial fibrillation", "rvr", "magnesium", "diltiazem",
+            "proteinuria", "nephrology", "creatinine", "discharge delayed", "arni",
+            "home health", "follow-up", "repeat echo", "icd", "final discharge", "discharge vitals", "discharge labs",
+        ]
+        augment_chunks = []
+        for global_idx, txt, meta in indexed_chunks:
+            low = (txt or "").lower()
+            if any(k in low for k in augment_keywords):
+                augment_chunks.append((global_idx, txt, meta))
+        if augment_chunks:
+            augment_groups = _build_sources_for_groups(augment_chunks, max_group_chars=20_000)
+            base_existing = json.dumps(merged, ensure_ascii=False)
+
+            def _augment_group(sources_text: str) -> dict:
+                prompt = _DOC_AUGMENT_JSON_PROMPT.format(existing_json=base_existing, sources=sources_text)
+                model_chain = build_model_chain(
+                    map_primary,
+                    ["gemini-2.5-flash-lite"],
+                )
+                _, text = _llm_invoke_with_fallback(
+                    _get_doc_map_llm,
+                    prompt,
+                    max_retries=2,
+                    model_chain=model_chain,
+                )
+                return _safe_json_loads(text)
+
+            with _futures.ThreadPoolExecutor(max_workers=min(len(augment_groups), 3)) as pool:
+                augment_extractions = list(pool.map(_augment_group, augment_groups))
+            merged = _merge_doc_extractions([merged, _merge_doc_extractions(augment_extractions)])
+
+    json_blob = json.dumps(merged, ensure_ascii=False)
+    reduce_prompt = _DOC_REDUCE_PROMPT.format(json_blob=json_blob)
+    if is_fast_mode:
+        reduce_prompt += (
+            "\n\nFAST MODE REQUIREMENTS:\n"
+            "- Target 250-500 words total unless the document is highly complex.\n"
+            "- Keep only high-yield sections present in data.\n"
+            "- Prioritize key diagnoses, allergies, major medications, critical labs/imaging, procedures, and follow-up.\n"
+            "- Avoid exhaustive enumeration of every minor value.\n"
+        )
+    else:
+        reduce_prompt += _DOC_REDUCE_PROMPT_THINKING_APPEND
+    reduce_chain = build_model_chain(
+        reduce_primary,
+        ["gemini-2.5-flash"],
+    )
+    model_name, summary = _llm_invoke_with_fallback(
+        _get_doc_reduce_llm,
+        reduce_prompt,
+        max_retries=2,
+        model_chain=reduce_chain,
+    )
+    return summary, model_name
+
+
+def _supplement_from_targeted_searches(rag: "ClinicalNotesRAGTool", patient_mrn: str) -> list[tuple[str, dict]]:
+    """Get supplemental chunks from targeted semantic search for high-risk domains.
+
+    This guards against occasional metadata extraction gaps where a critical
+    section (e.g., allergy table) may not be included in strict MRN-filtered
+    chunk retrieval.
+    """
+    queries = [
+        f"{patient_mrn} allergies allergy reaction anaphylaxis contrast premedication",
+        f"{patient_mrn} echocardiogram ECG EKG right heart catheterization thoracentesis hemodynamics PCWP PVR cardiac index",
+        f"{patient_mrn} discharge labs final vitals follow-up home health nephrology proteinuria AFib recurrence magnesium diltiazem",
+    ]
+    out: list[tuple[str, dict]] = []
+    seen = set()
+    for q in queries:
+        try:
+            text = rag.search(q)
+        except Exception:
+            continue
+        if not text or text.startswith("No relevant"):
+            continue
+        parts = text.split("\n\n---\n\n")
+        for p in parts:
+            # Strip leading source metadata header line if present.
+            body = _re.sub(r"^\[Source[^\]]+\]\n?", "", p.strip())
+            key = hashlib.md5(body.encode("utf-8")).hexdigest()
+            if not body or key in seen:
+                continue
+            seen.add(key)
+            out.append((body, {"section_title": "Supplemental Targeted Retrieval", "page_number": "?"}))
+    return out
+
 
 # ── Map-reduce parallel summarization ────────────────────────────────────────
 # For large records (>30K chars), split → parallel extract → merge.
@@ -948,7 +1677,7 @@ def _get_map_llm(model_override: str = None):
     base_model = getattr(TOOLS_CFG, "clinical_notes_rag_summarization_llm",
                          TOOLS_CFG.clinical_notes_rag_llm)
     model = model_override or base_model
-    provider = getattr(TOOLS_CFG, "llm_provider", "openai")
+    provider = get_active_llm_provider(getattr(TOOLS_CFG, "llm_provider", "openai"))
 
     if provider == "google" or model.startswith("gemini"):
         from langchain_google_genai import ChatGoogleGenerativeAI
@@ -1173,20 +1902,23 @@ def summarize_patient_record(patient_identifier: str) -> str:
             return (f"Could not find a patient matching '{patient_identifier}'. "
                     f"Use list_available_patients to see who is in the database.")
         logger.info("Resolved '%s' → %s", patient_identifier, patient_mrn)
+        req_mode = _current_summary_mode()
+        bypass_cache = req_mode == "thinking"
 
         # ── Layer 1: In-memory LRU cache (instant, cross-session) ─
         with _memory_cache_lock:
-            if patient_mrn in _memory_cache:
+            if not bypass_cache and patient_mrn in _memory_cache:
                 entry = _memory_cache[patient_mrn]
+                cache_version = entry.get("pipeline_version", "legacy")
                 age_hours = (_dt.now() - entry["cached_at"]).total_seconds() / 3600
-                if age_hours <= _CACHE_TTL_HOURS:
+                if age_hours <= _CACHE_TTL_HOURS and cache_version == _SUMMARY_PIPELINE_VERSION:
                     _memory_cache.move_to_end(patient_mrn)  # mark as recently used
                     elapsed = _time.perf_counter() - t_start
                     logger.info("MEMORY CACHE HIT for %s (%.3fs, %.1fh old)", patient_mrn, elapsed, age_hours)
                     _record_cache_event("hit", "memory")
                     return entry["summary"]
                 else:
-                    logger.info("Memory cache EXPIRED for %s (%.1fh old)", patient_mrn, age_hours)
+                    logger.info("Memory cache EXPIRED/STALE for %s (%.1fh old, v=%s)", patient_mrn, age_hours, cache_version)
                     del _memory_cache[patient_mrn]
 
         # ── Layer 2: Disk cache (survives restarts, cross-session) ─
@@ -1195,20 +1927,22 @@ def summarize_patient_record(patient_identifier: str) -> str:
         cache_key = hashlib.sha256(patient_mrn.encode()).hexdigest()[:16]
         cache_file = cache_dir / f"{cache_key}.json"
 
-        if cache_file.exists():
+        if not bypass_cache and cache_file.exists():
             try:
                 cached = json.loads(cache_file.read_text(encoding="utf-8"))
                 generated_at = cached.get("generated_at", "")
                 cache_time = _dt.strptime(generated_at, "%Y-%m-%d %H:%M:%S")
                 age_hours = (_dt.now() - cache_time).total_seconds() / 3600
+                cache_version = cached.get("pipeline_version", "legacy")
 
-                if age_hours <= _CACHE_TTL_HOURS:
+                if age_hours <= _CACHE_TTL_HOURS and cache_version == _SUMMARY_PIPELINE_VERSION:
                     # Valid cache — promote to memory cache (with LRU eviction) and return
                     summary = cached["summary"]
                     with _memory_cache_lock:
                         _memory_cache[patient_mrn] = {
                             "summary": summary,
                             "cached_at": cache_time,
+                            "pipeline_version": _SUMMARY_PIPELINE_VERSION,
                         }
                         _memory_cache.move_to_end(patient_mrn)
                         while len(_memory_cache) > _CACHE_MAX_SIZE:
@@ -1226,37 +1960,22 @@ def summarize_patient_record(patient_identifier: str) -> str:
                 cache_file.unlink(missing_ok=True)
 
         # ── Cache MISS — generate fresh summary ───────────────────
-        logger.info("Cache MISS for %s — generating summary...", patient_mrn)
+        logger.info("Cache MISS for %s — generating summary... (mode=%s)", patient_mrn, req_mode)
         _record_cache_event("miss")
 
-        # Retrieve and merge ALL chunks
-        full_record = rag.get_all_chunks_for_patient(patient_mrn)
-        if full_record.startswith("No records found") or full_record.startswith("Error"):
-            return full_record
+        # Retrieve chunks with metadata and run unified structured pipeline
+        patient_chunks = rag.get_all_chunks_for_patient_structured(patient_mrn)
+        if not patient_chunks:
+            return f"No records found for patient MRN: {patient_mrn}"
+        # Add targeted-retrieval supplements for high-risk domains that can be
+        # underrepresented if metadata extraction misses a section.
+        patient_chunks.extend(_supplement_from_targeted_searches(rag, patient_mrn))
+        indexed_chunks: list[tuple[int, str, dict]] = [(i, txt, meta) for i, (txt, meta) in enumerate(patient_chunks, 1)]
 
-        record_chars = len(full_record)
-        logger.info("Record: %s chars (~%s tokens)", f"{record_chars:,}", f"{record_chars // 4:,}")
-
-        # Use map-reduce for large records (parallel processing: 60s → ~15-20s)
-        # Small records (<30K chars) use single-pass for simplicity
         t_llm_start = _time.perf_counter()
-        if record_chars > _MAP_REDUCE_THRESHOLD:
-            logger.info("Using MAP-REDUCE summarization (record > %d chars)", _MAP_REDUCE_THRESHOLD)
-            summary, model_name = _map_reduce_summarize(patient_mrn, full_record)
-        else:
-            logger.info("Using single-pass summarization (record <= %d chars)", _MAP_REDUCE_THRESHOLD)
-            prompt = _SUMMARY_PROMPT.format(mrn=patient_mrn, record=full_record)
-            model_chain = build_model_chain(
-                getattr(TOOLS_CFG, "clinical_notes_rag_summarization_llm", TOOLS_CFG.clinical_notes_rag_llm),
-                getattr(TOOLS_CFG, "clinical_notes_rag_summarization_fallback_llms", []),
-            )
-            model_name, summary = _llm_invoke_with_fallback(
-                _get_summarization_llm,
-                prompt,
-                model_chain=model_chain,
-            )
+        summary, model_name = _run_structured_summary_pipeline(patient_mrn, indexed_chunks)
         t_llm_end = _time.perf_counter()
-        logger.info("LLM: %.1fs, output=%s chars (model=%s)",
+        logger.info("Structured pipeline LLM: %.1fs, output=%s chars (model=%s)",
                     t_llm_end - t_llm_start, f"{len(summary):,}", model_name)
 
         t_total = _time.perf_counter() - t_start
@@ -1265,29 +1984,32 @@ def summarize_patient_record(patient_identifier: str) -> str:
         # ── Write to both cache layers ────────────────────────────
         now = _dt.now()
 
-        # Memory cache (LRU eviction when full)
-        with _memory_cache_lock:
-            _memory_cache[patient_mrn] = {
-                "summary": summary,
-                "cached_at": now,
-            }
-            _memory_cache.move_to_end(patient_mrn)
-            # Evict oldest entries if over max size
-            while len(_memory_cache) > _CACHE_MAX_SIZE:
-                evicted_key, _ = _memory_cache.popitem(last=False)
-                logger.info("LRU eviction: removed %s from memory cache (size=%d)", evicted_key, len(_memory_cache))
+        if not bypass_cache:
+            # Memory cache (LRU eviction when full)
+            with _memory_cache_lock:
+                _memory_cache[patient_mrn] = {
+                    "summary": summary,
+                    "cached_at": now,
+                    "pipeline_version": _SUMMARY_PIPELINE_VERSION,
+                }
+                _memory_cache.move_to_end(patient_mrn)
+                # Evict oldest entries if over max size
+                while len(_memory_cache) > _CACHE_MAX_SIZE:
+                    evicted_key, _ = _memory_cache.popitem(last=False)
+                    logger.info("LRU eviction: removed %s from memory cache (size=%d)", evicted_key, len(_memory_cache))
 
-        # Disk cache (TTL-only, no fragile chunk_count validation)
-        try:
-            cache_file.write_text(json.dumps({
-                "mrn": patient_mrn,
-                "summary": summary,
-                "model": model_name,
-                "generated_at": now.strftime("%Y-%m-%d %H:%M:%S"),
-            }, ensure_ascii=False), encoding="utf-8")
-            logger.info("Cached → %s (memory + disk)", cache_file.name)
-        except Exception as ce:
-            logger.warning("Disk cache write failed (non-critical): %s", ce)
+            # Disk cache (TTL-only, no fragile chunk_count validation)
+            try:
+                cache_file.write_text(json.dumps({
+                    "mrn": patient_mrn,
+                    "summary": summary,
+                    "model": model_name,
+                    "generated_at": now.strftime("%Y-%m-%d %H:%M:%S"),
+                    "pipeline_version": _SUMMARY_PIPELINE_VERSION,
+                }, ensure_ascii=False), encoding="utf-8")
+                logger.info("Cached → %s (memory + disk)", cache_file.name)
+            except Exception as ce:
+                logger.warning("Disk cache write failed (non-critical): %s", ce)
 
         return summary
 
@@ -1328,3 +2050,53 @@ def list_uploaded_documents() -> str:
         return "\n".join(lines)
     except Exception as e:
         return f"Error listing documents: {e}"
+
+
+@tool
+def summarize_uploaded_document(document_id: str) -> str:
+    """Generate a clinically grounded summary of a specific uploaded document.
+
+    Input: document_id (UUID) from list_uploaded_documents().
+    Output: clinician-facing summary with citations like [S12].
+    """
+    try:
+        doc_id = (document_id or "").strip()
+        if not doc_id:
+            return "Missing document_id. Use list_uploaded_documents() to get an ID."
+
+        # ── Cache (document-scoped) ───────────────────────────────
+        with _DOC_SUMMARY_CACHE_LOCK:
+            if doc_id in _DOC_SUMMARY_CACHE:
+                entry = _DOC_SUMMARY_CACHE[doc_id]
+                age_hours = (_dt.now() - entry["cached_at"]).total_seconds() / 3600
+                if age_hours <= _CACHE_TTL_HOURS:
+                    _DOC_SUMMARY_CACHE.move_to_end(doc_id)
+                    return entry["summary"]
+                del _DOC_SUMMARY_CACHE[doc_id]
+
+        rag = get_rag_tool_instance()
+        chunks = rag.get_all_chunks_for_document(doc_id)
+        if not chunks:
+            return f"No indexed chunks found for document_id={doc_id}. If you just uploaded it, it may still be processing."
+
+        # Assign global stable source IDs across the full document order
+        indexed_chunks: list[tuple[int, str, dict]] = [(i, txt, meta) for i, (txt, meta) in enumerate(chunks, 1)]
+
+        t0 = _time.perf_counter()
+        summary, model_name = _run_structured_summary_pipeline(doc_id, indexed_chunks)
+
+        elapsed = _time.perf_counter() - t0
+        logger.info("[DocSummary] document_id=%s chunks=%d elapsed=%.1fs model=%s",
+                    doc_id, len(chunks), elapsed, model_name)
+
+        # ── Cache result ─────────────────────────────────────────
+        with _DOC_SUMMARY_CACHE_LOCK:
+            _DOC_SUMMARY_CACHE[doc_id] = {"summary": summary, "cached_at": _dt.now()}
+            _DOC_SUMMARY_CACHE.move_to_end(doc_id)
+            while len(_DOC_SUMMARY_CACHE) > _DOC_SUMMARY_CACHE_MAX_SIZE:
+                _DOC_SUMMARY_CACHE.popitem(last=False)
+
+        return summary
+
+    except Exception as e:
+        return f"Error generating document summary: {str(e)[:300]}"

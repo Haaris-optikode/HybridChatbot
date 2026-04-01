@@ -43,7 +43,7 @@ from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel
-from typing import List, Optional, Dict
+from typing import List, Optional, Dict, Tuple
 from dotenv import load_dotenv
 from pyprojroot import here
 from slowapi import Limiter
@@ -88,66 +88,114 @@ from utils.app_utils import create_directory
 from chatbot.memory import Memory
 from langchain_core.messages import SystemMessage, HumanMessage, AIMessage
 from observability.token_cost import RequestUsageCallback, summarize_request, LEDGER, PRICING_TABLE
+from agent_graph.tool_clinical_notes_rag import set_summary_request_mode, reset_summary_request_mode
 
 PROJECT_CFG = LoadProjectConfig()
 TOOLS_CFG = LoadToolsConfig()
 
-_ROUTER_MODEL_CHAIN = build_model_chain(
-    TOOLS_CFG.primary_agent_router_llm,
-    getattr(TOOLS_CFG, "primary_agent_router_fallback_llms", []),
-)
-_SYNTH_MODEL_CHAIN = build_model_chain(
-    TOOLS_CFG.primary_agent_llm,
-    getattr(TOOLS_CFG, "primary_agent_fallback_llms", []),
-)
-_THINKING_MODEL_CHAIN = build_model_chain(
-    TOOLS_CFG.primary_agent_thinking_llm,
-    getattr(TOOLS_CFG, "primary_agent_thinking_fallback_llms", []),
-)
+_DEFAULT_PROVIDER = (getattr(TOOLS_CFG, "llm_provider", "openai") or "openai").strip().lower()
+if _DEFAULT_PROVIDER not in ("openai", "google"):
+    _DEFAULT_PROVIDER = "openai"
+
+_PROVIDER_MODEL_CHAINS = {
+    "openai": {
+        "router": build_model_chain(
+            os.getenv("MEDGRAPH_OPENAI_ROUTER_MODEL", "gpt-4.1-mini"),
+            [os.getenv("MEDGRAPH_OPENAI_ROUTER_FALLBACK", "gpt-4.1-nano")],
+        ),
+        "synth": build_model_chain(
+            os.getenv("MEDGRAPH_OPENAI_SYNTH_MODEL", "gpt-4.1-mini"),
+            [os.getenv("MEDGRAPH_OPENAI_SYNTH_FALLBACK", "gpt-4.1-nano")],
+        ),
+        "thinking": build_model_chain(
+            os.getenv("MEDGRAPH_OPENAI_THINKING_MODEL", "gpt-4.1"),
+            [os.getenv("MEDGRAPH_OPENAI_THINKING_FALLBACK", "gpt-4.1-mini")],
+        ),
+    },
+    "google": {
+        "router": build_model_chain(
+            TOOLS_CFG.primary_agent_router_llm,
+            getattr(TOOLS_CFG, "primary_agent_router_fallback_llms", []),
+        ),
+        "synth": build_model_chain(
+            TOOLS_CFG.primary_agent_llm,
+            getattr(TOOLS_CFG, "primary_agent_fallback_llms", []),
+        ),
+        "thinking": build_model_chain(
+            TOOLS_CFG.primary_agent_thinking_llm,
+            getattr(TOOLS_CFG, "primary_agent_thinking_fallback_llms", []),
+        ),
+    },
+}
 _MODEL_FALLBACK_STATE = {
-    "router_idx": 0,
-    "synth_idx": 0,
-    "thinking_idx": 0,
+    "openai": {"router_idx": 0, "synth_idx": 0, "thinking_idx": 0},
+    "google": {"router_idx": 0, "synth_idx": 0, "thinking_idx": 0},
 }
 
 
-def _apply_graph_model_overrides() -> None:
+def _apply_graph_model_overrides(provider: str) -> None:
     """Apply current fallback-model indexes to graph build environment vars."""
-    os.environ["MEDGRAPH_ROUTER_MODEL_OVERRIDE"] = _ROUTER_MODEL_CHAIN[_MODEL_FALLBACK_STATE["router_idx"]]
-    os.environ["MEDGRAPH_SYNTH_MODEL_OVERRIDE"] = _SYNTH_MODEL_CHAIN[_MODEL_FALLBACK_STATE["synth_idx"]]
-    os.environ["MEDGRAPH_THINKING_MODEL_OVERRIDE"] = _THINKING_MODEL_CHAIN[_MODEL_FALLBACK_STATE["thinking_idx"]]
+    p = provider if provider in ("openai", "google") else _DEFAULT_PROVIDER
+    chains = _PROVIDER_MODEL_CHAINS[p]
+    state = _MODEL_FALLBACK_STATE[p]
+    os.environ["MEDGRAPH_LLM_PROVIDER_OVERRIDE"] = p
+    os.environ["MEDGRAPH_ROUTER_MODEL_OVERRIDE"] = chains["router"][state["router_idx"]]
+    os.environ["MEDGRAPH_SYNTH_MODEL_OVERRIDE"] = chains["synth"][state["synth_idx"]]
+    os.environ["MEDGRAPH_THINKING_MODEL_OVERRIDE"] = chains["thinking"][state["thinking_idx"]]
 
 
-def _advance_graph_model_fallback(thinking_mode: bool) -> bool:
+def _advance_graph_model_fallback(thinking_mode: bool, provider: str) -> bool:
     """Advance to next configured model candidate. Returns True if advanced."""
-    if thinking_mode and _MODEL_FALLBACK_STATE["thinking_idx"] < len(_THINKING_MODEL_CHAIN) - 1:
-        _MODEL_FALLBACK_STATE["thinking_idx"] += 1
-        _apply_graph_model_overrides()
+    p = provider if provider in ("openai", "google") else _DEFAULT_PROVIDER
+    chains = _PROVIDER_MODEL_CHAINS[p]
+    state = _MODEL_FALLBACK_STATE[p]
+    if thinking_mode and state["thinking_idx"] < len(chains["thinking"]) - 1:
+        state["thinking_idx"] += 1
+        _apply_graph_model_overrides(p)
         logger.warning("Model fallback advanced (thinking): router=%s synth=%s thinking=%s",
                        os.environ.get("MEDGRAPH_ROUTER_MODEL_OVERRIDE"),
                        os.environ.get("MEDGRAPH_SYNTH_MODEL_OVERRIDE"),
                        os.environ.get("MEDGRAPH_THINKING_MODEL_OVERRIDE"))
         return True
-    if not thinking_mode and _MODEL_FALLBACK_STATE["synth_idx"] < len(_SYNTH_MODEL_CHAIN) - 1:
-        _MODEL_FALLBACK_STATE["synth_idx"] += 1
-        _apply_graph_model_overrides()
+    if not thinking_mode and state["synth_idx"] < len(chains["synth"]) - 1:
+        state["synth_idx"] += 1
+        _apply_graph_model_overrides(p)
         logger.warning("Model fallback advanced (normal): router=%s synth=%s",
                        os.environ.get("MEDGRAPH_ROUTER_MODEL_OVERRIDE"),
                        os.environ.get("MEDGRAPH_SYNTH_MODEL_OVERRIDE"))
         return True
-    if _MODEL_FALLBACK_STATE["router_idx"] < len(_ROUTER_MODEL_CHAIN) - 1:
-        _MODEL_FALLBACK_STATE["router_idx"] += 1
-        _apply_graph_model_overrides()
+    if state["router_idx"] < len(chains["router"]) - 1:
+        state["router_idx"] += 1
+        _apply_graph_model_overrides(p)
         logger.warning("Model fallback advanced (router): router=%s",
                        os.environ.get("MEDGRAPH_ROUTER_MODEL_OVERRIDE"))
         return True
     return False
 
 
-_apply_graph_model_overrides()
+_GRAPH_CACHE: dict[str, tuple] = {}
 
-graph = build_graph(thinking_mode=False)
-thinking_graph = build_graph(thinking_mode=True)
+
+def _normalize_provider(provider: Optional[str]) -> str:
+    p = (provider or "").strip().lower()
+    if p in ("openai", "google"):
+        return p
+    return _DEFAULT_PROVIDER
+
+
+def _get_graph_pair(provider: str):
+    p = _normalize_provider(provider)
+    # Ensure request-scoped provider/model overrides are active even on cache hits.
+    _apply_graph_model_overrides(p)
+    if p in _GRAPH_CACHE:
+        return _GRAPH_CACHE[p]
+    g = build_graph(thinking_mode=False)
+    tg = build_graph(thinking_mode=True)
+    _GRAPH_CACHE[p] = (g, tg)
+    return g, tg
+
+
+graph, thinking_graph = _get_graph_pair(_DEFAULT_PROVIDER)
 create_directory("memory")
 
 MEMORY_DIR = str(PROJECT_CFG.memory_dir)
@@ -332,6 +380,7 @@ Tools:
 4. **list_available_patients()** — List all patients in the database.
 5. **tavily_search_results_json(query)** — Web search for general medical knowledge.
 6. **list_uploaded_documents()** — List all uploaded documents with their IDs, filenames, and processing status.
+7. **summarize_uploaded_document(document_id)** — Generate a clinically grounded summary of ONE uploaded document by ID, with source citations.
 
 TOOL SELECTION (strict):
 - ANY specific question about a patient (DOB, allergies, meds, labs, vitals, diagnoses, procedures, imaging, history) → `lookup_clinical_notes`
@@ -346,6 +395,7 @@ TOOL SELECTION (strict):
 UPLOADED DOCUMENTS:
 - When the user says they "just uploaded" a document, "I uploaded a file", "I added a new doc", or asks about a "recently uploaded" or "new" document, you MUST FIRST call `list_uploaded_documents()` to get its document_id and confirm it is in "ready" status.
 - Then use `lookup_clinical_notes(query, document_id="<the_id>")` to search WITHIN that specific document. Never skip the document_id filter when the user is asking about a specific uploaded file.
+- If the user asks to "summarize this uploaded document / this file / this PDF" (document-scoped summary), call `list_uploaded_documents()` to get the document_id, verify "ready", then call `summarize_uploaded_document(document_id)`.
 - If the user asks for "the updated patient list" or "new patients" after uploading, call `list_uploaded_documents()` to get the document_id, then call `lookup_clinical_notes("patient name MRN demographics", document_id="<the_id>")` to extract patient info from the new document. Do NOT rely on `list_available_patients()` alone — that only shows previously indexed records and may lag behind a fresh upload.
 - If a document status is "processing", tell the user it is still being indexed and to try again in a moment.
 - This workflow ensures newly uploaded documents are always correctly queried even when they would be outranked by existing records in a general search.
@@ -524,6 +574,7 @@ class ChatRequest(BaseModel):
     session_id: Optional[str] = None
     tool_override: Optional[str] = None  # "vector_db", "web_search" or None (auto)
     thinking: Optional[bool] = False     # use deeper reasoning model when True
+    llm_provider: Optional[str] = None   # "openai" | "google"
 
 
 class ChatResponse(BaseModel):
@@ -582,6 +633,24 @@ def _fast_path_reply(message: str) -> Optional[str]:
     return None
 
 
+def _auto_tool_override(message: str) -> Optional[str]:
+    """Force tool usage for explicit summary requests.
+
+    Prevents stale conversational reuse when user repeats "summarize full record"
+    queries in the same chat session.
+    """
+    m = (message or "").strip().lower()
+    if not m:
+        return None
+    asks_summary = (
+        ("summar" in m or "overview" in m or "complete record" in m or "full record" in m)
+        and ("patient" in m or "mrn" in m or "record" in m)
+    )
+    if asks_summary:
+        return "summarize"
+    return None
+
+
 # ── Tool override prompts ────────────────────────────────────────────
 TOOL_PROMPTS = {
     "vector_db": (
@@ -630,7 +699,10 @@ async def chat(req: ChatRequest, request: Request, user: dict = Depends(get_curr
     global graph, thinking_graph
     t0 = time.perf_counter()
     validated_msg = _validate_message(req.message)
-    _audit_log("chat_request", user, tool_override=req.tool_override or "auto")
+    req_provider = _normalize_provider(req.llm_provider)
+    graph, thinking_graph = _get_graph_pair(req_provider)
+    effective_tool_override = req.tool_override or _auto_tool_override(validated_msg)
+    _audit_log("chat_request", user, tool_override=effective_tool_override or "auto", llm_provider=req_provider)
 
     # Session management
     sid = req.session_id or str(uuid.uuid4())
@@ -638,7 +710,7 @@ async def chat(req: ChatRequest, request: Request, user: dict = Depends(get_curr
 
     # Instant fast-path for simple conversational/capabilities requests.
     fast_reply = _fast_path_reply(validated_msg)
-    if fast_reply and not req.tool_override:
+    if fast_reply and not effective_tool_override:
         now = time.time()
         history.append(ChatMessage(role="user", content=validated_msg, timestamp=now))
         history.append(ChatMessage(role="assistant", content=fast_reply, timestamp=time.time()))
@@ -679,8 +751,8 @@ async def chat(req: ChatRequest, request: Request, user: dict = Depends(get_curr
 
     # Build LangChain message list (trimmed to last N turns)
     system_prompt = SYSTEM_PROMPT
-    if req.tool_override and req.tool_override in TOOL_PROMPTS:
-        system_prompt += " " + TOOL_PROMPTS[req.tool_override]
+    if effective_tool_override and effective_tool_override in TOOL_PROMPTS:
+        system_prompt += " " + TOOL_PROMPTS[effective_tool_override]
 
     trimmed = _trim_history(history)
     messages = [SystemMessage(content=system_prompt)]
@@ -696,43 +768,50 @@ async def chat(req: ChatRequest, request: Request, user: dict = Depends(get_curr
     config = {"callbacks": [usage_cb]}
     active_graph = thinking_graph if req.thinking else graph
     max_retries = 2
-    for attempt in range(max_retries + 1):
-        try:
-            events = list(active_graph.stream(
-                {"messages": messages}, config, stream_mode="values"
-            ))
-            reply = _normalize_content(events[-1]["messages"][-1].content)
-            break
-        except Exception as exc:
-            exc_str = str(exc).lower()
-            is_rate_limit = any(k in exc_str for k in ["rate limit", "429", "resource_exhausted", "quota"])
-            is_transient = is_rate_limit or any(k in exc_str for k in ["timeout", "timed out", "overloaded", "503"])
-            if is_rate_limit:
-                swapped = swap_google_api_key()
-                if swapped:
-                    graph = build_graph(thinking_mode=False)
-                    thinking_graph = build_graph(thinking_mode=True)
-                    active_graph = thinking_graph if req.thinking else graph
-                    logger.warning("Rebuilt graphs with backup API key after rate limit")
-                elif req.thinking and active_graph is not graph:
-                    # Thinking model quota exhausted on all keys — fall back to normal graph
-                    active_graph = graph
-                    logger.warning("Thinking model quota exhausted, falling back to normal graph")
-            if is_transient and attempt < max_retries:
-                advanced_model = _advance_graph_model_fallback(req.thinking)
-                if advanced_model:
-                    graph = build_graph(thinking_mode=False)
-                    thinking_graph = build_graph(thinking_mode=True)
-                    active_graph = thinking_graph if req.thinking else graph
-                    logger.warning("Rebuilt graphs with fallback model after transient error")
-                wait = (attempt + 1) * 5  # 5s, 10s
-                logger.warning("Transient LLM error (attempt %d/%d), retrying in %ds: %s",
-                               attempt + 1, max_retries + 1, wait, str(exc)[:200])
-                import asyncio
-                await asyncio.sleep(wait)
-                continue
-            logger.error("LLM error after %d attempts: %s", attempt + 1, str(exc)[:500])
-            raise HTTPException(status_code=503, detail=f"Upstream AI service unavailable. Please retry in a moment.")
+    summary_mode_token = set_summary_request_mode("thinking" if req.thinking else "normal")
+    try:
+        for attempt in range(max_retries + 1):
+            try:
+                events = list(active_graph.stream(
+                    {"messages": messages}, config, stream_mode="values"
+                ))
+                reply = _normalize_content(events[-1]["messages"][-1].content)
+                break
+            except Exception as exc:
+                exc_str = str(exc).lower()
+                is_rate_limit = any(k in exc_str for k in ["rate limit", "429", "resource_exhausted", "quota"])
+                is_transient = is_rate_limit or any(k in exc_str for k in ["timeout", "timed out", "overloaded", "503"])
+                if is_rate_limit:
+                    swapped = swap_google_api_key()
+                    if swapped:
+                        _GRAPH_CACHE.pop(req_provider, None)
+                        graph, thinking_graph = _get_graph_pair(req_provider)
+                        active_graph = thinking_graph if req.thinking else graph
+                        logger.warning("Rebuilt graphs with backup API key after rate limit")
+                    elif req.thinking and active_graph is not graph:
+                        allow_downgrade = os.environ.get("MEDGRAPH_ALLOW_THINKING_DOWNGRADE", "").strip().lower() in ("1", "true", "yes")
+                        if allow_downgrade:
+                            active_graph = graph
+                            logger.warning("Thinking model quota exhausted, falling back to normal graph by config")
+                        else:
+                            logger.warning("Thinking model quota exhausted; preserving thinking mode (no silent downgrade)")
+                            raise HTTPException(status_code=503, detail="Thinking model temporarily unavailable. Please retry in a few moments.")
+                if is_transient and attempt < max_retries:
+                    advanced_model = _advance_graph_model_fallback(req.thinking, req_provider)
+                    if advanced_model:
+                        graph, thinking_graph = _get_graph_pair(req_provider)
+                        active_graph = thinking_graph if req.thinking else graph
+                        logger.warning("Rebuilt graphs with fallback model after transient error")
+                    wait = (attempt + 1) * 5  # 5s, 10s
+                    logger.warning("Transient LLM error (attempt %d/%d), retrying in %ds: %s",
+                                   attempt + 1, max_retries + 1, wait, str(exc)[:200])
+                    import asyncio
+                    await asyncio.sleep(wait)
+                    continue
+                logger.error("LLM error after %d attempts: %s", attempt + 1, str(exc)[:500])
+                raise HTTPException(status_code=503, detail=f"Upstream AI service unavailable. Please retry in a moment.")
+    finally:
+        reset_summary_request_mode(summary_mode_token)
 
     # Store in session (full history, not trimmed)
     now = time.time()
@@ -773,12 +852,22 @@ async def chat(req: ChatRequest, request: Request, user: dict = Depends(get_curr
 
 _TOOL_STATUS = {
     "summarize_patient_record": "Generating clinical summary...",
+    "summarize_uploaded_document": "Summarizing uploaded document...",
     "lookup_clinical_notes": "Searching clinical notes...",
     "lookup_patient_orders": "Retrieving patient orders...",
     "list_available_patients": "Listing patients...",
     "list_uploaded_documents": "Checking uploaded documents...",
     "tavily_search_results_json": "Searching the web...",
 }
+
+_SUMMARY_PROGRESS_STAGES = [
+    (0.0, "Collecting patient data..."),
+    (2.0, "Analyzing full clinical record..."),
+    (5.0, "Fetching high-priority clinical details..."),
+    (8.0, "Curating summary structure..."),
+    (12.0, "Pondering complex clinical relationships..."),
+    (16.0, "Finalizing clinician-ready summary..."),
+]
 
 
 @app.post("/api/chat/stream")
@@ -787,16 +876,20 @@ async def chat_stream(req: ChatRequest, request: Request, user: dict = Depends(g
     """SSE endpoint — runs graph in a thread, relays updates via queue."""
     global graph, thinking_graph
     t0 = time.perf_counter()
-    _audit_log("chat_stream_request", user, tool_override=req.tool_override or "auto")
-
     validated_msg = _validate_message(req.message)
+    req_provider = _normalize_provider(req.llm_provider)
+    graph, thinking_graph = _get_graph_pair(req_provider)
+    effective_tool_override = req.tool_override or _auto_tool_override(validated_msg)
+    is_full_record_summary_request = effective_tool_override == "summarize"
+    _audit_log("chat_stream_request", user, tool_override=effective_tool_override or "auto", llm_provider=req_provider)
+
 
     sid = req.session_id or str(uuid.uuid4())
     history: List[ChatMessage] = sessions.get(sid)
 
     # Instant fast-path for simple conversational/capabilities requests.
     fast_reply = _fast_path_reply(validated_msg)
-    if fast_reply and not req.tool_override:
+    if fast_reply and not effective_tool_override:
         async def _fast_stream():
             now = time.time()
             history.append(ChatMessage(role="user", content=validated_msg, timestamp=now))
@@ -849,8 +942,8 @@ async def chat_stream(req: ChatRequest, request: Request, user: dict = Depends(g
         )
 
     system_prompt = SYSTEM_PROMPT
-    if req.tool_override and req.tool_override in TOOL_PROMPTS:
-        system_prompt += " " + TOOL_PROMPTS[req.tool_override]
+    if effective_tool_override and effective_tool_override in TOOL_PROMPTS:
+        system_prompt += " " + TOOL_PROMPTS[effective_tool_override]
 
     trimmed = _trim_history(history)
     messages = [SystemMessage(content=system_prompt)]
@@ -870,49 +963,19 @@ async def chat_stream(req: ChatRequest, request: Request, user: dict = Depends(g
     _graph_holder = {"active": active_graph}
 
     def _run_graph():
-        """Runs the sync graph.stream() in a background thread, with key-swap retry and outer timeout."""
-        import threading
+        """Runs sync graph.stream() in background and pushes updates immediately."""
         global graph, thinking_graph
         max_retries = 2
         _ended = False  # Track whether we already sent end/error
-        
-        def _stream_with_timeout():
-            """Execute stream with 180s outer timeout to prevent indefinite hangs.
-            
-            The summarize_patient_record tool runs map-reduce LLM calls that
-            take 30-90s total, so the timeout must be generous enough for the
-            heaviest tool.  180s covers: map phase (~30s) + reduce phase (~60s)
-            + synthesizer (~30s) + network variance.
-            """
-            result_holder = []
-            exception_holder = []
-            
-            def stream_thread():
+
+        summary_mode_token = set_summary_request_mode("thinking" if req.thinking else "normal")
+        try:
+            for attempt in range(max_retries + 1):
                 try:
                     for update in _graph_holder["active"].stream(
                         {"messages": messages}, config, stream_mode="updates"
                     ):
-                        result_holder.append(("update", update))
-                except Exception as e:
-                    exception_holder.append(e)
-            
-            t = threading.Thread(target=stream_thread, daemon=False)
-            t.start()
-            t.join(timeout=180)  # 180s — enough for map-reduce summarization + synthesis
-            
-            if t.is_alive():
-                raise TimeoutError("Graph stream exceeded 180 second timeout")
-            
-            if exception_holder:
-                raise exception_holder[0]
-            return result_holder
-        
-        try:
-            for attempt in range(max_retries + 1):
-                try:
-                    updates = _stream_with_timeout()
-                    for update in updates:
-                        q.put(update)
+                        q.put(("update", update))
                     q.put(("end", None))
                     _ended = True
                     return
@@ -922,8 +985,8 @@ async def chat_stream(req: ChatRequest, request: Request, user: dict = Depends(g
                         logger.info("Retrying with backup API key after timeout...")
                         swapped = swap_google_api_key()
                         if swapped:
-                            graph = build_graph(thinking_mode=False)
-                            thinking_graph = build_graph(thinking_mode=True)
+                            _GRAPH_CACHE.pop(req_provider, None)
+                            graph, thinking_graph = _get_graph_pair(req_provider)
                             _graph_holder["active"] = thinking_graph if req.thinking else graph
                             import time as _t
                             _t.sleep(2)
@@ -939,16 +1002,23 @@ async def chat_stream(req: ChatRequest, request: Request, user: dict = Depends(g
                     if (is_rate_limit or is_transient) and attempt < max_retries:
                         swapped = swap_google_api_key()
                         if swapped:
-                            graph = build_graph(thinking_mode=False)
-                            thinking_graph = build_graph(thinking_mode=True)
+                            _GRAPH_CACHE.pop(req_provider, None)
+                            graph, thinking_graph = _get_graph_pair(req_provider)
                             _graph_holder["active"] = thinking_graph if req.thinking else graph
                             logger.warning(f"Rebuilt graphs with backup API key (SSE), retrying... [{exc_str}]")
                         elif req.thinking and _graph_holder["active"] is not graph:
-                            _graph_holder["active"] = graph
-                            logger.warning("Thinking model quota exhausted (SSE), falling back to normal graph")
-                        elif is_transient and _advance_graph_model_fallback(req.thinking):
-                            graph = build_graph(thinking_mode=False)
-                            thinking_graph = build_graph(thinking_mode=True)
+                            allow_downgrade = os.environ.get("MEDGRAPH_ALLOW_THINKING_DOWNGRADE", "").strip().lower() in ("1", "true", "yes")
+                            if allow_downgrade:
+                                _graph_holder["active"] = graph
+                                logger.warning("Thinking model quota exhausted (SSE), falling back to normal graph by config")
+                            else:
+                                logger.warning("Thinking model quota exhausted (SSE); preserving thinking mode (no silent downgrade)")
+                                q.put(("error", "Thinking model temporarily unavailable. Please retry in a few moments."))
+                                _ended = True
+                                return
+                        elif is_transient and _advance_graph_model_fallback(req.thinking, req_provider):
+                            _GRAPH_CACHE.pop(req_provider, None)
+                            graph, thinking_graph = _get_graph_pair(req_provider)
                             _graph_holder["active"] = thinking_graph if req.thinking else graph
                             logger.warning("Rebuilt graphs with fallback model (SSE), retrying...")
                         import time as _t
@@ -958,6 +1028,7 @@ async def chat_stream(req: ChatRequest, request: Request, user: dict = Depends(g
                     _ended = True
                     return
         finally:
+            reset_summary_request_mode(summary_mode_token)
             # SAFETY NET: guarantee the queue always gets a terminal message
             if not _ended:
                 logger.error("_run_graph exited without sending end/error — sending error now")
@@ -967,12 +1038,31 @@ async def chat_stream(req: ChatRequest, request: Request, user: dict = Depends(g
         full_response = ""
         _last_ai_content = ""   # tracks latest non-empty AI text from ANY node (safety net)
         _STREAM_TIMEOUT_S = 180  # max seconds — must exceed graph timeout (180s) for summarization
+        _STREAM_CHUNK_CHARS = 220
+        _STREAM_CHUNK_DELAY_S = 0.05 if is_full_record_summary_request else 0.0
+
+        async def _emit_token_stream(text: str):
+            """Emit response as incremental SSE token chunks for smoother UX."""
+            if not text:
+                return
+            if len(text) <= _STREAM_CHUNK_CHARS:
+                yield f"data: {json.dumps({'type': 'token', 'content': text})}\n\n"
+                return
+            for i in range(0, len(text), _STREAM_CHUNK_CHARS):
+                piece = text[i:i + _STREAM_CHUNK_CHARS]
+                yield f"data: {json.dumps({'type': 'token', 'content': piece})}\n\n"
+                if _STREAM_CHUNK_DELAY_S > 0:
+                    await asyncio.sleep(_STREAM_CHUNK_DELAY_S)
+                else:
+                    await asyncio.sleep(0)
 
         # Start graph in background thread (sync graph.stream is proven reliable)
         thread = _threading.Thread(target=_run_graph, daemon=True)
         thread.start()
 
         stream_start = time.perf_counter()
+        stage_idx = 0
+        stage_start = time.perf_counter()
         while True:
             # Timeout guard: send explicit error instead of hanging indefinitely
             if time.perf_counter() - stream_start > _STREAM_TIMEOUT_S:
@@ -983,6 +1073,12 @@ async def chat_stream(req: ChatRequest, request: Request, user: dict = Depends(g
             try:
                 kind, data = q.get_nowait()
             except _queue_mod.Empty:
+                if is_full_record_summary_request and stage_idx < len(_SUMMARY_PROGRESS_STAGES):
+                    elapsed_stage = time.perf_counter() - stage_start
+                    threshold_s, stage_text = _SUMMARY_PROGRESS_STAGES[stage_idx]
+                    if elapsed_stage >= threshold_s:
+                        yield f"data: {json.dumps({'type': 'status', 'content': stage_text})}\n\n"
+                        stage_idx += 1
                 await asyncio.sleep(0.05)
                 continue
 
@@ -1018,12 +1114,14 @@ async def chat_stream(req: ChatRequest, request: Request, user: dict = Depends(g
                         # this is an intermediate multi-hop step, not the final answer.
                         if content and node_name in ("synthesizer", "chatbot") and not tool_calls:
                             full_response = content
-                            yield f"data: {json.dumps({'type': 'token', 'content': content})}\n\n"
+                            async for _chunk in _emit_token_stream(content):
+                                yield _chunk
                         elif content and node_name == "router" and not tool_calls:
                             # Router answered directly (no tool calls) — this IS the
                             # final response (e.g., greetings, simple conversation).
                             full_response = content
-                            yield f"data: {json.dumps({'type': 'token', 'content': content})}\n\n"
+                            async for _chunk in _emit_token_stream(content):
+                                yield _chunk
                         elif content and tool_calls:
                             # Intermediate step (tool invocation) — don't emit as answer,
                             # but keep tracking in _last_ai_content (already done above).
@@ -1037,12 +1135,14 @@ async def chat_stream(req: ChatRequest, request: Request, user: dict = Depends(g
         if not full_response.strip() and _last_ai_content.strip():
             logger.warning("[SSE] full_response empty after graph — using _last_ai_content fallback")
             full_response = _last_ai_content
-            yield f"data: {json.dumps({'type': 'token', 'content': full_response})}\n\n"
+            async for _chunk in _emit_token_stream(full_response):
+                yield _chunk
 
         # ── Fallback: if no content was collected at all ──
         if not full_response.strip():
             full_response = "I was unable to generate a response. Please try rephrasing your question or try again."
-            yield f"data: {json.dumps({'type': 'token', 'content': full_response})}\n\n"
+            async for _chunk in _emit_token_stream(full_response):
+                yield _chunk
 
         # ── Session & memory persistence ──────────────────────────
         elapsed_ms = int((time.perf_counter() - t0) * 1000)

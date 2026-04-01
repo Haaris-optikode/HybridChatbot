@@ -1,11 +1,11 @@
 {
   "global": {
-    "input_tokens": 1224495,
-    "output_tokens": 45218,
-    "total_tokens": 1269713,
-    "cost_usd": 0.15492517,
-    "requests": 146,
-    "updated_at": "2026-03-31T12:00:37.210669Z"
+    "input_tokens": 2076930,
+    "output_tokens": 117697,
+    "total_tokens": 2194627,
+    "cost_usd": 0.28264171,
+    "requests": 212,
+    "updated_at": "2026-04-01T13:25:25.121610Z"
   },
   "sessions": {
     "26b6c071-947c-435d-927c-660e3f722b12": {
@@ -775,6 +775,254 @@
       "cost_usd": 0.00022913,
       "requests": 4,
       "updated_at": "2026-03-31T12:00:37.210669Z"
+    },
+    "7601bc0d-201c-41c4-ac63-8e11ea489cb3": {
+      "input_tokens": 13798,
+      "output_tokens": 742,
+      "total_tokens": 14540,
+      "cost_usd": 0.00125745,
+      "requests": 1,
+      "updated_at": "2026-03-31T12:02:54.640165Z"
+    },
+    "edcb5265-878d-40d1-9ece-b98156c89a5e": {
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "total_tokens": 0,
+      "cost_usd": 0.0,
+      "requests": 1,
+      "updated_at": "2026-03-31T12:03:09.025532Z"
+    },
+    "cd88758b-c38e-4a21-bc16-423fa1f79c85": {
+      "input_tokens": 29415,
+      "output_tokens": 8777,
+      "total_tokens": 38192,
+      "cost_usd": 0.00483923,
+      "requests": 1,
+      "updated_at": "2026-03-31T12:04:17.125905Z"
+    },
+    "8f35b8d7-b189-4122-b4d8-aea58b6f29fe": {
+      "input_tokens": 13790,
+      "output_tokens": 22,
+      "total_tokens": 13812,
+      "cost_usd": 0.03892135,
+      "requests": 1,
+      "updated_at": "2026-03-31T13:16:11.039897Z"
+    },
+    "1f4390f8-68d1-42f9-b924-9b3726808d7a": {
+      "input_tokens": 13790,
+      "output_tokens": 604,
+      "total_tokens": 14394,
+      "cost_usd": 0.00121545,
+      "requests": 1,
+      "updated_at": "2026-03-31T13:16:29.590538Z"
+    },
+    "e817f835-4ae6-41ef-acc6-a6ba1877d73a": {
+      "input_tokens": 73746,
+      "output_tokens": 9608,
+      "total_tokens": 83354,
+      "cost_usd": 0.00841333,
+      "requests": 6,
+      "updated_at": "2026-03-31T13:20:23.173723Z"
+    },
+    "60c7857f-0e02-423e-8c67-fdd248c4e588": {
+      "input_tokens": 116707,
+      "output_tokens": 3029,
+      "total_tokens": 119736,
+      "cost_usd": 0.00966171,
+      "requests": 8,
+      "updated_at": "2026-03-31T13:26:10.788988Z"
+    },
+    "9b8146bb-96e3-429d-b53b-7f806e2de90e": {
+      "input_tokens": 13242,
+      "output_tokens": 624,
+      "total_tokens": 13866,
+      "cost_usd": 0.00118033,
+      "requests": 2,
+      "updated_at": "2026-04-01T08:02:49.613010Z"
+    },
+    "7ab2389f-300b-4cfc-a2b4-c7419a6d7087": {
+      "input_tokens": 20330,
+      "output_tokens": 814,
+      "total_tokens": 21144,
+      "cost_usd": 0.00176894,
+      "requests": 2,
+      "updated_at": "2026-04-01T08:04:05.377424Z"
+    },
+    "bef1b9ab-c239-425a-9bf9-f094157e2e2e": {
+      "input_tokens": 29714,
+      "output_tokens": 8968,
+      "total_tokens": 38682,
+      "cost_usd": 0.00491894,
+      "requests": 1,
+      "updated_at": "2026-04-01T08:05:23.812393Z"
+    },
+    "c1e005b8-b387-4dd4-bc8e-9a084b2a629a": {
+      "input_tokens": 14178,
+      "output_tokens": 1295,
+      "total_tokens": 15473,
+      "cost_usd": 0.00145185,
+      "requests": 1,
+      "updated_at": "2026-04-01T10:16:10.244481Z"
+    },
+    "75f7ca67-822a-4cdc-83f7-d9cdf689d83c": {
+      "input_tokens": 14184,
+      "output_tokens": 1165,
+      "total_tokens": 15349,
+      "cost_usd": 0.0014133,
+      "requests": 1,
+      "updated_at": "2026-04-01T10:27:11.779027Z"
+    },
+    "89c90a04-d6a9-48cf-8ad9-f867793c7809": {
+      "input_tokens": 7546,
+      "output_tokens": 2162,
+      "total_tokens": 9708,
+      "cost_usd": 0.00121455,
+      "requests": 1,
+      "updated_at": "2026-04-01T10:40:29.640618Z"
+    },
+    "16ab834f-d654-4aa2-a00a-cb0aeda2ec3d": {
+      "input_tokens": 8899,
+      "output_tokens": 2418,
+      "total_tokens": 11317,
+      "cost_usd": 0.00139282,
+      "requests": 1,
+      "updated_at": "2026-04-01T10:44:35.016605Z"
+    },
+    "648addee-f356-4946-aac8-493fa2f9f68b": {
+      "input_tokens": 30814,
+      "output_tokens": 1267,
+      "total_tokens": 32081,
+      "cost_usd": 0.00269113,
+      "requests": 6,
+      "updated_at": "2026-04-01T10:51:10.431088Z"
+    },
+    "c7e53ae4-64ae-408f-a3eb-87fe20ecdc82": {
+      "input_tokens": 27127,
+      "output_tokens": 5993,
+      "total_tokens": 33120,
+      "cost_usd": 0.0038324,
+      "requests": 3,
+      "updated_at": "2026-04-01T11:12:51.017678Z"
+    },
+    "49df3230-141b-4566-a53f-b6d47c8b5057": {
+      "input_tokens": 6345,
+      "output_tokens": 57,
+      "total_tokens": 6402,
+      "cost_usd": 0.00049297,
+      "requests": 2,
+      "updated_at": "2026-04-01T11:28:29.970670Z"
+    },
+    "7ef85890-8288-444a-868d-eff1a68b7cff": {
+      "input_tokens": 6345,
+      "output_tokens": 57,
+      "total_tokens": 6402,
+      "cost_usd": 0.00049297,
+      "requests": 2,
+      "updated_at": "2026-04-01T11:31:41.138252Z"
+    },
+    "f57610a8-5cbd-4b02-89a1-cc6bd6ea1512": {
+      "input_tokens": 2969,
+      "output_tokens": 23,
+      "total_tokens": 2992,
+      "cost_usd": 0.00022957,
+      "requests": 1,
+      "updated_at": "2026-04-01T11:32:03.231799Z"
+    },
+    "5fe7b554-e903-4e70-95bc-eafe863b3467": {
+      "input_tokens": 2967,
+      "output_tokens": 23,
+      "total_tokens": 2990,
+      "cost_usd": 0.00022943,
+      "requests": 1,
+      "updated_at": "2026-04-01T12:01:36.239384Z"
+    },
+    "3a71068a-53fb-4f55-a2aa-0929375c0422": {
+      "input_tokens": 167437,
+      "output_tokens": 9917,
+      "total_tokens": 177354,
+      "cost_usd": 0.01553286,
+      "requests": 10,
+      "updated_at": "2026-04-01T12:09:35.098012Z"
+    },
+    "30fda9d3-c229-4a5b-8bd2-1190f869f012": {
+      "input_tokens": 2969,
+      "output_tokens": 23,
+      "total_tokens": 2992,
+      "cost_usd": 0.00022957,
+      "requests": 1,
+      "updated_at": "2026-04-01T12:18:17.544268Z"
+    },
+    "ea510658-b5f1-4352-86e6-236cf680fec4": {
+      "input_tokens": 3377,
+      "output_tokens": 1042,
+      "total_tokens": 4419,
+      "cost_usd": 0.01235707,
+      "requests": 1,
+      "updated_at": "2026-04-01T12:24:43.184274Z"
+    },
+    "c5171257-5142-4d3a-92fe-4d5c6dc6ce13": {
+      "input_tokens": 74761,
+      "output_tokens": 4604,
+      "total_tokens": 79365,
+      "cost_usd": 0.00698827,
+      "requests": 2,
+      "updated_at": "2026-04-01T12:31:47.285875Z"
+    },
+    "27e88191-4052-44f8-a31c-4a436ffb2a23": {
+      "input_tokens": 2962,
+      "output_tokens": 22,
+      "total_tokens": 2984,
+      "cost_usd": 0.00022875,
+      "requests": 1,
+      "updated_at": "2026-04-01T12:40:26.474486Z"
+    },
+    "16fb7ec6-ac4e-4d77-85e0-9f32c4708e8e": {
+      "input_tokens": 36234,
+      "output_tokens": 2302,
+      "total_tokens": 38536,
+      "cost_usd": 0.00340815,
+      "requests": 1,
+      "updated_at": "2026-04-01T12:48:00.083107Z"
+    },
+    "26495f87-df15-4e59-a750-fa14ddfa34c4": {
+      "input_tokens": 36234,
+      "output_tokens": 2122,
+      "total_tokens": 38356,
+      "cost_usd": 0.00335415,
+      "requests": 1,
+      "updated_at": "2026-04-01T12:52:32.501858Z"
+    },
+    "c2a64bfe-5eee-4c68-8a73-619ca37d4bce": {
+      "input_tokens": 5413,
+      "output_tokens": 69,
+      "total_tokens": 5482,
+      "cost_usd": 0.0,
+      "requests": 1,
+      "updated_at": "2026-04-01T13:15:51.727742Z"
+    },
+    "f55aa515-d5c0-4218-af03-e932379fbfd6": {
+      "input_tokens": 5413,
+      "output_tokens": 70,
+      "total_tokens": 5483,
+      "cost_usd": 0.0,
+      "requests": 1,
+      "updated_at": "2026-04-01T13:16:27.248883Z"
+    },
+    "35575de7-4aa0-4d76-bdb8-d26012464575": {
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "total_tokens": 0,
+      "cost_usd": 0.0,
+      "requests": 1,
+      "updated_at": "2026-04-01T13:20:06.064627Z"
+    },
+    "17ad435d-d338-44ca-ba27-d1564782dff0": {
+      "input_tokens": 71729,
+      "output_tokens": 4660,
+      "total_tokens": 76389,
+      "cost_usd": 0.0,
+      "requests": 3,
+      "updated_at": "2026-04-01T13:25:25.121610Z"
     }
   }
 }

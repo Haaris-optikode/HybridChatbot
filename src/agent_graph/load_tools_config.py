@@ -138,6 +138,14 @@ def get_google_api_key_pool() -> List[str]:
     return list(_GOOGLE_API_KEYS)
 
 
+def get_active_llm_provider(default_provider: str = "openai") -> str:
+    """Resolve active provider with optional runtime override."""
+    p = (os.getenv("MEDGRAPH_LLM_PROVIDER_OVERRIDE", "") or "").strip().lower()
+    if p in ("openai", "google"):
+        return p
+    return default_provider if default_provider in ("openai", "google") else "openai"
+
+
 class LoadToolsConfig:
     def __init__(self) -> None:
         with open(here("configs/tools_config.yml")) as cfg:

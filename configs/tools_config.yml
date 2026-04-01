@@ -1,27 +1,27 @@
 primary_agent:
-  llm: gemini-2.5-flash            # Stable low-latency production model
-  router_llm: gemini-2.5-flash
-  thinking_llm: gemini-2.5-pro    # Deeper reasoning model — used when "Thinking" toggle is on
+  llm: gpt-4.1-mini               # Cost-effective primary model (OpenAI default)
+  router_llm: gpt-4.1-mini
+  thinking_llm: gpt-4.1           # Higher-accuracy deep-thinking model
   fallback_llms:
-    - gemini-2.5-flash
-    - gemini-2.5-flash-lite
+    - gpt-4.1-mini
+    - gpt-4.1-nano
   router_fallback_llms:
-    - gemini-2.5-flash-lite
+    - gpt-4.1-nano
   thinking_fallback_llms:
-    - gemini-2.5-pro
-    - gemini-2.5-flash
+    - gpt-4.1
+    - gpt-4.1-mini
   llm_temperature: 0.3
-  llm_provider: google           # "google" for Gemini, "openai" for GPT models
+  llm_provider: openai           # "google" for Gemini, "openai" for GPT models
 
 clinical_notes_rag:
-  llm: gemini-2.5-flash
-  summarization_llm: gemini-2.5-flash
+  llm: gpt-4.1-mini
+  summarization_llm: gpt-4.1-mini
   fallback_llms:
-    - gemini-2.5-flash
-    - gemini-2.5-flash-lite
+    - gpt-4.1-mini
+    - gpt-4.1-nano
   summarization_fallback_llms:
-    - gemini-2.5-pro
-    - gemini-2.5-flash
+    - gpt-4.1
+    - gpt-4.1-mini
   llm_temperature: 0.2
   embedding_model: NeuML/pubmedbert-base-embeddings
   embedding_dimensions: 768

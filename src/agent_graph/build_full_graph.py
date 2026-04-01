@@ -4,9 +4,16 @@ import logging
 from langgraph.graph import StateGraph, START
 from langchain_openai import ChatOpenAI
 from langchain_core.messages import ToolMessage as _ToolMessage, AIMessage as _AIMessage
-from agent_graph.tool_clinical_notes_rag import lookup_clinical_notes, lookup_patient_orders, summarize_patient_record, list_available_patients, list_uploaded_documents
+from agent_graph.tool_clinical_notes_rag import (
+    lookup_clinical_notes,
+    lookup_patient_orders,
+    summarize_patient_record,
+    summarize_uploaded_document,
+    list_available_patients,
+    list_uploaded_documents,
+)
 from agent_graph.tool_tavily_search import load_tavily_search_tool
-from agent_graph.load_tools_config import LoadToolsConfig, get_google_api_key
+from agent_graph.load_tools_config import LoadToolsConfig, get_google_api_key, get_active_llm_provider
 from agent_graph.agent_backend import State, BasicToolNode, route_tools, plot_agent_schema
 import os
 import json as _json
@@ -27,7 +34,7 @@ def _is_reasoning_model(model_name: str) -> bool:
 
 def _make_llm(model_name: str, timeout: int = 60, max_tokens: int = None, thinking_budget: int = 0):
     """Create a Chat LLM instance — auto-selects Google Gemini or OpenAI based on config."""
-    provider = getattr(TOOLS_CFG, "llm_provider", "openai")
+    provider = get_active_llm_provider(getattr(TOOLS_CFG, "llm_provider", "openai"))
 
     if provider == "google" or model_name.startswith("gemini"):
         from langchain_google_genai import ChatGoogleGenerativeAI
@@ -107,6 +114,7 @@ def build_graph(thinking_mode: bool = False):
              lookup_clinical_notes,
              lookup_patient_orders,
              summarize_patient_record,
+             summarize_uploaded_document,
              list_available_patients,
              list_uploaded_documents,
              ]
@@ -135,6 +143,16 @@ def build_graph(thinking_mode: bool = False):
     def synthesizer(state: State):
         """High-quality answer synthesis from retrieved context."""
         msgs = state["messages"]
+        # Accuracy-first pass-through for full-summary tools:
+        # if a dedicated summarizer tool already produced a comprehensive,
+        # citation-grounded summary, avoid re-summarizing it (which can drop details).
+        for m in reversed(msgs):
+            if isinstance(m, _ToolMessage):
+                tool_name = getattr(m, "name", "") or ""
+                if tool_name in ("summarize_patient_record", "summarize_uploaded_document"):
+                    return {"messages": [_AIMessage(content=str(getattr(m, "content", "") or ""))]}
+                # Stop at the first tool message seen in reverse order
+                break
         # Inject synthesis hint right before synthesizer's call (idempotent for multi-hop).
         if not any(
             isinstance(m, _SysMsg) and "Synthesize a clear" in str(getattr(m, "content", ""))
@@ -152,6 +170,7 @@ def build_graph(thinking_mode: bool = False):
             lookup_clinical_notes,
             lookup_patient_orders,
             summarize_patient_record,
+            summarize_uploaded_document,
             list_available_patients,
             list_uploaded_documents,
         ])

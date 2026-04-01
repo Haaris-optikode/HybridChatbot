@@ -1265,6 +1265,38 @@
             opacity: 1;
         }
 
+        .provider-btn {
+            width: 72px;
+            height: 38px;
+            min-width: 72px;
+            border-radius: 8px;
+            border: 1.5px solid var(--border-color);
+            background: var(--bg-secondary);
+            color: var(--text-muted);
+            font-size: 11px;
+            font-weight: 700;
+            cursor: pointer;
+            transition: var(--transition);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            letter-spacing: 0.2px;
+        }
+        .provider-btn:hover {
+            border-color: var(--accent);
+            color: var(--accent);
+        }
+        .provider-btn.openai {
+            border-color: #10b981;
+            color: #10b981;
+            background: rgba(16, 185, 129, 0.08);
+        }
+        .provider-btn.google {
+            border-color: #3b82f6;
+            color: #3b82f6;
+            background: rgba(59, 130, 246, 0.08);
+        }
+
         .tools-popup {
             position: absolute;
             bottom: calc(100% + 8px);
@@ -1914,7 +1946,12 @@
                         <button class="thinking-btn" id="thinkingBtn" onclick="toggleThinking()" title="Deep thinking mode">
                             <i class="fa-solid fa-brain"></i>
                             <span class="thinking-dot"></span>
-                            <div class="thinking-tooltip">Deep Thinking (Gemini 2.5 Pro)</div>
+                            <div class="thinking-tooltip" id="thinkingTooltip">Deep Thinking</div>
+                        </button>
+                    </div>
+                    <div style="position:relative;flex-shrink:0;">
+                        <button class="provider-btn" id="providerBtn" onclick="toggleProvider()" title="Switch LLM provider">
+                            OPENAI
                         </button>
                     </div>
                     <div class="input-wrapper">
@@ -1960,7 +1997,9 @@
         let botMessageIndex = 0;          // tracks bot msg count for feedback
         let lastUserQuery = '';           // for feedback context
         let selectedTool = 'auto';        // tool override: auto, vector_db, web_search, sql
-        let thinkingMode = false;            // deep thinking toggle
+        let thinkingMode = false;         // deep thinking toggle
+        let selectedProvider = (localStorage.getItem('medgraph-llm-provider') || 'openai').toLowerCase();
+        if (!['openai', 'google'].includes(selectedProvider)) selectedProvider = 'openai';
         const startTime = Date.now();
         let lastUsage = null;
 
@@ -1975,6 +2014,24 @@
             const t = getToken();
             if (t) h['Authorization'] = 'Bearer ' + t;
             return h;
+        }
+
+        function applyProviderUI() {
+            const btn = document.getElementById('providerBtn');
+            const tt = document.getElementById('thinkingTooltip');
+            if (!btn || !tt) return;
+            btn.classList.remove('openai', 'google');
+            btn.classList.add(selectedProvider);
+            btn.textContent = selectedProvider === 'openai' ? 'OPENAI' : 'GEMINI';
+            tt.textContent = selectedProvider === 'openai'
+                ? 'Deep Thinking (GPT-4.1)'
+                : 'Deep Thinking (Gemini 2.5 Pro)';
+        }
+
+        function toggleProvider() {
+            selectedProvider = selectedProvider === 'openai' ? 'google' : 'openai';
+            localStorage.setItem('medgraph-llm-provider', selectedProvider);
+            applyProviderUI();
         }
 
         async function handleLogin(e) {
@@ -2020,6 +2077,7 @@
         function showApp() {
             document.getElementById('loginOverlay').classList.add('hidden');
             document.getElementById('appContainer').style.display = '';
+            applyProviderUI();
             const user = getUser();
             if (user) {
                 document.getElementById('userInfo').style.display = 'flex';
@@ -2526,7 +2584,8 @@
                         message: text,
                         session_id: sessionId,
                         tool_override: selectedTool === 'auto' ? null : selectedTool,
-                        thinking: thinkingMode
+                        thinking: thinkingMode,
+                        llm_provider: selectedProvider
                     })
                 });
 
