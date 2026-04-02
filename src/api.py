@@ -653,8 +653,16 @@ def _predefined_identity_reply(message: str) -> Optional[str]:
     return None
 
 
-def _medical_guardrail_reply(message: str) -> Optional[str]:
-    """Block non-medical requests with a deterministic refusal."""
+def _medical_guardrail_reply(
+    message: str,
+    history: Optional[List["ChatMessage"]] = None,
+) -> Optional[str]:
+    """
+    Block non-medical requests with a deterministic refusal.
+
+    Important: allow short follow-ups like "yes do that" when the conversation
+    is already in a medical context (based on recent user/assistant messages).
+    """
     m = (message or "").strip().lower()
     if not m:
         return None
@@ -668,14 +676,26 @@ def _medical_guardrail_reply(message: str) -> Optional[str]:
         "procedures", "surgery", "history", "prognosis", "readmission", "discharge", "admission",
         "follow-up", "follow up", "chart", "record", "records", "hospital", "clinic", "doctor",
         "nurse", "pharmacy", "referral", "consult", "orders", "rxnorm", "loinc", "snomed",
-        "icd", "cpt", "document", "uploaded", "summary",
+        "icd", "cpt", "document", "uploaded", "summary", "source",
+        "dob", "date of birth", "born", "age", "height", "weight", "bmi",
     }
 
-    # Treat explicit patient-identifier style queries as medical.
+    # If the current message itself is clearly medical, allow it.
     has_patient_id_pattern = bool(re.search(r"\bmrn\b|\bpatient\b|\bpt\b", m))
     has_medical_keyword = any(k in m for k in medical_keywords)
-
     if has_patient_id_pattern or has_medical_keyword:
+        return None
+
+    # Otherwise, allow medical-context confirmations/continuations.
+    history = history or []
+    recent_text = " ".join((h.content or "").lower() for h in history[-6:] if getattr(h, "content", None))
+    history_has_medical_context = any(k in recent_text for k in medical_keywords) or "source:" in recent_text
+
+    confirmation_only = bool(re.fullmatch(r"(yes|yeah|yep|sure|ok|okay|affirmative|absolutely|please)\b.*", m)) \
+        or bool(re.fullmatch(r"(do\s*that|go\s*ahead|continue|check\s*that|do\s*it|check\s*the\s*record)\b.*", m))
+    is_short_followup = len(m) <= 60
+
+    if history_has_medical_context and is_short_followup and confirmation_only:
         return None
 
     return (
@@ -798,7 +818,7 @@ async def chat(req: ChatRequest, request: Request, user: dict = Depends(get_curr
         )
         return ChatResponse(reply=predefined_reply, session_id=sid, latency_ms=elapsed_ms, usage=request_usage)
 
-    guardrail_reply = _medical_guardrail_reply(validated_msg)
+    guardrail_reply = _medical_guardrail_reply(validated_msg, history=history)
     if guardrail_reply:
         now = time.time()
         history.append(ChatMessage(role="user", content=validated_msg, timestamp=now))
@@ -1071,7 +1091,7 @@ async def chat_stream(req: ChatRequest, request: Request, user: dict = Depends(g
             },
         )
 
-    guardrail_reply = _medical_guardrail_reply(validated_msg)
+    guardrail_reply = _medical_guardrail_reply(validated_msg, history=history)
     if guardrail_reply:
         async def _guardrail_stream():
             now = time.time()

@@ -87,6 +87,7 @@ def build_graph(thinking_mode: bool = False):
     """
 
     # ── Build the LLMs ────────────────────────────────────────────────
+    active_provider = get_active_llm_provider(getattr(TOOLS_CFG, "llm_provider", "openai"))
     router_model = os.getenv("MEDGRAPH_ROUTER_MODEL_OVERRIDE", "").strip() or getattr(
         TOOLS_CFG, "primary_agent_router_llm", TOOLS_CFG.primary_agent_llm
     )
@@ -98,9 +99,13 @@ def build_graph(thinking_mode: bool = False):
         synth_model = os.getenv("MEDGRAPH_THINKING_MODEL_OVERRIDE", "").strip() or getattr(
             TOOLS_CFG, "primary_agent_thinking_llm", "gemini-2.5-pro"
         )
-        synth_llm = _make_llm(synth_model, timeout=180, max_tokens=16384, thinking_budget=8192)
+        # GPT-4.1 is a non-reasoning model (no "reasoning effort" knob). In
+        # practice, "deep thinking mode" here is prompt + higher accuracy,
+        # so we must cap max output and prompt size to avoid input-limit errors.
+        thinking_max_out = int(os.getenv("MEDGRAPH_THINKING_MAX_OUTPUT_TOKENS", "4096"))
+        synth_llm = _make_llm(synth_model, timeout=180, max_tokens=thinking_max_out, thinking_budget=8192)
         logger.info("Router LLM: %s (timeout=20s)", router_model)
-        logger.info("Synthesizer LLM [THINKING]: %s (timeout=180s, max_tokens=16384, thinking=8192)", synth_model)
+        logger.info("Synthesizer LLM [THINKING]: %s (timeout=180s, max_tokens=%s, thinking=8192)", synth_model, thinking_max_out)
     else:
         synth_model = os.getenv("MEDGRAPH_SYNTH_MODEL_OVERRIDE", "").strip() or TOOLS_CFG.primary_agent_llm
         synth_llm = _make_llm(synth_model, timeout=60, max_tokens=4096)
@@ -140,9 +145,54 @@ def build_graph(thinking_mode: bool = False):
         "are truly insufficient to answer. When in doubt, answer from what you have."
     ))
 
+    _OPENAI_THINKING_HINT = _SysMsg(content=(
+        "Deep thinking mode (OpenAI GPT-4.1):\n"
+        "- Verify every factual claim is directly supported by the provided tool sources.\n"
+        "- If a key detail is missing, explicitly state it is not documented in the retrieved context.\n"
+        "- If multiple retrieved sources disagree, report the discrepancy rather than averaging.\n"
+        "- Then provide the final clinician-ready answer."
+    ))
+
     def synthesizer(state: State):
         """High-quality answer synthesis from retrieved context."""
         msgs = state["messages"]
+
+        # OpenAI thinking mode can hit "input limit exceeded" when tool outputs
+        # are large. Truncate ToolMessage contents to keep the prompt within
+        # safe bounds while preserving the most informative parts.
+        if thinking_mode and active_provider == "openai":
+            max_tool_chars = int(os.getenv("MEDGRAPH_OPENAI_THINKING_MAX_TOOL_CHARS", "8000"))
+            max_total_tool_chars = int(os.getenv("MEDGRAPH_OPENAI_THINKING_MAX_TOTAL_TOOL_CHARS", "22000"))
+
+            total_tool_chars = 0
+            truncated_msgs = []
+            for m in msgs:
+                if isinstance(m, _ToolMessage):
+                    content = getattr(m, "content", "") or ""
+                    content_str = str(content)
+                    if len(content_str) > max_tool_chars:
+                        half = max_tool_chars // 2
+                        content_str = content_str[:half] + "\n\n...[TRUNCATED]...\n\n" + content_str[-half:]
+
+                    # Soft cap: if we already used the budget, replace further tool
+                    # content with an indicator instead of leaving it huge.
+                    if total_tool_chars + len(content_str) > max_total_tool_chars:
+                        allowed = max(0, max_total_tool_chars - total_tool_chars)
+                        if allowed <= 200:
+                            content_str = "...[TRUNCATED - tool context omitted]..."
+                        else:
+                            content_str = content_str[:allowed] + "\n...[TRUNCATED]..."
+
+                    total_tool_chars += len(content_str)
+                    try:
+                        truncated_msgs.append(m.copy(update={"content": content_str}))
+                    except Exception:
+                        # Fallback: keep message object but with no tool content
+                        truncated_msgs.append(m)
+                else:
+                    truncated_msgs.append(m)
+            msgs = truncated_msgs
+
         # Accuracy-first pass-through for full-summary tools:
         # if a dedicated summarizer tool already produced a comprehensive,
         # citation-grounded summary, avoid re-summarizing it (which can drop details).
@@ -159,6 +209,17 @@ def build_graph(thinking_mode: bool = False):
             for m in msgs
         ):
             msgs = [msgs[0], _SYNTH_HINT] + list(msgs[1:])
+
+        if thinking_mode and active_provider == "openai":
+            if not any(
+                isinstance(m, _SysMsg) and "Deep thinking mode" in str(getattr(m, "content", ""))
+                for m in msgs
+            ):
+                # Insert after _SYNTH_HINT to keep the system ordering stable.
+                # We expect msgs[1] to be _SYNTH_HINT due to the previous block.
+                insert_at = 2 if len(msgs) > 2 else len(msgs)
+                msgs = list(msgs[:insert_at]) + [_OPENAI_THINKING_HINT] + list(msgs[insert_at:])
+
         return {"messages": [synth_with_tools.invoke(msgs)]}
 
 

@@ -654,85 +654,255 @@ class ClinicalNotesRAGTool:
             logger.warning("Error retrieving document chunks for %s: %s", document_id, str(e)[:200])
             return []
 
-    # ── Section-name patterns for "all orders" retrieval ──────────
-    ORDER_SECTION_PATTERNS: list[str] = [
-        "18a",                    # Laboratory Orders
-        "18b",                    # Medication Orders (New/Changed)
-        "18c",                    # Procedure Orders
-        "18d",                    # Referrals / Consultations Ordered
-        "19 DISCHARGE",           # Discharge Prescriptions (37 chunks)
-        "14 RECENT ORDERS",       # Recent outpatient orders
-        "22 DISCHARGE SUMMARY",   # Discharge disposition / dates
-        "1 PATIENT DEMOGRAPHICS", # Advance directive, code status
-    ]
+    # Note: We intentionally avoid hardcoding EHR-specific section header strings
+    # for order retrieval. "All orders" is inferred from chunk content instead
+    # (see `_infer_order_category`), so new/unknown PDF formats work without
+    # code changes.
+
+    @staticmethod
+    def _infer_order_category(text: str, section_title: str | None = None) -> str | None:
+        """
+        Infer whether a chunk is "order-like" using content-based signals.
+
+        Production goal: avoid depending on brittle section header strings that
+        vary across EHR exports. We instead look for medication dose/SIG
+        patterns, lab test keywords + units, procedure keywords, and
+        discharge/follow-up directives.
+        """
+        t = (text or "").strip()
+        if not t:
+            return None
+        s = (section_title or "").upper()
+        u = t.upper()
+
+        # --- Shared evidence detectors ---
+        # Dose/signature-like tokens common in medication lists.
+        dose_re = _re.compile(
+            r"\b\d+(\.\d+)?\s*(MG|MCG|G)\b|\b\d+(\.\d+)?\s*(MILLIGRAMS|MICROGRAMS|GRAMS)\b",
+            flags=_re.IGNORECASE,
+        )
+        route_re = _re.compile(
+            r"\b(PO|IV|IM|SC|SUBCUTANEOUS|INTRAVENOUS|INTRAMUSCULAR|ORAL|SL|TOPICAL|INHALED|INHAL)\b",
+            flags=_re.IGNORECASE,
+        )
+        freq_re = _re.compile(
+            r"\b(QD|QAM|QPM|BID|TID|QID|QHS|Q4H|Q6H|Q8H|PRN|DAILY|TWICE DAILY|THREE TIMES DAILY|FOUR TIMES DAILY)\b",
+            flags=_re.IGNORECASE,
+        )
+
+        # Lab-like evidence: common biomarkers/panels + unit formats.
+        lab_keyword_re = _re.compile(
+            r"\b(CBC|BMP|CMP|A1C|HEMOGLOBIN\s*A1C|GLUCOSE|CREATININE|BNP|TROPONIN|PT|INR|PTT|PLATELET|WBC|HGB|HBA1C|MICROALBUMIN)\b",
+            flags=_re.IGNORECASE,
+        )
+        lab_unit_re = _re.compile(
+            r"\b(mg/dL|mmol/L|pg/mL|uIU/mL|k/uL|IU/L|mEq/L|g/dL|ng/mL|uL|%|mL)\b",
+            flags=_re.IGNORECASE,
+        )
+
+        # Procedure / imaging-like evidence.
+        proc_keyword_re = _re.compile(
+            r"\b(CT|MRI|ULTRASOUND|X-?RAY|ECHOCARDIOGRAM|CATHETERIZATION|CATH|THORACENTESIS|ENDOSCOPY|BIOPSY|PROCEDURE)\b",
+            flags=_re.IGNORECASE,
+        )
+
+        # Discharge / care directive evidence.
+        discharge_keyword_re = _re.compile(
+            r"\b(DISCHARGE|DISPOSITION|FOLLOW[- ]?UP|RETURN TO|HOME HEALTH|FOLLOW UP|APPOINTMENT|CARE DIRECTIVE|DISCHARGE MEDICATIONS)\b",
+            flags=_re.IGNORECASE,
+        )
+
+        # Order code evidence (CPT/LOINC/SNOMED) when present.
+        cpt_loinc_keyword_re = _re.compile(
+            r"\b(CPT|LOINC|RXNORM|SNOMED)\b",
+            flags=_re.IGNORECASE,
+        )
+        code_re = _re.compile(r"\b\d{4,6}\b")
+
+        # --- Category scoring ---
+        medication_score = 0
+        if ("MED" in s or "RX" in s or "PRESCR" in s or "CURRENT" in s or "DISCONT" in s):
+            medication_score += 1
+        if _re.search(r"\b(RX|SIG|PRESCRIBE|PRESCRIPTION|MEDICATION|MEDICATIONS|DISCHARGE MEDICATIONS)\b", u):
+            medication_score += 2
+        if dose_re.search(u):
+            medication_score += 2
+        if route_re.search(u):
+            medication_score += 1
+        if freq_re.search(u):
+            medication_score += 1
+        if code_re.search(u) and cpt_loinc_keyword_re.search(u):
+            medication_score += 1
+
+        lab_score = 0
+        if lab_keyword_re.search(u):
+            lab_score += 3
+        if lab_unit_re.search(u) and (lab_keyword_re.search(u) or _re.search(r"\bLAB\b", u)):
+            lab_score += 2
+        if cpt_loinc_keyword_re.search(u):
+            lab_score += 1
+
+        proc_score = 0
+        if proc_keyword_re.search(u):
+            proc_score += 3
+        if cpt_loinc_keyword_re.search(u):
+            proc_score += 1
+        if code_re.search(u) and ("CPT" in u or "LOINC" in u):
+            proc_score += 1
+
+        referral_score = 0
+        if _re.search(r"\b(REFERRAL|CONSULT|CONSULTATION)\b", u):
+            referral_score += 3
+        if discharge_keyword_re.search(u) and _re.search(r"\b(CARDIOLOGY|NEPHROLOGY|ONCOLOGY|PULMON|GASTRO|ENDOCRIN|UROLOGY|NEURO)\b", u):
+            referral_score += 1
+        if cpt_loinc_keyword_re.search(u):
+            referral_score += 1
+
+        discharge_score = 0
+        if discharge_keyword_re.search(u):
+            discharge_score += 3
+        # Often discharge meds appear as medication lists; capture that here too.
+        if dose_re.search(u) and _re.search(r"\b(DISCHARGE|DISPOSITION)\b", u):
+            discharge_score += 2
+
+        care_directive_score = 0
+        if _re.search(r"\b(NO CHANGE|AVOID|MONITOR|INSTRUCTIONS|RETURN PRECAUTIONS|WOUND CARE|DIET|ACTIVITY|WEIGHT)\b", u):
+            care_directive_score += 2
+        if discharge_keyword_re.search(u):
+            care_directive_score += 1
+
+        # Hard threshold: only include chunks with meaningful order evidence.
+        # This avoids pulling plain narrative progress notes.
+        scored = {
+            "Medication Orders": medication_score,
+            "Lab Orders": lab_score,
+            "Procedure Orders": proc_score,
+            "Referrals/Consults": referral_score,
+            "Discharge Prescriptions/Disposition": discharge_score,
+            "Care Directives/Follow-up": care_directive_score,
+        }
+        best_cat, best_score = max(scored.items(), key=lambda kv: kv[1])
+        if best_score <= 0:
+            return None
+
+        # Require at least one of the major evidence signals for inclusion.
+        # (Medication: dose+either route/frequency, or medication keywords + SIG.)
+        # (Labs/Procedures: strong keyword hits.)
+        if best_cat == "Medication Orders":
+            if medication_score >= 4 or (dose_re.search(u) and (route_re.search(u) or freq_re.search(u))):
+                return best_cat
+            return None
+        if best_cat == "Lab Orders":
+            return best_cat if best_score >= 3 else None
+        if best_cat == "Procedure Orders":
+            return best_cat if best_score >= 3 else None
+        if best_cat == "Referrals/Consults":
+            return best_cat if best_score >= 3 else None
+        if best_cat == "Discharge Prescriptions/Disposition":
+            return best_cat if best_score >= 3 else None
+        if best_cat == "Care Directives/Follow-up":
+            return best_cat if best_score >= 2 else None
+        return None
 
     def get_order_chunks_for_patient(self, patient_mrn: str) -> str:
         """Retrieve ALL order-related chunks for a patient: labs, medications,
         procedures, referrals, discharge prescriptions, care directives.
 
-        Uses metadata filtering on section_title to pull every chunk from
-        order-related sections, returning them organised by section.
+        Format-agnostic approach:
+        - Retrieve all patient chunks (paginated scroll for long documents)
+        - Infer order categories from chunk content
+        - Return them grouped by inferred order category
         """
         try:
             from qdrant_client.models import Filter, FieldCondition, MatchValue
-            import re as _re
 
             t0 = _time.perf_counter()
 
-            results = self.client.scroll(
-                collection_name=self.collection_name,
-                scroll_filter=Filter(
-                    must=[
-                        FieldCondition(
-                            key="metadata.patient_mrn",
-                            match=MatchValue(value=patient_mrn),
-                        )
-                    ]
-                ),
-                limit=500,
-                with_payload=True,
-                with_vectors=False,
-            )
+            # Paginate to avoid missing >500 chunks.
+            # (Longer EHR extracts and multi-encounter PDFs exceed that easily.)
+            points: list = []
+            next_offset = None
+            max_points = int(os.getenv("MEDGRAPH_ORDER_SCROLL_MAX_POINTS", "4000"))
+            while True:
+                results = self.client.scroll(
+                    collection_name=self.collection_name,
+                    scroll_filter=Filter(
+                        must=[
+                            FieldCondition(
+                                key="metadata.patient_mrn",
+                                match=MatchValue(value=patient_mrn),
+                            )
+                        ]
+                    ),
+                    limit=512,
+                    with_payload=True,
+                    with_vectors=False,
+                    offset=next_offset,
+                )
+                batch, next_offset = results[0], results[1]
+                if batch:
+                    points.extend(batch)
+                if not next_offset:
+                    break
+                if len(points) >= max_points:
+                    logger.warning(
+                        "Order scroll max_points reached (%d). Truncating further retrieval.",
+                        max_points,
+                    )
+                    break
 
-            points = results[0]
             if not points:
                 return f"No records found for patient MRN: {patient_mrn}"
 
-            # Filter to order-related sections (case-insensitive prefix match)
-            order_points = []
+            # Filter to order-related chunks using content inference.
+            order_points: list = []
             for p in points:
-                sec = p.payload.get("metadata", {}).get("section_title", "")
-                if any(sec.upper().startswith(pat.upper()) for pat in self.ORDER_SECTION_PATTERNS):
-                    order_points.append(p)
+                meta = p.payload.get("metadata", {}) or {}
+                content = p.payload.get("page_content", "") or ""
+                sec = meta.get("section_title")
+                cat = self._infer_order_category(content, sec)
+                if cat:
+                    order_points.append((cat, p))
 
             if not order_points:
                 return f"No order-related data found for patient MRN: {patient_mrn}"
 
-            # Sort by section_title then chunk_index for logical ordering
+            # Sort by inferred category priority, then by (page, chunk_index).
+            cat_priority = [
+                "Medication Orders",
+                "Lab Orders",
+                "Procedure Orders",
+                "Referrals/Consults",
+                "Discharge Prescriptions/Disposition",
+                "Care Directives/Follow-up",
+            ]
+            cat_rank = {c: i for i, c in enumerate(cat_priority)}
+
             order_points.sort(
-                key=lambda p: (
-                    p.payload.get("metadata", {}).get("section_title", ""),
-                    p.payload.get("metadata", {}).get("chunk_index", 0),
+                key=lambda tup: (
+                    cat_rank.get(tup[0], 999),
+                    tup[1].payload.get("metadata", {}).get("page_number", 0),
+                    tup[1].payload.get("metadata", {}).get("chunk_index", 0),
                 )
             )
 
-            # Group by section and merge overlapping text
-            current_section = None
+            # Group by inferred category and merge overlapping text.
+            current_category: str | None = None
             parts: list[str] = []
             prev_content: str | None = None
             prev_source: str | None = None
 
-            for p in order_points:
+            for cat, p in order_points:
                 meta = p.payload.get("metadata", {})
                 content = p.payload.get("page_content", "")
                 source = meta.get("filename", "")
-                sec = meta.get("section_title", "Section")
+                sec = meta.get("section_title", "Section")  # kept for traceability
 
-                # Section separator for readability
-                if sec != current_section:
-                    if current_section is not None:
+                # Category separator for readability.
+                if cat != current_category:
+                    if current_category is not None:
                         parts.append("")  # blank line between sections
-                    current_section = sec
+                    current_category = cat
                     prev_content = None  # reset overlap tracking at section boundary
                     prev_source = None
 
@@ -743,14 +913,14 @@ class ClinicalNotesRAGTool:
                         content = content[overlap:]
 
                 if content.strip():
-                    parts.append(f"[{sec}]\n{content}")
+                    parts.append(f"[{cat} | {sec}]\n{content}")
 
                 prev_content = p.payload.get("page_content", "")
                 prev_source = source
 
             elapsed = _time.perf_counter() - t0
             logger.info(
-                "Order retrieval: %d/%d chunks matched order sections for %s in %.2fs",
+                "Order retrieval: %d/%d chunks inferred as order-related for %s in %.2fs",
                 len(order_points), len(points), patient_mrn, elapsed,
             )
 

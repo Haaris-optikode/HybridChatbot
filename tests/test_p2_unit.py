@@ -74,6 +74,87 @@ class TestInputValidation:
         assert self.validate("  hello world  ") == "hello world"
 
 
+class TestMedicalGuardrail:
+    """Unit tests for context-aware medical guardrails."""
+
+    def test_blocks_non_medical_when_no_context(self):
+        from api import _medical_guardrail_reply
+        # With empty history, this should be blocked deterministically.
+        reply = _medical_guardrail_reply("tell me a joke", history=[])
+        assert isinstance(reply, str)
+        assert "only answer medical" in reply.lower()
+
+    def test_allows_affirmation_in_medical_context(self):
+        from api import _medical_guardrail_reply, ChatMessage
+
+        history = [
+            ChatMessage(
+                role="assistant",
+                content="I can check patient medication orders. (Source: 14 RECENT ORDERS)",
+                timestamp=0,
+            )
+        ]
+        reply = _medical_guardrail_reply("yes do that", history=history)
+        assert reply is None
+
+
+class TestOrderCategoryInference:
+    """Unit tests for format-agnostic order inference."""
+
+    def test_medication_inference_with_dose_and_route(self):
+        from agent_graph.tool_clinical_notes_rag import ClinicalNotesRAGTool
+
+        txt = "Metformin 500 mg PO twice daily with meals"
+        cat = ClinicalNotesRAGTool._infer_order_category(txt, "Some Random Header")
+        assert cat == "Medication Orders"
+
+    def test_lab_inference_with_lab_keyword(self):
+        from agent_graph.tool_clinical_notes_rag import ClinicalNotesRAGTool
+
+        txt = "Hemoglobin A1C 7.4 % (abnormal) - ordered"
+        cat = ClinicalNotesRAGTool._infer_order_category(txt, "Lab Results")
+        assert cat == "Lab Orders"
+
+    def test_storyline_does_not_infer_order(self):
+        from agent_graph.tool_clinical_notes_rag import ClinicalNotesRAGTool
+
+        txt = "Patient reports feeling better today. No new complaints."
+        cat = ClinicalNotesRAGTool._infer_order_category(txt, "Progress Note")
+        assert cat is None
+
+
+class TestAdaptiveChunkerKeywordSections:
+    """Unit tests for format-agnostic clinical heading splitting."""
+
+    def test_detects_soap_like_sections(self):
+        from document_processing.adaptive_chunker import AdaptiveDocumentChunker
+
+        chunker = AdaptiveDocumentChunker(chunk_size=500, chunk_overlap=50)
+        text = """
+Patient Summary
+
+Subjective:
+The patient reports chest pain.
+
+Objective:
+BP 130/80, HR 90.
+
+Assessment & Plan:
+Rule out ACS; start beta blocker.
+
+Plan:
+Follow up in 2 weeks.
+""".strip()
+
+        sections = chunker._detect_keyword_sections(text)
+        assert sections is not None
+        labels = [s[0] for s in sections]
+        # We should see SOAP headings in detected section labels.
+        assert any(l.strip().lower() == "subjective" for l in labels)
+        assert any(l.strip().lower().startswith("assessment") for l in labels)
+        assert any(l.strip().lower() == "plan" for l in labels)
+
+
 class TestHistoryTrimming:
     """Test the _trim_history function (P1.9)."""
 

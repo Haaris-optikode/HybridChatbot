@@ -1,11 +1,11 @@
 {
   "global": {
-    "input_tokens": 2142377,
-    "output_tokens": 120491,
-    "total_tokens": 2262868,
+    "input_tokens": 2262668,
+    "output_tokens": 122802,
+    "total_tokens": 2385470,
     "cost_usd": 0.28264171,
-    "requests": 226,
-    "updated_at": "2026-04-01T14:38:30.423482Z"
+    "requests": 239,
+    "updated_at": "2026-04-02T08:29:39.586586Z"
   },
   "sessions": {
     "26b6c071-947c-435d-927c-660e3f722b12": {
@@ -1039,6 +1039,70 @@
       "cost_usd": 0.0,
       "requests": 9,
       "updated_at": "2026-04-01T14:38:30.423482Z"
+    },
+    "c491eda5-1db3-426d-9548-b16ced741d46": {
+      "input_tokens": 39578,
+      "output_tokens": 633,
+      "total_tokens": 40211,
+      "cost_usd": 0.0,
+      "requests": 4,
+      "updated_at": "2026-04-02T07:18:03.472519Z"
+    },
+    "b8fbf73b-04c7-4af5-b2d6-5116eade63e7": {
+      "input_tokens": 18882,
+      "output_tokens": 359,
+      "total_tokens": 19241,
+      "cost_usd": 0.0,
+      "requests": 2,
+      "updated_at": "2026-04-02T07:56:15.505258Z"
+    },
+    "19d1684c-012a-47e1-b614-86a20013383f": {
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "total_tokens": 0,
+      "cost_usd": 0.0,
+      "requests": 1,
+      "updated_at": "2026-04-02T07:56:15.526295Z"
+    },
+    "b40c0efe-4dfd-4390-a9a1-c595cac9c195": {
+      "input_tokens": 18924,
+      "output_tokens": 393,
+      "total_tokens": 19317,
+      "cost_usd": 0.0,
+      "requests": 2,
+      "updated_at": "2026-04-02T08:02:35.512759Z"
+    },
+    "d1a32628-54e0-4dd0-b17a-bd980db7c1e8": {
+      "input_tokens": 8420,
+      "output_tokens": 67,
+      "total_tokens": 8487,
+      "cost_usd": 0.0,
+      "requests": 1,
+      "updated_at": "2026-04-02T08:02:39.396939Z"
+    },
+    "243f4eab-f1e4-4d2f-9d17-27ae8b965c1d": {
+      "input_tokens": 8809,
+      "output_tokens": 312,
+      "total_tokens": 9121,
+      "cost_usd": 0.0,
+      "requests": 1,
+      "updated_at": "2026-04-02T08:03:25.536177Z"
+    },
+    "3f826250-4c49-4a1e-8b42-c55a0c3d6667": {
+      "input_tokens": 12839,
+      "output_tokens": 255,
+      "total_tokens": 13094,
+      "cost_usd": 0.0,
+      "requests": 1,
+      "updated_at": "2026-04-02T08:26:12.203863Z"
+    },
+    "d3eac91c-039c-460f-9af4-68e5873346d5": {
+      "input_tokens": 12839,
+      "output_tokens": 292,
+      "total_tokens": 13131,
+      "cost_usd": 0.0,
+      "requests": 1,
+      "updated_at": "2026-04-02T08:29:39.586586Z"
     }
   }
 }

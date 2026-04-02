@@ -189,7 +189,48 @@ class AdaptiveDocumentChunker:
             return numbered
 
         # No structure detected — return as single section
+        keyword_sections = self._detect_keyword_sections(text)
+        if keyword_sections:
+            return keyword_sections
         return [("Full Document", text)]
+
+    def _detect_keyword_sections(self, text: str) -> Optional[List[Tuple[str, str]]]:
+        """
+        Detect common clinical note headings that appear in many PDFs even
+        when there are no markdown headers and no numbered section titles.
+
+        Examples: SOAP (`Subjective`, `Objective`, `Assessment`, `Plan`),
+        HPI, ROS, Impression.
+        """
+        # Headings often appear as a full line like "Subjective:" or "Assessment & Plan:".
+        keyword_re = re.compile(
+            r"^(?P<label>"
+            r"Subjective|Objective|Assessment(?:\s*&\s*|\s+and\s+)?Plan|Assessment & Plan|A\s*/\s*P|A/P|HPI|History of Present Illness|ROS|Review of Systems|Physical Exam|Physical Examination|Impression|Plan|Chief Complaint"
+            r")\s*:?\s*$",
+            flags=re.IGNORECASE | re.MULTILINE,
+        )
+
+        matches = list(keyword_re.finditer(text))
+        if len(matches) < 2:
+            return None
+
+        sections: list[tuple[str, str]] = []
+
+        # Preamble before first keyword heading
+        if matches[0].start() > 30:
+            pre = text[: matches[0].start()].strip()
+            if pre:
+                sections.append(("Preamble", pre))
+
+        for i, m in enumerate(matches):
+            label = m.group("label").strip()
+            start = m.end()
+            end = matches[i + 1].start() if i + 1 < len(matches) else len(text)
+            body = text[start:end].strip()
+            if body:
+                sections.append((label, body))
+
+        return sections if len(sections) >= 2 else None
 
     def _detect_numbered_sections(self, text: str) -> Optional[List[Tuple[str, str]]]:
         """Detect numbered clinical sections like '1 Patient Demographics'.
