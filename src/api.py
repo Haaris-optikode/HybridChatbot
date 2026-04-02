@@ -633,6 +633,57 @@ def _fast_path_reply(message: str) -> Optional[str]:
     return None
 
 
+def _predefined_identity_reply(message: str) -> Optional[str]:
+    """Return fixed branding/identity answer for builder/owner-style queries."""
+    m = (message or "").strip().lower()
+    if not m:
+        return None
+
+    builder_patterns = [
+        r"\bwho\s+built\s+you\b",
+        r"\bwho\s+made\s+you\b",
+        r"\bwho\s+created\s+you\b",
+        r"\bwho\s+developed\s+you\b",
+        r"\bwho\s+owns\s+you\b",
+        r"\bwho\s+is\s+your\s+owner\b",
+        r"\bwho\s+is\s+behind\s+you\b",
+    ]
+    if any(re.search(p, m) for p in builder_patterns):
+        return "Optikode"
+    return None
+
+
+def _medical_guardrail_reply(message: str) -> Optional[str]:
+    """Block non-medical requests with a deterministic refusal."""
+    m = (message or "").strip().lower()
+    if not m:
+        return None
+
+    medical_keywords = {
+        "medical", "clinical", "patient", "mrn", "ehr", "emr", "diagnosis", "diagnoses",
+        "symptom", "symptoms", "disease", "condition", "allergy", "allergies", "medication",
+        "medications", "drug", "dose", "dosage", "prescription", "treatment", "therapy",
+        "lab", "labs", "vital", "vitals", "blood", "pressure", "glucose", "a1c", "creatinine",
+        "bnp", "cbc", "cmp", "imaging", "xray", "ct", "mri", "ultrasound", "procedure",
+        "procedures", "surgery", "history", "prognosis", "readmission", "discharge", "admission",
+        "follow-up", "follow up", "chart", "record", "records", "hospital", "clinic", "doctor",
+        "nurse", "pharmacy", "referral", "consult", "orders", "rxnorm", "loinc", "snomed",
+        "icd", "cpt", "document", "uploaded", "summary",
+    }
+
+    # Treat explicit patient-identifier style queries as medical.
+    has_patient_id_pattern = bool(re.search(r"\bmrn\b|\bpatient\b|\bpt\b", m))
+    has_medical_keyword = any(k in m for k in medical_keywords)
+
+    if has_patient_id_pattern or has_medical_keyword:
+        return None
+
+    return (
+        "I can only answer medical and clinical queries. "
+        "Please ask a medical question about patient records, symptoms, medications, labs, diagnoses, or treatment context."
+    )
+
+
 def _auto_tool_override(message: str) -> Optional[str]:
     """Force tool usage for explicit summary requests.
 
@@ -700,13 +751,94 @@ async def chat(req: ChatRequest, request: Request, user: dict = Depends(get_curr
     t0 = time.perf_counter()
     validated_msg = _validate_message(req.message)
     req_provider = _normalize_provider(req.llm_provider)
-    graph, thinking_graph = _get_graph_pair(req_provider)
     effective_tool_override = req.tool_override or _auto_tool_override(validated_msg)
     _audit_log("chat_request", user, tool_override=effective_tool_override or "auto", llm_provider=req_provider)
 
     # Session management
     sid = req.session_id or str(uuid.uuid4())
     history: List[ChatMessage] = sessions.get(sid)
+
+    predefined_reply = _predefined_identity_reply(validated_msg)
+    if predefined_reply:
+        now = time.time()
+        history.append(ChatMessage(role="user", content=validated_msg, timestamp=now))
+        history.append(ChatMessage(role="assistant", content=predefined_reply, timestamp=time.time()))
+        sessions.set(sid, history)
+
+        full_history = sessions.get(sid)
+        gradio_format = [(h.content, full_history[i + 1].content)
+                         for i, h in enumerate(full_history)
+                         if h.role == "user" and i + 1 < len(full_history)]
+        Memory.write_chat_history_to_file(
+            gradio_chatbot=gradio_format,
+            folder_path=PROJECT_CFG.memory_dir,
+            thread_id=sid
+        )
+
+        elapsed_ms = int((time.perf_counter() - t0) * 1000)
+        request_usage = {
+            "provider": "fast-path",
+            "model": "rule-based",
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "total_tokens": 0,
+            "cost_usd": 0.0,
+            "records": [],
+        }
+        LEDGER.record_request(sid, request_usage)
+        PROM_REQUEST_LATENCY.labels(endpoint="/api/chat", method="POST").observe(elapsed_ms / 1000)
+        _audit_log(
+            "chat_response",
+            user,
+            session_id=sid,
+            latency_ms=elapsed_ms,
+            tokens_total=0,
+            cost_usd=0.0,
+            fast_path=True,
+        )
+        return ChatResponse(reply=predefined_reply, session_id=sid, latency_ms=elapsed_ms, usage=request_usage)
+
+    guardrail_reply = _medical_guardrail_reply(validated_msg)
+    if guardrail_reply:
+        now = time.time()
+        history.append(ChatMessage(role="user", content=validated_msg, timestamp=now))
+        history.append(ChatMessage(role="assistant", content=guardrail_reply, timestamp=time.time()))
+        sessions.set(sid, history)
+
+        full_history = sessions.get(sid)
+        gradio_format = [(h.content, full_history[i + 1].content)
+                         for i, h in enumerate(full_history)
+                         if h.role == "user" and i + 1 < len(full_history)]
+        Memory.write_chat_history_to_file(
+            gradio_chatbot=gradio_format,
+            folder_path=PROJECT_CFG.memory_dir,
+            thread_id=sid
+        )
+
+        elapsed_ms = int((time.perf_counter() - t0) * 1000)
+        request_usage = {
+            "provider": "fast-path",
+            "model": "rule-based",
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "total_tokens": 0,
+            "cost_usd": 0.0,
+            "records": [],
+        }
+        LEDGER.record_request(sid, request_usage)
+        PROM_REQUEST_LATENCY.labels(endpoint="/api/chat", method="POST").observe(elapsed_ms / 1000)
+        _audit_log(
+            "chat_response",
+            user,
+            session_id=sid,
+            latency_ms=elapsed_ms,
+            tokens_total=0,
+            cost_usd=0.0,
+            fast_path=True,
+        )
+        return ChatResponse(reply=guardrail_reply, session_id=sid, latency_ms=elapsed_ms, usage=request_usage)
+
+    graph, thinking_graph = _get_graph_pair(req_provider)
 
     # Instant fast-path for simple conversational/capabilities requests.
     fast_reply = _fast_path_reply(validated_msg)
@@ -878,7 +1010,6 @@ async def chat_stream(req: ChatRequest, request: Request, user: dict = Depends(g
     t0 = time.perf_counter()
     validated_msg = _validate_message(req.message)
     req_provider = _normalize_provider(req.llm_provider)
-    graph, thinking_graph = _get_graph_pair(req_provider)
     effective_tool_override = req.tool_override or _auto_tool_override(validated_msg)
     is_full_record_summary_request = effective_tool_override == "summarize"
     _audit_log("chat_stream_request", user, tool_override=effective_tool_override or "auto", llm_provider=req_provider)
@@ -886,6 +1017,114 @@ async def chat_stream(req: ChatRequest, request: Request, user: dict = Depends(g
 
     sid = req.session_id or str(uuid.uuid4())
     history: List[ChatMessage] = sessions.get(sid)
+
+    predefined_reply = _predefined_identity_reply(validated_msg)
+    if predefined_reply:
+        async def _predefined_stream():
+            now = time.time()
+            history.append(ChatMessage(role="user", content=validated_msg, timestamp=now))
+            history.append(ChatMessage(role="assistant", content=predefined_reply, timestamp=time.time()))
+            sessions.set(sid, history)
+
+            full_history = sessions.get(sid)
+            gradio_format = [(h.content, full_history[i + 1].content)
+                             for i, h in enumerate(full_history)
+                             if h.role == "user" and i + 1 < len(full_history)]
+            Memory.write_chat_history_to_file(
+                gradio_chatbot=gradio_format,
+                folder_path=PROJECT_CFG.memory_dir,
+                thread_id=sid
+            )
+
+            elapsed_ms = int((time.perf_counter() - t0) * 1000)
+            usage = {
+                "provider": "fast-path",
+                "model": "rule-based",
+                "input_tokens": 0,
+                "output_tokens": 0,
+                "total_tokens": 0,
+                "cost_usd": 0.0,
+                "records": [],
+            }
+            LEDGER.record_request(sid, usage)
+            PROM_REQUEST_LATENCY.labels(endpoint="/api/chat/stream", method="POST").observe(elapsed_ms / 1000)
+
+            yield f"data: {json.dumps({'type': 'token', 'content': predefined_reply})}\n\n"
+            yield f"data: {json.dumps({'type': 'done', 'session_id': sid, 'latency_ms': elapsed_ms, 'usage': usage})}\n\n"
+            _audit_log(
+                "chat_stream_response",
+                user,
+                session_id=sid,
+                latency_ms=elapsed_ms,
+                tokens_total=0,
+                cost_usd=0.0,
+                fast_path=True,
+            )
+
+        return StreamingResponse(
+            _predefined_stream(),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive",
+                "X-Accel-Buffering": "no",
+            },
+        )
+
+    guardrail_reply = _medical_guardrail_reply(validated_msg)
+    if guardrail_reply:
+        async def _guardrail_stream():
+            now = time.time()
+            history.append(ChatMessage(role="user", content=validated_msg, timestamp=now))
+            history.append(ChatMessage(role="assistant", content=guardrail_reply, timestamp=time.time()))
+            sessions.set(sid, history)
+
+            full_history = sessions.get(sid)
+            gradio_format = [(h.content, full_history[i + 1].content)
+                             for i, h in enumerate(full_history)
+                             if h.role == "user" and i + 1 < len(full_history)]
+            Memory.write_chat_history_to_file(
+                gradio_chatbot=gradio_format,
+                folder_path=PROJECT_CFG.memory_dir,
+                thread_id=sid
+            )
+
+            elapsed_ms = int((time.perf_counter() - t0) * 1000)
+            usage = {
+                "provider": "fast-path",
+                "model": "rule-based",
+                "input_tokens": 0,
+                "output_tokens": 0,
+                "total_tokens": 0,
+                "cost_usd": 0.0,
+                "records": [],
+            }
+            LEDGER.record_request(sid, usage)
+            PROM_REQUEST_LATENCY.labels(endpoint="/api/chat/stream", method="POST").observe(elapsed_ms / 1000)
+
+            yield f"data: {json.dumps({'type': 'token', 'content': guardrail_reply})}\n\n"
+            yield f"data: {json.dumps({'type': 'done', 'session_id': sid, 'latency_ms': elapsed_ms, 'usage': usage})}\n\n"
+            _audit_log(
+                "chat_stream_response",
+                user,
+                session_id=sid,
+                latency_ms=elapsed_ms,
+                tokens_total=0,
+                cost_usd=0.0,
+                fast_path=True,
+            )
+
+        return StreamingResponse(
+            _guardrail_stream(),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive",
+                "X-Accel-Buffering": "no",
+            },
+        )
+
+    graph, thinking_graph = _get_graph_pair(req_provider)
 
     # Instant fast-path for simple conversational/capabilities requests.
     fast_reply = _fast_path_reply(validated_msg)
