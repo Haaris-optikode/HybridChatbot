@@ -101,8 +101,7 @@ def build_graph(thinking_mode: bool = False):
             TOOLS_CFG, "primary_agent_thinking_llm", "gemini-2.5-pro"
         )
         # GPT-4.1 is a non-reasoning model (no "reasoning effort" knob). In
-        # practice, "deep thinking mode" here is prompt + higher accuracy,
-        # so we must cap max output and prompt size to avoid input-limit errors.
+        # practice, "deep thinking mode" here is prompt + higher accuracy
         thinking_max_out = int(os.getenv("MEDGRAPH_THINKING_MAX_OUTPUT_TOKENS", "4096"))
         synth_llm = _make_llm(synth_model, timeout=180, max_tokens=thinking_max_out, thinking_budget=8192)
         logger.info("Router LLM: %s (timeout=20s)", router_model)

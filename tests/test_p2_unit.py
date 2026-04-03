@@ -74,28 +74,137 @@ class TestInputValidation:
         assert self.validate("  hello world  ") == "hello world"
 
 
-class TestMedicalGuardrail:
-    """Unit tests for context-aware medical guardrails."""
+class TestAutoToolOverride:
+    """Unit tests for deterministic auto tool routing overrides."""
 
-    def test_blocks_non_medical_when_no_context(self):
-        from api import _medical_guardrail_reply
-        # With empty history, this should be blocked deterministically.
-        reply = _medical_guardrail_reply("tell me a joke", history=[])
-        assert isinstance(reply, str)
-        assert "only answer medical" in reply.lower()
+    def test_patient_specific_disease_query_forces_vector_db(self):
+        from api import _auto_tool_override
 
-    def test_allows_affirmation_in_medical_context(self):
-        from api import _medical_guardrail_reply, ChatMessage
+        override = _auto_tool_override("What disease is ayesha malik suffering from")
+        assert override == "vector_db"
 
-        history = [
-            ChatMessage(
-                role="assistant",
-                content="I can check patient medication orders. (Source: 14 RECENT ORDERS)",
-                timestamp=0,
-            )
+    def test_generic_medical_knowledge_does_not_force_vector_db(self):
+        from api import _auto_tool_override
+
+        override = _auto_tool_override("What treatments are there if someone is suffering from anxiety")
+        assert override is None
+
+
+class TestPatientIdentifierResolution:
+    """Unit tests for robust patient resolution across large/scattered indexes."""
+
+    class _Point:
+        def __init__(self, payload):
+            self.payload = payload
+
+    def test_resolve_to_mrn_scans_paginated_scroll(self):
+        from agent_graph.tool_clinical_notes_rag import ClinicalNotesRAGTool
+
+        rag = object.__new__(ClinicalNotesRAGTool)
+        rag.collection_name = "PatientData"
+        rag.client = MagicMock()
+
+        page1 = [
+            self._Point({
+                "metadata": {"patient_mrn": "MRN-2026-000111", "patient_name": "Alice Noor"}
+            })
         ]
-        reply = _medical_guardrail_reply("yes do that", history=history)
-        assert reply is None
+        page2 = [
+            self._Point({
+                "metadata": {"patient_mrn": "MRN-2026-004782", "patient_name": "Fatima Khan"}
+            })
+        ]
+        rag.client.scroll.side_effect = [
+            (page1, "next-page"),
+            (page2, None),
+        ]
+
+        mrn = rag.resolve_to_mrn("give me a summary for fatima khan")
+        assert mrn == "MRN-2026-004782"
+        assert rag.client.scroll.call_count == 2
+
+    def test_find_documents_for_patient_identifier_uses_content_fallback(self):
+        from agent_graph.tool_clinical_notes_rag import ClinicalNotesRAGTool
+
+        rag = object.__new__(ClinicalNotesRAGTool)
+        rag.collection_name = "PatientData"
+        rag.client = MagicMock()
+
+        points = [
+            self._Point({
+                "metadata": {
+                    "document_id": "doc-123",
+                    "patient_mrn": "",
+                    "patient_name": "",
+                },
+                "page_content": "Patient Name: Fatima Khan. Assessment and plan updated.",
+            })
+        ]
+        rag.client.scroll.side_effect = [
+            (points, None),
+        ]
+
+        doc_ids = rag.find_documents_for_patient_identifier("What disease is Fatima Khan suffering from")
+        assert doc_ids == ["doc-123"]
+
+    def test_extract_query_variants_finds_embedded_name(self):
+        from agent_graph.tool_clinical_notes_rag import ClinicalNotesRAGTool
+
+        rag = object.__new__(ClinicalNotesRAGTool)
+        variants = rag._extract_query_variants("What disease is Ayesha Malik suffering from")
+        assert any(v == "ayesha malik" for v in variants)
+
+    def test_summarize_patient_record_uses_document_fallback_when_mrn_missing(self, monkeypatch):
+        import agent_graph.tool_clinical_notes_rag as rag_mod
+
+        class DummyRag:
+            def resolve_to_mrn(self, identifier):
+                return None
+
+            def find_documents_for_patient_identifier(self, identifier, max_docs=3):
+                return ["doc-123"]
+
+            def get_all_chunks_for_document(self, document_id):
+                return [
+                    (
+                        "Patient Name: Fatima Khan. Clinical summary content.",
+                        {"document_id": document_id, "page_number": 1, "chunk_index": 0},
+                    )
+                ]
+
+        monkeypatch.setattr(rag_mod, "get_rag_tool_instance", lambda: DummyRag())
+        monkeypatch.setattr(rag_mod, "_current_summary_mode", lambda: "thinking")
+        monkeypatch.setattr(
+            rag_mod,
+            "_run_structured_summary_pipeline",
+            lambda patient_subject, indexed_chunks: ("Fallback summary", "test-model"),
+        )
+
+        out = rag_mod.summarize_patient_record.func("Fatima Khan")
+        assert out == "Fallback summary"
+
+    def test_lookup_clinical_notes_uses_document_fallback_on_primary_miss(self, monkeypatch):
+        import agent_graph.tool_clinical_notes_rag as rag_mod
+
+        class DummyRag:
+            def __init__(self):
+                self.calls = []
+
+            def search(self, query, document_id=None):
+                self.calls.append(document_id)
+                if not document_id:
+                    return f"No relevant documents found for: {query}"
+                return "[Source 1 | Section: Assessment | Page 1 | MRN: ]\nAyesha Malik has hypertension."
+
+            def find_documents_for_patient_identifier(self, identifier, max_docs=3):
+                return ["doc-123"]
+
+        dummy = DummyRag()
+        monkeypatch.setattr(rag_mod, "get_rag_tool_instance", lambda: dummy)
+
+        out = rag_mod.lookup_clinical_notes.func("What disease is Ayesha Malik suffering from")
+        assert "Ayesha Malik has hypertension" in out
+        assert "document_id: doc-123" in out
 
 
 class TestOrderCategoryInference:
@@ -902,6 +1011,32 @@ class TestReplyModeAPI:
         body = r.json().get("reply", "")
         assert body != answer
         assert "Alternative View" in body
+
+
+class TestLLMGuardrailArchitecture:
+    """Ensure non-medical blocking is handled by LLM policy, not hardcoded route checks."""
+
+    def test_chat_does_not_call_hardcoded_guardrail(self, client, auth_header, monkeypatch):
+        import api as api_mod
+        from langchain_core.messages import AIMessage
+
+        class FakeGraph:
+            def stream(self, _payload, _config, stream_mode="values"):
+                yield {"messages": [AIMessage(content="LLM policy response")]}
+
+        fake_graph = FakeGraph()
+        monkeypatch.setattr(api_mod, "_get_graph_pair", lambda _provider: (fake_graph, fake_graph))
+
+        r = client.post(
+            "/api/chat",
+            headers=auth_header,
+            json={
+                "message": "write me a python script for weather data",
+                "llm_provider": "openai",
+            },
+        )
+        assert r.status_code == 200
+        assert r.json().get("reply") == "LLM policy response"
 
 
 class TestHealthEndpoint:

@@ -583,6 +583,13 @@ CONVERSATION RULES:
 - For general medical knowledge questions that are NOT about a specific patient in the database, use `tavily_search_results_json`.
 - For all patient-specific clinical questions, use the appropriate tool below.
 
+DOMAIN BOUNDARY (LLM GUARDRAIL):
+- Handle only medical/clinical requests and brief social niceties.
+- Social niceties such as greetings, thanks, compliments, and short acknowledgements are allowed and should receive warm conversational replies.
+- For any substantive non-medical request (for example: coding, finance, sports, weather, travel, entertainment, homework), reply EXACTLY with:
+    "I can only answer medical and clinical queries. Please ask a medical question about patient records, symptoms, medications, labs, diagnoses, or treatment context."
+- Do NOT call tools for blocked non-medical requests.
+
 Tools:
 
 1. **lookup_clinical_notes(query, document_id="")** — Search patient records for ANY specific detail: DOB, age, allergies, medications, labs, vitals, diagnoses, procedures, imaging, history. Pass optional `document_id` to restrict search to a specific uploaded document.
@@ -836,6 +843,10 @@ def _fast_path_reply(message: str) -> Optional[str]:
         return None
 
     is_greeting = bool(re.search(r"\b(hi|hello|hey|good morning|good afternoon|good evening|how are you)\b", m))
+    is_social_ack = bool(re.fullmatch(
+        r"\s*(great|awesome|nice|cool|thanks|thank you|thx|ok|okay|got it|understood|sounds good|perfect|sure)\s*[!.?]*\s*",
+        m,
+    ))
     asks_capabilities = (
         "what can you do" in m
         or "your capabilities" in m
@@ -851,6 +862,8 @@ def _fast_path_reply(message: str) -> Optional[str]:
             "Hello, I am MedGraph AI. I can search patient records, summarize full charts, "
             "retrieve order history, and answer medical info questions with web search when needed."
         )
+    if is_social_ack:
+        return "Happy to help. Share any medical question when you are ready."
     return None
 
 
@@ -874,57 +887,6 @@ def _predefined_identity_reply(message: str) -> Optional[str]:
     return None
 
 
-def _medical_guardrail_reply(
-    message: str,
-    history: Optional[List["ChatMessage"]] = None,
-) -> Optional[str]:
-    """
-    Block non-medical requests with a deterministic refusal.
-
-    Important: allow short follow-ups like "yes do that" when the conversation
-    is already in a medical context (based on recent user/assistant messages).
-    """
-    m = (message or "").strip().lower()
-    if not m:
-        return None
-
-    medical_keywords = {
-        "medical", "clinical", "patient", "mrn", "ehr", "emr", "diagnosis", "diagnoses",
-        "symptom", "symptoms", "disease", "condition", "allergy", "allergies", "medication",
-        "medications", "drug", "dose", "dosage", "prescription", "treatment", "therapy",
-        "lab", "labs", "vital", "vitals", "blood", "pressure", "glucose", "a1c", "creatinine",
-        "bnp", "cbc", "cmp", "imaging", "xray", "ct", "mri", "ultrasound", "procedure",
-        "procedures", "surgery", "history", "prognosis", "readmission", "discharge", "admission",
-        "follow-up", "follow up", "chart", "record", "records", "hospital", "clinic", "doctor",
-        "nurse", "pharmacy", "referral", "consult", "orders", "rxnorm", "loinc", "snomed",
-        "icd", "cpt", "document", "uploaded", "summary", "source",
-        "dob", "date of birth", "born", "age", "height", "weight", "bmi",
-    }
-
-    # If the current message itself is clearly medical, allow it.
-    has_patient_id_pattern = bool(re.search(r"\bmrn\b|\bpatient\b|\bpt\b", m))
-    has_medical_keyword = any(k in m for k in medical_keywords)
-    if has_patient_id_pattern or has_medical_keyword:
-        return None
-
-    # Otherwise, allow medical-context confirmations/continuations.
-    history = history or []
-    recent_text = " ".join((h.content or "").lower() for h in history[-6:] if getattr(h, "content", None))
-    history_has_medical_context = any(k in recent_text for k in medical_keywords) or "source:" in recent_text
-
-    confirmation_only = bool(re.fullmatch(r"(yes|yeah|yep|sure|ok|okay|affirmative|absolutely|please)\b.*", m)) \
-        or bool(re.fullmatch(r"(do\s*that|go\s*ahead|continue|check\s*that|do\s*it|check\s*the\s*record)\b.*", m))
-    is_short_followup = len(m) <= 60
-
-    if history_has_medical_context and is_short_followup and confirmation_only:
-        return None
-
-    return (
-        "I can only answer medical and clinical queries. "
-        "Please ask a medical question about patient records, symptoms, medications, labs, diagnoses, or treatment context."
-    )
-
-
 def _auto_tool_override(message: str) -> Optional[str]:
     """Force tool usage for explicit summary requests.
 
@@ -940,6 +902,49 @@ def _auto_tool_override(message: str) -> Optional[str]:
     )
     if asks_summary:
         return "summarize"
+
+    # Patient-specific factual questions should deterministically use the
+    # vector-db lookup path, especially when the name is embedded in natural
+    # language (e.g., "what disease is ayesha malik suffering from").
+    patient_fact_terms = (
+        "disease", "diagnosis", "diagnosed", "condition", "suffering", "symptom", "allergy",
+        "medication", "medicine", "lab", "vital", "history", "record", "chart", "orders",
+    )
+    has_patient_fact_intent = any(t in m for t in patient_fact_terms)
+
+    # Name-like pattern heuristic: two or more alphabetic words that are not
+    # common helper verbs/articles.
+    name_like_phrases = re.findall(r"\b([a-z]{2,}(?:\s+[a-z]{2,}){1,2})\b", m)
+    name_like_stop = {
+        "what", "which", "who", "when", "where", "why", "how", "the", "a", "an", "is", "are",
+        "do", "does", "did", "can", "could", "would", "should", "for", "of", "about", "from", "with",
+        "give", "tell", "show", "find", "check", "patient", "record", "summary", "uploaded", "documents",
+        "there", "someone", "somebody", "anyone", "anybody", "person", "people", "guy", "girl",
+        "male", "female", "man", "woman", "if", "then", "that", "this", "these", "those",
+        "suffering", "disease", "diagnosis", "condition",
+    }
+    medical_term_tokens = {
+        "disease", "diagnosis", "diagnosed", "condition", "suffering", "symptom", "allergy",
+        "medication", "medications", "medicine", "medicines", "lab", "labs", "vital", "vitals",
+        "history", "record", "records", "chart", "orders", "treatment", "treatments", "therapy",
+        "anxiety", "depression", "diabetes", "hypertension", "asthma", "cancer",
+    }
+    has_name_like_phrase = False
+    for phrase in name_like_phrases:
+        toks = [
+            t for t in phrase.split()
+            if t not in name_like_stop and t not in medical_term_tokens and len(t) >= 3
+        ]
+        if len(toks) >= 2:
+            has_name_like_phrase = True
+            break
+
+    if has_patient_fact_intent and (
+        has_name_like_phrase
+        or "patient" in m
+        or "mrn" in m
+    ):
+        return "vector_db"
     return None
 
 
@@ -1077,48 +1082,6 @@ async def chat(req: ChatRequest, request: Request, user: dict = Depends(get_curr
         )
         return ChatResponse(reply=predefined_reply, session_id=sid, latency_ms=elapsed_ms, usage=request_usage)
 
-    guardrail_reply = _medical_guardrail_reply(validated_msg, history=history)
-    if guardrail_reply:
-        now = time.time()
-        history.append(ChatMessage(role="user", content=validated_msg, timestamp=now))
-        history.append(ChatMessage(role="assistant", content=guardrail_reply, timestamp=time.time()))
-        sessions.set(sid, history)
-
-        full_history = sessions.get(sid)
-        gradio_format = [(h.content, full_history[i + 1].content)
-                         for i, h in enumerate(full_history)
-                         if h.role == "user" and i + 1 < len(full_history)]
-        Memory.write_chat_history_to_file(
-            gradio_chatbot=gradio_format,
-            folder_path=PROJECT_CFG.memory_dir,
-            thread_id=sid
-        )
-
-        elapsed_ms = int((time.perf_counter() - t0) * 1000)
-        request_usage = {
-            "provider": "fast-path",
-            "model": "rule-based",
-            "input_tokens": 0,
-            "output_tokens": 0,
-            "total_tokens": 0,
-            "cost_usd": 0.0,
-            "records": [],
-        }
-        LEDGER.record_request(sid, request_usage)
-        PROM_REQUEST_LATENCY.labels(endpoint="/api/chat", method="POST").observe(elapsed_ms / 1000)
-        _audit_log(
-            "chat_response",
-            user,
-            session_id=sid,
-            latency_ms=elapsed_ms,
-            tokens_total=0,
-            cost_usd=0.0,
-            fast_path=True,
-        )
-        return ChatResponse(reply=guardrail_reply, session_id=sid, latency_ms=elapsed_ms, usage=request_usage)
-
-    graph, thinking_graph = _get_graph_pair(req_provider)
-
     # Instant fast-path for simple conversational/capabilities requests.
     fast_reply = _fast_path_reply(validated_msg)
     if fast_reply and not effective_tool_override:
@@ -1159,6 +1122,8 @@ async def chat(req: ChatRequest, request: Request, user: dict = Depends(get_curr
             fast_path=True,
         )
         return ChatResponse(reply=fast_reply, session_id=sid, latency_ms=elapsed_ms, usage=request_usage)
+
+    graph, thinking_graph = _get_graph_pair(req_provider)
 
     if effective_reply_mode == "regenerate":
         cache_result = clear_summary_caches()
@@ -1369,72 +1334,6 @@ async def chat_stream(req: ChatRequest, request: Request, user: dict = Depends(g
             },
         )
 
-    guardrail_reply = _medical_guardrail_reply(validated_msg, history=history)
-    if guardrail_reply:
-        async def _guardrail_stream():
-            now = time.time()
-            history.append(ChatMessage(role="user", content=validated_msg, timestamp=now))
-            history.append(ChatMessage(role="assistant", content=guardrail_reply, timestamp=time.time()))
-            sessions.set(sid, history)
-
-            full_history = sessions.get(sid)
-            gradio_format = [(h.content, full_history[i + 1].content)
-                             for i, h in enumerate(full_history)
-                             if h.role == "user" and i + 1 < len(full_history)]
-            Memory.write_chat_history_to_file(
-                gradio_chatbot=gradio_format,
-                folder_path=PROJECT_CFG.memory_dir,
-                thread_id=sid
-            )
-
-            elapsed_ms = int((time.perf_counter() - t0) * 1000)
-            usage = {
-                "provider": "fast-path",
-                "model": "rule-based",
-                "input_tokens": 0,
-                "output_tokens": 0,
-                "total_tokens": 0,
-                "cost_usd": 0.0,
-                "records": [],
-            }
-            LEDGER.record_request(sid, usage)
-            PROM_REQUEST_LATENCY.labels(endpoint="/api/chat/stream", method="POST").observe(elapsed_ms / 1000)
-
-            yield f"data: {json.dumps({'type': 'token', 'content': guardrail_reply})}\n\n"
-            yield f"data: {json.dumps({'type': 'done', 'session_id': sid, 'latency_ms': elapsed_ms, 'usage': usage})}\n\n"
-            _audit_log(
-                "chat_stream_response",
-                user,
-                session_id=sid,
-                latency_ms=elapsed_ms,
-                tokens_total=0,
-                cost_usd=0.0,
-                fast_path=True,
-            )
-
-        return StreamingResponse(
-            _guardrail_stream(),
-            media_type="text/event-stream",
-            headers={
-                "Cache-Control": "no-cache",
-                "Connection": "keep-alive",
-                "X-Accel-Buffering": "no",
-            },
-        )
-
-    if effective_reply_mode == "regenerate":
-        cache_result = clear_summary_caches()
-        _audit_log(
-            "regenerate_cache_cleared",
-            user,
-            session_id=sid,
-            patient_memory_cleared=cache_result.get("patient_memory_cleared", 0),
-            document_memory_cleared=cache_result.get("document_memory_cleared", 0),
-            disk_deleted=cache_result.get("disk_deleted", 0),
-        )
-
-    graph, thinking_graph = _get_graph_pair(req_provider)
-
     # Instant fast-path for simple conversational/capabilities requests.
     fast_reply = _fast_path_reply(validated_msg)
     if fast_reply and not effective_tool_override:
@@ -1488,6 +1387,19 @@ async def chat_stream(req: ChatRequest, request: Request, user: dict = Depends(g
                 "X-Accel-Buffering": "no",
             },
         )
+
+    if effective_reply_mode == "regenerate":
+        cache_result = clear_summary_caches()
+        _audit_log(
+            "regenerate_cache_cleared",
+            user,
+            session_id=sid,
+            patient_memory_cleared=cache_result.get("patient_memory_cleared", 0),
+            document_memory_cleared=cache_result.get("document_memory_cleared", 0),
+            disk_deleted=cache_result.get("disk_deleted", 0),
+        )
+
+    graph, thinking_graph = _get_graph_pair(req_provider)
 
     system_prompt = SYSTEM_PROMPT
     if effective_tool_override and effective_tool_override in TOOL_PROMPTS:

@@ -940,32 +940,145 @@ class ClinicalNotesRAGTool:
                 return size
         return 0
 
+    @staticmethod
+    def _normalize_lookup_text(value: str) -> str:
+        """Normalize free-form identifier text for robust matching."""
+        t = (value or "").strip().lower()
+        if not t:
+            return ""
+        t = _re.sub(r"[^a-z0-9\-\s]", " ", t)
+        t = _re.sub(r"\s+", " ", t).strip()
+        return t
+
+    def _extract_query_variants(self, identifier: str) -> list[str]:
+        """Generate candidate identifier variants from natural language input."""
+        norm = self._normalize_lookup_text(identifier)
+        if not norm:
+            return []
+
+        variants = {norm}
+
+        # Capture quoted identifiers when users explicitly provide a patient label.
+        for quoted in _re.findall(r"['\"]([^'\"]{3,})['\"]", identifier or ""):
+            qn = self._normalize_lookup_text(quoted)
+            if qn:
+                variants.add(qn)
+
+        tail = _re.search(r"(?:for|of|about|patient|mrn)\s+([a-z0-9\-\s]{3,})$", norm)
+        if tail:
+            variants.add(tail.group(1).strip())
+
+        # Patterns where a name is embedded in the middle of a query.
+        embedded = _re.search(
+            r"(?:disease|diagnosis|condition|problem|summary|record|chart|status|history|about)\s+(?:is\s+)?([a-z][a-z\-]+\s+[a-z][a-z\-]+(?:\s+[a-z][a-z\-]+)?)",
+            norm,
+        )
+        if embedded:
+            variants.add(embedded.group(1).strip())
+
+        tokens = norm.split()
+        semantic_stop_tokens = {
+            "what", "which", "who", "whom", "when", "where", "why", "how", "is", "are", "was", "were",
+            "do", "does", "did", "can", "could", "would", "should", "tell", "show", "find", "give",
+            "me", "please", "a", "an", "the", "for", "of", "about", "from", "with", "has", "have",
+            "suffering", "suffer", "disease", "diagnosis", "condition", "problem", "record", "records",
+            "summary", "summarize", "chart", "patient", "mrn",
+        }
+        filtered = [t for t in tokens if t not in semantic_stop_tokens and len(t) >= 2]
+
+        # Add compact name-like windows from filtered tokens (e.g., "ayesha malik").
+        for n in (2, 3):
+            if len(filtered) >= n:
+                for i in range(0, len(filtered) - n + 1):
+                    span = filtered[i : i + n]
+                    if all(_re.fullmatch(r"[a-z][a-z\-]*", s or "") for s in span):
+                        variants.add(" ".join(span))
+
+        if len(filtered) >= 2:
+            variants.add(" ".join(filtered))
+
+        for n in (2, 3, 4):
+            if len(tokens) >= n:
+                variants.add(" ".join(tokens[-n:]))
+
+        return sorted((v for v in variants if v), key=len, reverse=True)
+
+    def _scroll_all_points(self, scroll_filter=None, limit: int = 512) -> list:
+        """Scroll all points with pagination to avoid first-page-only misses."""
+        all_points = []
+        next_offset = None
+        max_points = int(os.environ.get("MEDGRAPH_PATIENT_SCAN_MAX_POINTS", "50000"))
+
+        while True:
+            kwargs = {
+                "collection_name": self.collection_name,
+                "limit": limit,
+                "with_payload": True,
+                "with_vectors": False,
+            }
+            if scroll_filter is not None:
+                kwargs["scroll_filter"] = scroll_filter
+            if next_offset is not None:
+                kwargs["offset"] = next_offset
+
+            results = self.client.scroll(**kwargs)
+            points, next_offset = results[0], results[1]
+
+            if points:
+                all_points.extend(points)
+                if len(all_points) >= max_points:
+                    logger.warning(
+                        "Patient scan reached cap (%d points). Set MEDGRAPH_PATIENT_SCAN_MAX_POINTS higher if needed.",
+                        max_points,
+                    )
+                    break
+
+            if not next_offset:
+                break
+
+        return all_points
+
     def list_patients(self) -> str:
         """List all unique patients in the vector database with their MRN, name, and source file."""
         try:
-            results = self.client.scroll(
-                collection_name=self.collection_name,
-                limit=1000,
-                with_payload=True,
-                with_vectors=False,
-            )
-            points = results[0]
+            points = self._scroll_all_points(limit=512)
             patients = {}
+            name_only_patients = {}
             for p in points:
                 meta = p.payload.get("metadata", {})
-                mrn = meta.get("patient_mrn", "")
+                mrn = str(meta.get("patient_mrn", "") or "").strip()
+                name = str(meta.get("patient_name", "") or "").strip()
+                source = str(meta.get("source", "") or meta.get("filename", "Unknown"))
+                document_id = str(meta.get("document_id", "") or "").strip()
                 if mrn and mrn not in patients:
                     patients[mrn] = {
                         "mrn": mrn,
-                        "name": meta.get("patient_name", "Unknown"),
-                        "source": meta.get("source", "Unknown"),
+                        "name": name or "Unknown",
+                        "source": source,
                     }
-            if not patients:
+                elif not mrn and name:
+                    nk = self._normalize_lookup_text(name)
+                    if nk and nk not in name_only_patients:
+                        name_only_patients[nk] = {
+                            "mrn": "N/A",
+                            "name": name,
+                            "source": source,
+                            "document_id": document_id,
+                        }
+
+            if not patients and not name_only_patients:
                 return "No patients found in the database."
 
             lines = ["Available patients in the database:"]
-            for info in patients.values():
+            for info in sorted(patients.values(), key=lambda x: (x["name"].lower(), x["mrn"].lower())):
                 lines.append(f"  - MRN: {info['mrn']} | Name: {info['name']} | Source: {info['source']}")
+
+            for info in sorted(name_only_patients.values(), key=lambda x: x["name"].lower()):
+                doc_hint = f" | Document ID: {info['document_id']}" if info.get("document_id") else ""
+                lines.append(
+                    f"  - MRN: {info['mrn']} | Name: {info['name']} | Source: {info['source']}{doc_hint}"
+                )
+
             return "\n".join(lines)
         except Exception as e:
             return f"Error listing patients: {e}"
@@ -977,67 +1090,152 @@ class ClinicalNotesRAGTool:
         Returns the MRN string, or None if no match found.
         Uses scored matching to pick the best candidate, not first-found.
         """
-        results = self.client.scroll(
-            collection_name=self.collection_name,
-            limit=1000,
-            with_payload=True,
-            with_vectors=False,
-        )
+        points = self._scroll_all_points(limit=512)
         patients: dict[str, str] = {}  # mrn -> name
-        for p in results[0]:
+        for p in points:
             meta = p.payload.get("metadata", {})
-            mrn = meta.get("patient_mrn", "")
-            name = meta.get("patient_name", "")
+            mrn = str(meta.get("patient_mrn", "") or "").strip()
+            name = str(meta.get("patient_name", "") or "").strip()
             if mrn and mrn not in patients:
                 patients[mrn] = name
 
-        query = identifier.strip().lower()
+        query_variants = self._extract_query_variants(identifier)
+        if not patients or not query_variants:
+            return None
+
+        stop_tokens = {
+            "give", "me", "summary", "summarize", "overview", "record", "records", "patient",
+            "for", "of", "about", "please", "the", "a", "an", "show", "find",
+        }
+
         best_mrn: str | None = None
         best_score = 0
 
         for mrn, name in patients.items():
-            mrn_lower = mrn.lower()
-            name_lower = name.lower()
-            score = 0
+            mrn_norm = self._normalize_lookup_text(mrn)
+            name_norm = self._normalize_lookup_text(name)
+            name_tokens = set(name_norm.split()) if name_norm else set()
 
-            # Exact MRN match
-            if mrn_lower == query:
-                return mrn  # perfect match, return immediately
+            for variant in query_variants:
+                score = 0
+                variant_norm = self._normalize_lookup_text(variant)
+                variant_tokens = {t for t in variant_norm.split() if t not in stop_tokens}
 
-            # Partial MRN match
-            if query in mrn_lower:
-                score = max(score, 90)
+                # Exact MRN match
+                if mrn_norm == variant_norm and variant_norm:
+                    return mrn  # perfect match, return immediately
 
-            # Exact name match
-            if name_lower == query:
-                score = max(score, 100)
+                # Partial MRN match
+                if variant_norm and variant_norm in mrn_norm:
+                    score = max(score, 95)
 
-            # Name contains query as substring
-            if query in name_lower:
-                score = max(score, 80)
+                # Exact/partial name match
+                if name_norm and variant_norm == name_norm:
+                    score = max(score, 100)
+                if name_norm and variant_norm and variant_norm in name_norm:
+                    score = max(score, 88)
+                if name_norm and variant_norm and name_norm in variant_norm:
+                    score = max(score, 78)
 
-            # Query contains name as substring
-            if name_lower and name_lower in query:
-                score = max(score, 70)
+                # Token-level overlap (weighted by how much of the variant was matched)
+                if variant_tokens and name_tokens:
+                    overlap = variant_tokens & name_tokens
+                    if overlap:
+                        frac = len(overlap) / max(len(variant_tokens), 1)
+                        token_score = int(60 + (35 * frac))
+                        score = max(score, token_score)
 
-            # Token-level overlap (scored by fraction of query tokens matched)
-            query_tokens = set(query.split())
-            name_tokens = set(name_lower.split())
-            if query_tokens and name_tokens:
-                overlap = query_tokens & name_tokens
-                if overlap:
-                    frac = len(overlap) / max(len(query_tokens), len(name_tokens))
-                    token_score = int(50 * frac)
-                    score = max(score, token_score)
+                if score > best_score:
+                    best_score = score
+                    best_mrn = mrn
 
-            if score > best_score:
-                best_score = score
-                best_mrn = mrn
+        if best_mrn and best_score >= 70:
+            logger.info(
+                "Name resolution: '%s' → %s (name='%s', score=%d)",
+                identifier,
+                best_mrn,
+                patients[best_mrn],
+                best_score,
+            )
+            return best_mrn
 
-        if best_mrn:
-            logger.info("Name resolution: '%s' → %s (name='%s', score=%d)",
-                        identifier, best_mrn, patients[best_mrn], best_score)
-        return best_mrn
+        return None
+
+    def find_documents_for_patient_identifier(self, identifier: str, max_docs: int = 3) -> list[str]:
+        """Find uploaded documents likely belonging to a patient identifier.
+
+        Used as a production-safe fallback when MRN resolution fails (e.g.,
+        freshly uploaded docs with incomplete patient_mrn metadata).
+        """
+        query_variants = self._extract_query_variants(identifier)
+        if not query_variants:
+            return []
+
+        points = self._scroll_all_points(limit=512)
+        if not points:
+            return []
+
+        stop_tokens = {
+            "give", "me", "summary", "summarize", "overview", "record", "records", "patient",
+            "for", "of", "about", "please", "the", "a", "an", "show", "find",
+        }
+
+        doc_scores: dict[str, int] = {}
+
+        for p in points:
+            payload = p.payload or {}
+            meta = payload.get("metadata", {}) or {}
+
+            doc_id = str(meta.get("document_id") or "").strip()
+            if not doc_id:
+                continue
+
+            name_norm = self._normalize_lookup_text(str(meta.get("patient_name") or ""))
+            mrn_norm = self._normalize_lookup_text(str(meta.get("patient_mrn") or ""))
+            content_norm = self._normalize_lookup_text(str(payload.get("page_content") or "")[:1500])
+
+            point_score = 0
+
+            for variant in query_variants:
+                variant_norm = self._normalize_lookup_text(variant)
+                variant_tokens = {t for t in variant_norm.split() if t not in stop_tokens}
+
+                if mrn_norm and variant_norm == mrn_norm:
+                    point_score = max(point_score, 120)
+                elif mrn_norm and variant_norm and variant_norm in mrn_norm:
+                    point_score = max(point_score, 110)
+
+                if name_norm and variant_norm == name_norm:
+                    point_score = max(point_score, 115)
+                elif name_norm and variant_norm and variant_norm in name_norm:
+                    point_score = max(point_score, 100)
+                elif name_norm and variant_norm and name_norm in variant_norm:
+                    point_score = max(point_score, 92)
+
+                if name_norm and variant_tokens:
+                    name_tokens = set(name_norm.split())
+                    overlap = variant_tokens & name_tokens
+                    if overlap:
+                        frac = len(overlap) / max(len(variant_tokens), 1)
+                        point_score = max(point_score, int(75 + (20 * frac)))
+
+                if not name_norm and len(variant_tokens) >= 2 and all(tok in content_norm for tok in variant_tokens):
+                    point_score = max(point_score, 86)
+
+            if point_score >= 85:
+                prev = doc_scores.get(doc_id, 0)
+                if point_score > prev:
+                    doc_scores[doc_id] = point_score
+
+        if not doc_scores:
+            return []
+
+        ranked = sorted(doc_scores.items(), key=lambda kv: kv[1], reverse=True)
+        top_score = ranked[0][1]
+        cutoff = max(85, top_score - 8)
+        selected = [doc_id for doc_id, score in ranked if score >= cutoff]
+
+        return selected[: max(1, int(max_docs or 1))]
 
 
 # ── Global singleton ─────────────────────────────────────────────────────────
@@ -2205,6 +2403,18 @@ def lookup_clinical_notes(query: str, document_id: str = "") -> str:
         # Use document_id filter if provided (strip whitespace, treat empty as None)
         doc_filter = document_id.strip() if document_id else None
         
+        def _is_unhelpful_search_result(text: str) -> bool:
+            t = (text or "").strip().lower()
+            if not t:
+                return True
+            markers = (
+                "no relevant documents found for:",
+                "no sufficiently relevant clinical data found for:",
+                "no results found.",
+                "error during search:",
+            )
+            return any(t.startswith(m) for m in markers)
+
         def _search_with_timeout():
             try:
                 result[0] = rag.search(query, document_id=doc_filter)
@@ -2221,6 +2431,29 @@ def lookup_clinical_notes(query: str, document_id: str = "") -> str:
         
         if exception[0]:
             return f"Error searching clinical notes: {exception[0]}. Ensure the vector database is initialized."
+
+        # Production fallback: if broad search misses and no explicit document_id
+        # was provided, try patient-aware document-scoped retrieval on likely
+        # uploaded documents inferred from the query itself.
+        if not doc_filter and _is_unhelpful_search_result(result[0] or ""):
+            try:
+                candidate_doc_ids = rag.find_documents_for_patient_identifier(query, max_docs=3)
+                fallback_hits: list[str] = []
+                for cand_doc_id in candidate_doc_ids:
+                    scoped = rag.search(query, document_id=cand_doc_id)
+                    if not _is_unhelpful_search_result(scoped or ""):
+                        fallback_hits.append(
+                            f"[Document Scoped Fallback | document_id: {cand_doc_id}]\n{scoped}"
+                        )
+                if fallback_hits:
+                    logger.info(
+                        "lookup_clinical_notes fallback activated for query='%s' across docs=%s",
+                        str(query)[:120],
+                        candidate_doc_ids,
+                    )
+                    return "\n\n---\n\n".join(fallback_hits)
+            except Exception as fallback_exc:
+                logger.warning("lookup_clinical_notes fallback failed: %s", str(fallback_exc)[:200])
         
         return result[0] or "No results found."
     except Exception as e:
@@ -2621,10 +2854,31 @@ def summarize_patient_record(patient_identifier: str) -> str:
 
         # ── Resolve identifier to MRN ─────────────────────────────
         patient_mrn = rag.resolve_to_mrn(patient_identifier)
+        fallback_doc_ids: list[str] = []
+        use_document_fallback = False
         if not patient_mrn:
-            return (f"Could not find a patient matching '{patient_identifier}'. "
-                    f"Use list_available_patients to see who is in the database.")
-        logger.info("Resolved '%s' → %s", patient_identifier, patient_mrn)
+            fallback_doc_ids = rag.find_documents_for_patient_identifier(patient_identifier, max_docs=3)
+            if fallback_doc_ids:
+                use_document_fallback = True
+                fallback_seed = f"{patient_identifier}|{'|'.join(sorted(fallback_doc_ids))}"
+                patient_mrn = f"doc-scope-{hashlib.sha256(fallback_seed.encode()).hexdigest()[:16]}"
+                logger.info(
+                    "MRN resolution failed for '%s'; using document-scoped fallback across %d uploaded doc(s): %s",
+                    patient_identifier,
+                    len(fallback_doc_ids),
+                    fallback_doc_ids,
+                )
+            else:
+                return (
+                    f"Could not find a patient matching '{patient_identifier}'. "
+                    "Use list_available_patients to see who is in the database. "
+                    "If this patient is from a newly uploaded file, call list_uploaded_documents "
+                    "to confirm it is in 'ready' status and retry."
+                )
+        else:
+            logger.info("Resolved '%s' → %s", patient_identifier, patient_mrn)
+
+        summary_subject = patient_identifier if use_document_fallback else patient_mrn
         req_mode = _current_summary_mode()
         bypass_cache = req_mode == "thinking"
 
@@ -2687,16 +2941,38 @@ def summarize_patient_record(patient_identifier: str) -> str:
         _record_cache_event("miss")
 
         # Retrieve chunks with metadata and run unified structured pipeline
-        patient_chunks = rag.get_all_chunks_for_patient_structured(patient_mrn)
-        if not patient_chunks:
-            return f"No records found for patient MRN: {patient_mrn}"
-        # Add targeted-retrieval supplements for high-risk domains that can be
-        # underrepresented if metadata extraction misses a section.
-        patient_chunks.extend(_supplement_from_targeted_searches(rag, patient_mrn))
+        if use_document_fallback:
+            patient_chunks = []
+            seen_chunks = set()
+            for doc_id in fallback_doc_ids:
+                for txt, meta in rag.get_all_chunks_for_document(doc_id):
+                    doc_key = (
+                        str(meta.get("document_id") or doc_id),
+                        int(meta.get("page_number") or 0),
+                        int(meta.get("chunk_index") or -1),
+                    )
+                    if doc_key in seen_chunks:
+                        continue
+                    seen_chunks.add(doc_key)
+                    patient_chunks.append((txt, meta))
+
+            if not patient_chunks:
+                return (
+                    f"Found uploaded document candidates for '{patient_identifier}', but none were ready "
+                    "for summarization yet. Please retry once indexing completes."
+                )
+        else:
+            patient_chunks = rag.get_all_chunks_for_patient_structured(patient_mrn)
+            if not patient_chunks:
+                return f"No records found for patient MRN: {patient_mrn}"
+            # Add targeted-retrieval supplements for high-risk domains that can be
+            # underrepresented if metadata extraction misses a section.
+            patient_chunks.extend(_supplement_from_targeted_searches(rag, patient_mrn))
+
         indexed_chunks: list[tuple[int, str, dict]] = [(i, txt, meta) for i, (txt, meta) in enumerate(patient_chunks, 1)]
 
         t_llm_start = _time.perf_counter()
-        summary, model_name = _run_structured_summary_pipeline(patient_mrn, indexed_chunks)
+        summary, model_name = _run_structured_summary_pipeline(summary_subject, indexed_chunks)
         t_llm_end = _time.perf_counter()
         logger.info("Structured pipeline LLM: %.1fs, output=%s chars (model=%s)",
                     t_llm_end - t_llm_start, f"{len(summary):,}", model_name)
