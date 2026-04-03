@@ -1,11 +1,11 @@
 {
   "global": {
-    "input_tokens": 2262668,
-    "output_tokens": 122802,
-    "total_tokens": 2385470,
+    "input_tokens": 2621467,
+    "output_tokens": 132437,
+    "total_tokens": 2753904,
     "cost_usd": 0.28264171,
-    "requests": 239,
-    "updated_at": "2026-04-02T08:29:39.586586Z"
+    "requests": 290,
+    "updated_at": "2026-04-02T13:03:20.499697Z"
   },
   "sessions": {
     "26b6c071-947c-435d-927c-660e3f722b12": {
@@ -1103,6 +1103,270 @@
       "cost_usd": 0.0,
       "requests": 1,
       "updated_at": "2026-04-02T08:29:39.586586Z"
+    },
+    "d0c466e5-6ead-4436-8ad5-bc5569d345e4": {
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "total_tokens": 0,
+      "cost_usd": 0.0,
+      "requests": 1,
+      "updated_at": "2026-04-02T10:35:21.804879Z"
+    },
+    "aaa99159-25bf-4e37-9b36-fba98d915aff": {
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "total_tokens": 0,
+      "cost_usd": 0.0,
+      "requests": 1,
+      "updated_at": "2026-04-02T10:36:55.764331Z"
+    },
+    "fdf8a8fb-1334-4540-a117-c24ff1b69918": {
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "total_tokens": 0,
+      "cost_usd": 0.0,
+      "requests": 1,
+      "updated_at": "2026-04-02T10:37:23.829151Z"
+    },
+    "4aabaa97-27c8-4216-9854-66be2622f3a5": {
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "total_tokens": 0,
+      "cost_usd": 0.0,
+      "requests": 1,
+      "updated_at": "2026-04-02T10:37:23.848316Z"
+    },
+    "64b7a150-e7d2-43fc-9242-5909aa37f0c7": {
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "total_tokens": 0,
+      "cost_usd": 0.0,
+      "requests": 1,
+      "updated_at": "2026-04-02T10:40:27.950298Z"
+    },
+    "3d1feca3-04f1-4929-9745-d1969333a369": {
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "total_tokens": 0,
+      "cost_usd": 0.0,
+      "requests": 1,
+      "updated_at": "2026-04-02T10:40:27.959155Z"
+    },
+    "c0356238-0d92-4ecf-8fdc-bb166fda7d49": {
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "total_tokens": 0,
+      "cost_usd": 0.0,
+      "requests": 1,
+      "updated_at": "2026-04-02T11:08:32.987552Z"
+    },
+    "88855427-48db-4290-822c-95fa57dd6bda": {
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "total_tokens": 0,
+      "cost_usd": 0.0,
+      "requests": 1,
+      "updated_at": "2026-04-02T11:08:33.000578Z"
+    },
+    "smoke-cohort-20260402161602": {
+      "input_tokens": 7925,
+      "output_tokens": 58,
+      "total_tokens": 7983,
+      "cost_usd": 0.0,
+      "requests": 1,
+      "updated_at": "2026-04-02T11:16:07.189289Z"
+    },
+    "smoke-cohort-20260402161631": {
+      "input_tokens": 11991,
+      "output_tokens": 142,
+      "total_tokens": 12133,
+      "cost_usd": 0.0,
+      "requests": 1,
+      "updated_at": "2026-04-02T11:16:37.317117Z"
+    },
+    "smoke-stream-1775128638": {
+      "input_tokens": 7926,
+      "output_tokens": 59,
+      "total_tokens": 7985,
+      "cost_usd": 0.0,
+      "requests": 1,
+      "updated_at": "2026-04-02T11:17:21.807569Z"
+    },
+    "smoke-stream-1775128641": {
+      "input_tokens": 11998,
+      "output_tokens": 153,
+      "total_tokens": 12151,
+      "cost_usd": 0.0,
+      "requests": 1,
+      "updated_at": "2026-04-02T11:17:26.813136Z"
+    },
+    "smoke-stream-1775128670": {
+      "input_tokens": 7925,
+      "output_tokens": 58,
+      "total_tokens": 7983,
+      "cost_usd": 0.0,
+      "requests": 1,
+      "updated_at": "2026-04-02T11:17:52.536126Z"
+    },
+    "smoke-repeat-1775128697": {
+      "input_tokens": 11994,
+      "output_tokens": 159,
+      "total_tokens": 12153,
+      "cost_usd": 0.0,
+      "requests": 1,
+      "updated_at": "2026-04-02T11:18:21.995127Z"
+    },
+    "smoke-diag-1775128729": {
+      "input_tokens": 7936,
+      "output_tokens": 81,
+      "total_tokens": 8017,
+      "cost_usd": 0.0,
+      "requests": 1,
+      "updated_at": "2026-04-02T11:18:52.132140Z"
+    },
+    "smoke-postfix-1775128855": {
+      "input_tokens": 11995,
+      "output_tokens": 156,
+      "total_tokens": 12151,
+      "cost_usd": 0.0,
+      "requests": 1,
+      "updated_at": "2026-04-02T11:21:01.240498Z"
+    },
+    "smoke-postrestart-1775128908": {
+      "input_tokens": 8012,
+      "output_tokens": 133,
+      "total_tokens": 8145,
+      "cost_usd": 0.0,
+      "requests": 1,
+      "updated_at": "2026-04-02T11:21:53.213718Z"
+    },
+    "aafe19f4-11f9-4b7f-bf92-2c8fbe66c094": {
+      "input_tokens": 59636,
+      "output_tokens": 588,
+      "total_tokens": 60224,
+      "cost_usd": 0.0,
+      "requests": 7,
+      "updated_at": "2026-04-02T11:27:44.094381Z"
+    },
+    "9957a4d1-bdd6-4ec4-8127-ce973866fc9a": {
+      "input_tokens": 83731,
+      "output_tokens": 6057,
+      "total_tokens": 89788,
+      "cost_usd": 0.0,
+      "requests": 3,
+      "updated_at": "2026-04-02T11:32:22.240001Z"
+    },
+    "df6cf230-7627-4934-8cad-1a07bc9a58a9": {
+      "input_tokens": 26939,
+      "output_tokens": 340,
+      "total_tokens": 27279,
+      "cost_usd": 0.0,
+      "requests": 3,
+      "updated_at": "2026-04-02T11:35:09.139963Z"
+    },
+    "32cbe566-81c1-47b8-bc2b-cc661c5cd65f": {
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "total_tokens": 0,
+      "cost_usd": 0.0,
+      "requests": 1,
+      "updated_at": "2026-04-02T11:42:38.842549Z"
+    },
+    "4a0230df-42b6-486c-b8f9-a77c1bb52cf4": {
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "total_tokens": 0,
+      "cost_usd": 0.0,
+      "requests": 1,
+      "updated_at": "2026-04-02T11:42:38.855560Z"
+    },
+    "f572e277-f180-4536-9d85-39b66d629667": {
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "total_tokens": 0,
+      "cost_usd": 0.0,
+      "requests": 1,
+      "updated_at": "2026-04-02T11:42:38.866618Z"
+    },
+    "b924c174-e553-42d9-aec3-55af48580b83": {
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "total_tokens": 0,
+      "cost_usd": 0.0,
+      "requests": 1,
+      "updated_at": "2026-04-02T11:42:38.903954Z"
+    },
+    "56d2a956-5acd-44b4-9bad-2b64bd5e94ab": {
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "total_tokens": 0,
+      "cost_usd": 0.0,
+      "requests": 1,
+      "updated_at": "2026-04-02T11:42:38.914953Z"
+    },
+    "3157005f-0c39-4e52-8002-418f9557bbae": {
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "total_tokens": 0,
+      "cost_usd": 0.0,
+      "requests": 1,
+      "updated_at": "2026-04-02T11:45:16.919003Z"
+    },
+    "3a5a22a5-35f9-4b0a-ae3c-1e24f259bd7b": {
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "total_tokens": 0,
+      "cost_usd": 0.0,
+      "requests": 1,
+      "updated_at": "2026-04-02T11:45:16.930164Z"
+    },
+    "f2991a90-31dc-4605-b5a8-461263ef6a21": {
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "total_tokens": 0,
+      "cost_usd": 0.0,
+      "requests": 1,
+      "updated_at": "2026-04-02T11:45:16.941026Z"
+    },
+    "b8634a60-81d3-4a76-8b52-2dabd065ac19": {
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "total_tokens": 0,
+      "cost_usd": 0.0,
+      "requests": 1,
+      "updated_at": "2026-04-02T11:45:16.952726Z"
+    },
+    "c322ec0c-ec9c-4bf7-afd7-2c52ab38b3fc": {
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "total_tokens": 0,
+      "cost_usd": 0.0,
+      "requests": 1,
+      "updated_at": "2026-04-02T11:45:16.963163Z"
+    },
+    "ffd63870-2d5e-4e56-9565-392440c76a71": {
+      "input_tokens": 26647,
+      "output_tokens": 745,
+      "total_tokens": 27392,
+      "cost_usd": 0.0,
+      "requests": 3,
+      "updated_at": "2026-04-02T11:56:42.841244Z"
+    },
+    "f3fa75f5-06d7-4a41-94c8-233bf385a184": {
+      "input_tokens": 58056,
+      "output_tokens": 771,
+      "total_tokens": 58827,
+      "cost_usd": 0.0,
+      "requests": 6,
+      "updated_at": "2026-04-02T12:56:42.206492Z"
+    },
+    "5f6e7007-8e05-492e-a36e-de94d6ea42ba": {
+      "input_tokens": 16088,
+      "output_tokens": 135,
+      "total_tokens": 16223,
+      "cost_usd": 0.0,
+      "requests": 2,
+      "updated_at": "2026-04-02T13:03:20.499697Z"
     }
   }
 }

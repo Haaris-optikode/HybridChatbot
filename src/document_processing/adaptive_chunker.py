@@ -16,6 +16,7 @@ are respected regardless of the document format.
 
 import re
 import logging
+import os
 from typing import List, Optional, Tuple
 from langchain_core.documents import Document
 from langchain_text_splitters import (
@@ -68,6 +69,17 @@ class AdaptiveDocumentChunker:
         self.chunk_overlap = chunk_overlap
         self.min_chunk_size = min_chunk_size
         self.max_table_chunk_size = max_table_chunk_size
+
+        # Optional semantic fallback (used only when a document has no detectable structure).
+        # Lazy-load embeddings so indexing still works even if the embeddings model
+        # is unavailable in a given environment.
+        self._semantic_fallback_embedding_model = os.environ.get(
+            "MEDGRAPH_SEMANTIC_CHUNKER_EMBEDDING_MODEL",
+            "NeuML/pubmedbert-base-embeddings",
+        )
+        self._semantic_fallback_breakpoint_percentile = int(
+            os.environ.get("MEDGRAPH_SEMANTIC_CHUNKER_BREAKPOINT_PERCENTILE", "88")
+        )
 
         # Text splitter for narrative content
         self.text_splitter = RecursiveCharacterTextSplitter(
@@ -192,7 +204,134 @@ class AdaptiveDocumentChunker:
         keyword_sections = self._detect_keyword_sections(text)
         if keyword_sections:
             return keyword_sections
+        # Final fallback: semantic sentence/paragraph distance splitting.
+        # This targets narrative dictated notes that contain no reliable
+        # headers/keyword sections, which otherwise become a single huge chunk.
+        semantic_parts = self._split_semantic_fallback(text)
+        if semantic_parts and len(semantic_parts) > 1:
+            return [(f"Narrative Semantic Part {i+1}", part) for i, part in enumerate(semantic_parts)]
+
         return [("Full Document", text)]
+
+    def _split_semantic_fallback(self, text: str) -> Optional[List[str]]:
+        """
+        Split unstructured narrative text into semantic parts using local embeddings.
+
+        Production-safety:
+        - Returns None (caller falls back to "Full Document") if embeddings cannot be loaded.
+        - Caps the number of embedding units to avoid pathological runtime on very large notes.
+        """
+        if not text or len(text.strip()) < 2000:
+            return None
+
+        try:
+            import numpy as np
+            from langchain_huggingface import HuggingFaceEmbeddings
+        except Exception:
+            return None
+
+        # Lazy-load (local, CPU) embeddings. Model is cached by HF on disk after first load.
+        try:
+            embeddings = HuggingFaceEmbeddings(
+                model_name=self._semantic_fallback_embedding_model,
+                model_kwargs={"device": "cpu"},
+                encode_kwargs={
+                    "normalize_embeddings": True,
+                    "batch_size": 16,
+                },
+            )
+        except Exception:
+            return None
+
+        # Build embedding units from paragraphs to reduce compute while still
+        # reacting to local semantic shifts.
+        raw_paragraphs = [p.strip() for p in re.split(r"\n{2,}", text) if p.strip()]
+        if not raw_paragraphs:
+            return None
+
+        # Coalesce paragraphs into larger units (~target chars) to cap unit count.
+        target_unit_chars = max(800, min(1600, self.chunk_size))
+        units: list[str] = []
+        cur = []
+        cur_chars = 0
+        for p in raw_paragraphs:
+            cur.append(p)
+            cur_chars += len(p)
+            if cur_chars >= target_unit_chars:
+                units.append("\n\n".join(cur))
+                cur = []
+                cur_chars = 0
+        if cur:
+            units.append("\n\n".join(cur))
+
+        # Hard cap for worst-case notes.
+        max_units = int(os.environ.get("MEDGRAPH_SEMANTIC_CHUNKER_MAX_UNITS", "80"))
+        if len(units) > max_units:
+            # Downsample units for embedding computation only; then fall back
+            # to a conservative recursive split if we can't find enough structure.
+            units = units[:max_units]
+        if len(units) < 2:
+            return None
+
+        # Embed units (paragraph-level semantic anchors).
+        try:
+            unit_vectors = embeddings.embed_documents(units)
+        except Exception:
+            return None
+
+        vecs = np.array(unit_vectors, dtype=np.float32)
+        if vecs.ndim != 2 or vecs.shape[0] != len(units):
+            return None
+
+        # Cosine distance between adjacent units (since vectors are normalized).
+        # dist = 1 - cos_sim
+        adjacency = vecs[:-1] * vecs[1:]
+        cos_sims = adjacency.sum(axis=1)
+        dists = 1.0 - cos_sims
+
+        if dists.size == 0:
+            return None
+
+        threshold = float(np.percentile(dists, self._semantic_fallback_breakpoint_percentile))
+
+        # Decide cutpoints: where semantic distance is high.
+        cut_indices = [i for i, d in enumerate(dists) if d >= threshold]
+        if not cut_indices:
+            return None
+
+        # Build segments by accumulating units, ensuring minimum size.
+        min_segment_chars = int(self.min_chunk_size * 1.2)
+        segments: list[str] = []
+        current_units: list[str] = []
+        current_chars = 0
+
+        def _flush():
+            nonlocal current_units, current_chars
+            seg = "\n\n".join(current_units).strip()
+            if seg:
+                segments.append(seg)
+            current_units = []
+            current_chars = 0
+
+        for unit_idx, unit in enumerate(units):
+            current_units.append(unit)
+            current_chars += len(unit)
+
+            # dists index i corresponds to adjacency between units[i] and units[i+1]
+            # so when unit_idx is at i+1 (second unit in adjacency), consider splitting after it.
+            if unit_idx in {i + 1 for i in cut_indices}:
+                if current_chars >= min_segment_chars:
+                    _flush()
+                    if len(segments) >= 20:
+                        # Avoid exploding segment counts on long notes.
+                        break
+
+        if current_units and (not segments or len(segments) < 20):
+            _flush()
+
+        if len(segments) < 2:
+            return None
+        return segments
 
     def _detect_keyword_sections(self, text: str) -> Optional[List[Tuple[str, str]]]:
         """

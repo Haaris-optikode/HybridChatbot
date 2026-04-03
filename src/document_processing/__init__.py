@@ -17,6 +17,7 @@ Usage:
 import os
 import uuid
 import logging
+from datetime import datetime
 from typing import List, Optional
 
 from langchain_core.documents import Document
@@ -27,10 +28,30 @@ from document_processing.metadata_extractor import (
     extract_patient_name,
     classify_document_type,
     extract_encounter_date,
+    extract_doc_level_diagnoses_and_meds,
+    extract_hba1c_from_chunk_text,
 )
 from document_processing.adaptive_chunker import AdaptiveDocumentChunker
 
 logger = logging.getLogger(__name__)
+
+PAYLOAD_SCHEMA_VERSION = "clinical_values_v1"
+
+
+def _normalize_date_to_iso(raw: Optional[str]) -> Optional[str]:
+    if not raw:
+        return None
+    s = raw.strip()
+    if not s:
+        return None
+    s_norm = s.replace("-", "/")
+    for fmt in ("%m/%d/%Y", "%m/%d/%y"):
+        try:
+            dt = datetime.strptime(s_norm, fmt)
+            return dt.isoformat()
+        except Exception:
+            continue
+    return None
 
 
 def process_document(
@@ -86,6 +107,10 @@ def process_document(
     doc_type = classify_document_type(full_markdown)
     encounter_date = extract_encounter_date(full_markdown)
 
+    # Document-scoped clinical tags used for cohort filtering.
+    # (Chunk-scoped lab numeric values are extracted per-chunk below.)
+    doc_level_values = extract_doc_level_diagnoses_and_meds(full_markdown) or {}
+
     logger.info("  MRN      : %s", patient_mrn or "not found")
     logger.info("  Patient  : %s", patient_name or "not found")
     logger.info("  Doc Type : %s", doc_type)
@@ -107,13 +132,34 @@ def process_document(
         "document_id": doc_id,
     }
     if encounter_date:
-        base_metadata["encounter_date"] = encounter_date
+        iso = _normalize_date_to_iso(encounter_date)
+        if iso:
+            base_metadata["encounter_date"] = iso
+        else:
+            base_metadata["encounter_date"] = encounter_date
+    # Propagate doc-level tags into every chunk so cohort filters can match
+    # without re-extracting for each chunk.
+    base_metadata.update(doc_level_values)
+    base_metadata["payload_schema_version"] = PAYLOAD_SCHEMA_VERSION
 
     documents = chunker.chunk_document(
         markdown_text=full_markdown,
         metadata=base_metadata,
         page_map=page_map,
     )
+
+    # Chunk-scoped numeric lab extraction (HbA1c + nearest date).
+    # IMPORTANT: we do NOT propagate lab values to all chunks; we only store
+    # them on the chunk(s) where the evidence appears.
+    for d in documents:
+        # Chunker prepends a prefix like "[Patient: ... | MRN: ... | Section: ...]\n"
+        # Strip it so lab regexes run on the actual clinical content.
+        page_content = d.page_content or ""
+        parts = page_content.split("\n", 1)
+        chunk_text = parts[1] if len(parts) == 2 else page_content
+        hba1c_payload = extract_hba1c_from_chunk_text(chunk_text)
+        if hba1c_payload:
+            d.metadata.update(hba1c_payload)
 
     logger.info("  Chunks   : %d", len(documents))
 

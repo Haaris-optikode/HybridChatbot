@@ -251,15 +251,49 @@ class ClinicalNotesVectorizer:
         # Note: LangChain's QdrantVectorStore nests metadata under "metadata."
         # so indexes must use the full nested path (e.g., "metadata.patient_mrn")
         logger.info("  Creating payload indexes...")
-        for field in ("metadata.patient_mrn", "metadata.section_title",
-                      "metadata.source", "metadata.document_id",
-                      "metadata.document_type"):
+        keyword_fields = (
+            # Core scoping/indexing fields
+            "metadata.patient_mrn",
+            "metadata.section_title",
+            "metadata.source",
+            "metadata.document_id",
+            "metadata.document_type",
+            # Versioning marker (lets query-time detect schema compatibility)
+            "metadata.payload_schema_version",
+            # Cohort-filter fields
+            "metadata.diagnoses_text",
+            "metadata.active_medications",
+            "metadata.patient_location",
+        )
+        float_fields = (
+            "metadata.hba1c",
+        )
+        datetime_fields = (
+            "metadata.hba1c_date",
+            "metadata.encounter_date",
+        )
+
+        for field in keyword_fields:
             client.create_payload_index(
                 collection_name=collection_name,
                 field_name=field,
                 field_schema=PayloadSchemaType.KEYWORD,
             )
-        logger.info("  Payload indexes: patient_mrn, section_title, source, document_id, document_type")
+        for field in float_fields:
+            client.create_payload_index(
+                collection_name=collection_name,
+                field_name=field,
+                field_schema=PayloadSchemaType.FLOAT,
+            )
+        for field in datetime_fields:
+            client.create_payload_index(
+                collection_name=collection_name,
+                field_name=field,
+                field_schema=PayloadSchemaType.DATETIME,
+            )
+        logger.info(
+            "  Payload indexes: patient_mrn/section_title/source/doc_id/doc_type + schema_version + cohort fields"
+        )
 
     def index_documents(
         self,

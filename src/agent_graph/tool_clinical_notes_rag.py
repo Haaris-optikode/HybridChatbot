@@ -29,7 +29,7 @@ import time as _time
 import re as _re
 import concurrent.futures as _futures
 from pathlib import Path as _Path
-from datetime import datetime as _dt
+from datetime import datetime as _dt, timedelta as _td
 from dotenv import load_dotenv
 import threading
 from collections import OrderedDict
@@ -1261,6 +1261,42 @@ _DOC_SUMMARY_CACHE_MAX_SIZE = int(os.environ.get("MEDGRAPH_DOC_CACHE_MAX_SIZE", 
 _SUMMARY_PIPELINE_VERSION = "v3_fast_adaptive"
 
 
+def clear_summary_caches() -> dict:
+    """Clear patient/document summary caches across memory and disk layers."""
+    with _memory_cache_lock:
+        patient_memory_cleared = len(_memory_cache)
+        _memory_cache.clear()
+
+    with _DOC_SUMMARY_CACHE_LOCK:
+        document_memory_cleared = len(_DOC_SUMMARY_CACHE)
+        _DOC_SUMMARY_CACHE.clear()
+
+    disk_deleted = 0
+    cache_dir = _Path(here("data")) / "summary_cache"
+    if cache_dir.exists():
+        for f in cache_dir.glob("*.json"):
+            try:
+                f.unlink()
+                disk_deleted += 1
+            except Exception:
+                pass
+
+    return {
+        "status": "ok",
+        "disk_deleted": disk_deleted,
+        "patient_memory_cleared": patient_memory_cleared,
+        "document_memory_cleared": document_memory_cleared,
+    }
+
+
+def _document_summary_cache_file(document_id: str) -> _Path:
+    """Return a stable disk-cache path for uploaded-document summaries."""
+    cache_dir = _Path(here("data")) / "summary_cache"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    cache_key = hashlib.sha256(f"doc::{document_id}".encode("utf-8")).hexdigest()[:16]
+    return cache_dir / f"doc_{cache_key}.json"
+
+
 def _get_doc_reduce_llm(model_override: str = None):
     """Higher-accuracy model for document reduce/verification."""
     provider = get_active_llm_provider(getattr(TOOLS_CFG, "llm_provider", "openai"))
@@ -1427,6 +1463,49 @@ def _merge_doc_extractions(extractions: list[dict]) -> dict:
     return merged
 
 
+def _detect_note_type_from_chunks(indexed_chunks: list[tuple[int, str, dict]]) -> str:
+    """
+    Detect common clinical note types from available metadata signals.
+
+    We primarily use:
+    - chunk meta `document_type` (from PDF classification)
+    - chunk meta `section_title` (from adaptive chunker headings/keyword sections)
+    """
+    doc_types = [((meta or {}).get("document_type") or "").lower() for _, _, meta in indexed_chunks]
+    sections = [((meta or {}).get("section_title") or "").lower() for _, _, meta in indexed_chunks]
+    joined_sections = " ".join(sections[:60])  # cap for speed
+
+    # Discharge / inpatient cues
+    if any("discharge" in dt for dt in doc_types) or any("discharge" in s for s in sections) or any("disposition" in s for s in sections):
+        return "Discharge_Summary"
+    if any("inpatient" in s or "hospital course" in s or "admission" in s for s in sections):
+        return "Inpatient"
+
+    # SOAP cues: subjective/objective + assessment/plan
+    if any(s in ("subjective", "objective", "ros", "physical exam", "physical examination") for s in sections) and (
+        any("assessment" in s and "plan" in s for s in sections)
+        or any(s in ("assessment & plan", "assessment and plan", "plan", "a/p", "a/p.") for s in sections)
+        or "soap" in joined_sections
+    ):
+        return "SOAP"
+
+    # HPI cues
+    if any("history of present illness" in s for s in sections) or any(s.startswith("hpi") for s in sections):
+        return "HPI"
+
+    # Assessment/Plan cues
+    if any(("assessment" in s and "plan" in s) or s in ("a/p", "ap") for s in sections):
+        return "AP"
+
+    # Progress notes may still be SOAP-like even when headings are messy.
+    if any("progress_note" in dt or "progress" in dt for dt in doc_types) and (
+        any("assessment" in s for s in sections) and any("plan" in s for s in sections)
+    ):
+        return "SOAP"
+
+    return "General"
+
+
 def _is_sparse_merged_payload(merged: dict) -> bool:
     """Detect pathological under-extraction."""
     if not isinstance(merged, dict):
@@ -1521,7 +1600,7 @@ SOURCES:
 """
 
 
-def _doc_needs_keyword_retry(raw_text: str, merged: dict) -> list[str]:
+def _doc_needs_keyword_retry(raw_text: str, merged: dict, note_type: str | None = None) -> list[str]:
     """Heuristic: detect missing can't-miss domains when source contains signals."""
     raw = (raw_text or "").lower()
     missing = []
@@ -1541,6 +1620,22 @@ def _doc_needs_keyword_retry(raw_text: str, merged: dict) -> list[str]:
         missing.append("procedures")
     if ("discharge" in raw or "follow-up" in raw or "appointment" in raw) and not (merged.get("disposition_followup") or []):
         missing.append("disposition_followup")
+
+    # Note-type-specific priorities.
+    if note_type in ("SOAP", "HPI", "AP"):
+        # SOAP/AP/HPI commonly requires a problem/diagnosis backbone.
+        if (
+            any(k in raw for k in ["assessment", "impression", "plan", "diagnos", "differential", "problem"])
+            and not (merged.get("problems") or [])
+        ):
+            missing.append("problems")
+
+    if note_type in ("Inpatient", "Discharge_Summary"):
+        if (
+            any(k in raw for k in ["hospital course", "hospital day", "inpatient", "during admission", "day "])
+            and not (merged.get("hospital_course") or [])
+        ):
+            missing.append("hospital_course")
     return missing
 
 
@@ -1578,7 +1673,11 @@ def _build_sources_for_groups(chunks: list[tuple[int, str, dict]], max_group_cha
     return rendered
 
 
-def _run_structured_summary_pipeline(entity_id: str, indexed_chunks: list[tuple[int, str, dict]]) -> tuple[str, str]:
+def _run_structured_summary_pipeline(
+    entity_id: str,
+    indexed_chunks: list[tuple[int, str, dict]],
+    hierarchical: bool = True,
+) -> tuple[str, str]:
     """Unified structured summary pipeline used by both patient and document summaries.
 
     Returns:
@@ -1595,6 +1694,62 @@ def _run_structured_summary_pipeline(entity_id: str, indexed_chunks: list[tuple[
     map_primary = thinking_model if mode == "thinking" else os.environ.get("MEDGRAPH_DOCUMENT_SUMMARY_MAP_LLM", default_map)
     reduce_primary = thinking_model if mode == "thinking" else default_reduce
     is_fast_mode = mode != "thinking"
+    note_type = _detect_note_type_from_chunks(indexed_chunks)
+
+    # Hierarchical summarization: the current FAST path only selects a small
+    # subset of sources, which can miss cross-section relationships in large
+    # documents. For production, we switch to a section-first summarization
+    # flow when the input is large and we're in FAST mode.
+    if hierarchical and is_fast_mode:
+        hierarchical_threshold_chars = int(os.environ.get("MEDGRAPH_HIER_SUMMARY_CHAR_THRESHOLD", "120000"))
+        max_sections = int(os.environ.get("MEDGRAPH_HIER_SUMMARY_MAX_SECTIONS", "10"))
+
+        total_chars = sum(len(txt or "") for _, txt, _ in indexed_chunks)
+        if total_chars >= hierarchical_threshold_chars:
+            # Group by section_title already computed at indexing time.
+            by_section: dict[str, list[tuple[int, str, dict]]] = {}
+            for gi, txt, meta in indexed_chunks:
+                sec = (meta or {}).get("section_title") or "Full Document"
+                by_section.setdefault(sec, []).append((gi, txt, meta))
+
+            if len(by_section) > 1:
+                # Select the most information-dense sections first.
+                ordered_sections = sorted(
+                    by_section.items(),
+                    key=lambda kv: sum(len(t or "") for _, t, _ in kv[1]),
+                    reverse=True,
+                )[:max_sections]
+
+                section_summaries: list[str] = []
+                for sec_title, sec_chunks in ordered_sections:
+                    sec_summary, _ = _run_structured_summary_pipeline(
+                        entity_id,
+                        sec_chunks,
+                        hierarchical=False,  # disable recursion back into hierarchical mode
+                    )
+                    section_summaries.append(f"SECTION: {sec_title}\n{sec_summary}")
+
+                hier_synth_prompt = (
+                    "You are MedGraph AI.\n\n"
+                    "Create a final clinician-ready summary for the full record using ONLY the section summaries below. "
+                    "Do not add new facts. Consolidate duplicates, preserve clinically important decisions (diagnoses, meds, critical labs, imaging, procedures, discharge/follow-up), "
+                    f"Apply note-type emphasis for: {note_type}. "
+                    "and keep chronology when present.\n\n"
+                    "SECTION SUMMARIES:\n"
+                    f"{chr(10).join(section_summaries)}"
+                )
+
+                reduce_chain = build_model_chain(
+                    reduce_primary,
+                    ["gemini-2.5-flash-lite"],
+                )
+                model_name, final_summary = _llm_invoke_with_fallback(
+                    _get_doc_reduce_llm,
+                    hier_synth_prompt,
+                    max_retries=2,
+                    model_chain=reduce_chain,
+                )
+                return final_summary, model_name
     max_group_chars = 32000 if is_fast_mode else 22000
     sources_groups = _build_sources_for_groups(indexed_chunks, max_group_chars=max_group_chars)
 
@@ -1691,7 +1846,7 @@ SOURCES:
 
     # Build domain-signal text from all chunks (truncated per chunk for memory safety)
     signal_text = "\n".join((txt[:600] if txt else "") for _, txt, _ in indexed_chunks)
-    missing_domains = _doc_needs_keyword_retry(signal_text, merged)
+    missing_domains = _doc_needs_keyword_retry(signal_text, merged, note_type=note_type)
 
     if missing_domains:
         keyword_map = {
@@ -1700,6 +1855,8 @@ SOURCES:
             "labs": ["lab", "cbc", "bmp", "cmp", "mg/dl", "mmol", "wbc", "hgb", "plt", "bnp", "creatinine"],
             "imaging": ["impression", "ct", "mri", "x-ray", "ultrasound", "echo", "ecg", "ekg", "rvsp", "ef"],
             "procedures": ["procedure", "operative", "surgery", "biopsy", "endoscopy", "thoracentesis", "catheter", "pcwp", "pvr", "cardiac index"],
+                "problems": ["assessment", "impression", "diagnos", "differential", "problem", "plan"],
+                "hospital_course": ["hospital course", "hospital day", "inpatient", "during admission", "day "],
             "disposition_followup": ["discharge", "follow-up", "appointment", "return to", "home health", "pt", "ot", "icd"],
         }
         want = set(missing_domains)
@@ -1755,6 +1912,32 @@ SOURCES:
 
     json_blob = json.dumps(merged, ensure_ascii=False)
     reduce_prompt = _DOC_REDUCE_PROMPT.format(json_blob=json_blob)
+
+    note_type_emphasis_map = {
+        "SOAP": (
+            "NOTE TYPE EMPHASIS (SOAP): Prioritize Assessment and Plan. Keep Subjective/Objective concise "
+            "and make sure medications ordered/started/stopped and key diagnoses are emphasized."
+        ),
+        "HPI": (
+            "NOTE TYPE EMPHASIS (HPI): Focus on the presenting complaint narrative (onset → course) and "
+            "organize the summary around clinical symptom evolution and pertinent associated features."
+        ),
+        "AP": (
+            "NOTE TYPE EMPHASIS (AP): Use problem-by-problem structure. For each problem, emphasize the "
+            "planned interventions, key diagnostics, medications changes, and follow-up."
+        ),
+        "Inpatient": (
+            "NOTE TYPE EMPHASIS (Inpatient): Emphasize hospital course chronology, medication changes during admission, "
+            "procedures/consults, and pending results with discharge-limiting events."
+        ),
+        "Discharge_Summary": (
+            "NOTE TYPE EMPHASIS (Discharge Summary): Emphasize transition of care: discharge diagnoses and condition, "
+            "reconciled discharge medications, pending results, and follow-up appointments/instructions."
+        ),
+    }
+    if note_type in note_type_emphasis_map:
+        reduce_prompt += "\n\n" + note_type_emphasis_map[note_type]
+
     if is_fast_mode:
         reduce_prompt += (
             "\n\nFAST MODE REQUIREMENTS:\n"
@@ -1802,6 +1985,36 @@ def _supplement_from_targeted_searches(rag: "ClinicalNotesRAGTool", patient_mrn:
         parts = text.split("\n\n---\n\n")
         for p in parts:
             # Strip leading source metadata header line if present.
+            body = _re.sub(r"^\[Source[^\]]+\]\n?", "", p.strip())
+            key = hashlib.md5(body.encode("utf-8")).hexdigest()
+            if not body or key in seen:
+                continue
+            seen.add(key)
+            out.append((body, {"section_title": "Supplemental Targeted Retrieval", "page_number": "?"}))
+    return out
+
+
+def _supplement_from_targeted_searches_for_document(
+    rag: "ClinicalNotesRAGTool",
+    document_id: str,
+) -> list[tuple[str, dict]]:
+    """Get supplemental chunks for uploaded documents using doc-scoped retrieval."""
+    queries = [
+        "allergies allergy reaction anaphylaxis contrast premedication",
+        "discharge medications home medications dose route frequency",
+        "critical labs imaging procedures hospital course follow-up",
+    ]
+    out: list[tuple[str, dict]] = []
+    seen = set()
+    for q in queries:
+        try:
+            text = rag.search(q, document_id=document_id)
+        except Exception:
+            continue
+        if not text or text.startswith(("No relevant", "No sufficiently relevant", "Error during search")):
+            continue
+        parts = text.split("\n\n---\n\n")
+        for p in parts:
             body = _re.sub(r"^\[Source[^\]]+\]\n?", "", p.strip())
             key = hashlib.md5(body.encode("utf-8")).hexdigest()
             if not body or key in seen:
@@ -2059,6 +2272,346 @@ def lookup_patient_orders(patient_identifier: str) -> str:
         return f"Error retrieving orders: {e}"
 
 
+def _safe_json_extract_first_object(raw: str) -> dict:
+    """Best-effort extraction of the first JSON object from a model response."""
+    if not raw:
+        return {}
+    t = str(raw).strip()
+    # Strip markdown fences if present
+    t = _re.sub(r"^```(?:json)?\s*", "", t, flags=_re.IGNORECASE).strip()
+    t = _re.sub(r"\s*```$", "", t).strip()
+    if not t.startswith("{"):
+        m = _re.search(r"\{[\s\S]*\}", t)
+        if m:
+            t = m.group(0)
+    try:
+        obj = json.loads(t)
+        return obj if isinstance(obj, dict) else {}
+    except Exception:
+        return {}
+
+
+def _parse_cohort_query(query: str) -> dict | None:
+    """
+    Parse natural-language cohort queries into a structured filter spec.
+
+    Production-grade note:
+    - We use deterministic regex parsing for the supported cohort patterns.
+    - If regex parsing fails, we optionally fall back to an LLM parse only when enabled.
+    """
+    q = (query or "").strip()
+    if not q:
+        return None
+
+    ql = q.lower()
+
+    # Diagnosis term handling (starting with diabetes).
+    diagnosis_terms: list[str] = []
+    is_diabetes = bool(_re.search(r"\bdiabet", ql))
+    if is_diabetes:
+        # Match what our doc-level extractor stores.
+        if _re.search(r"\btype\s*2\b|\bt2dm\b", ql):
+            diagnosis_terms = ["diabetes", "type 2 diabetes"]
+        elif _re.search(r"\btype\s*1\b|\bt1dm\b", ql):
+            diagnosis_terms = ["diabetes", "type 1 diabetes"]
+        else:
+            diagnosis_terms = ["diabetes"]
+
+    # Lab filter (HbA1c)
+    hba1c_re = _re.search(
+        r"\b(?:hba1c|a1c|hemoglobin\s*a1c|glycated\s*hemoglobin)\b\s*"
+        r"(?P<op>>=|<=|>|<|=|equals|equal)\s*"
+        r"(?P<val>\d+(?:\.\d+)?)",
+        ql,
+        flags=_re.IGNORECASE,
+    )
+    if not hba1c_re:
+        # Alternative wording: "HbA1c greater than 9"
+        hba1c_re = _re.search(
+            r"\b(?:hba1c|a1c)\b.*?\b("
+            r"greater\s*than|at\s*least|less\s*than|at\s*most|equal\s*to|=)\b.*?"
+            r"(?P<val>\d+(?:\.\d+)?)",
+            ql,
+            flags=_re.IGNORECASE,
+        )
+
+    if not hba1c_re:
+        return None
+
+    # Operator normalization
+    op = hba1c_re.groupdict().get("op", "") or ""
+    val_raw = hba1c_re.groupdict().get("val", None)
+    if val_raw is None:
+        return None
+    try:
+        lab_value = float(val_raw)
+    except Exception:
+        return None
+
+    op_norm: str | None = None
+    op_l = str(op).lower().strip()
+    if op_l in (">",):
+        op_norm = "gt"
+    elif op_l in (">=", "at least"):
+        op_norm = "gte"
+    elif op_l in ("<",):
+        op_norm = "lt"
+    elif op_l in ("<=", "at most"):
+        op_norm = "lte"
+    elif op_l in ("=", "equals", "equal"):
+        op_norm = "eq"
+
+    # If we used alternative wording, map based on matched phrase.
+    if op_norm is None:
+        if _re.search(r"\bgreater\s*than\b", ql):
+            op_norm = "gt"
+        elif _re.search(r"\bat\s*least\b", ql):
+            op_norm = "gte"
+        elif _re.search(r"\bless\s*than\b", ql):
+            op_norm = "lt"
+        elif _re.search(r"\bat\s*most\b", ql):
+            op_norm = "lte"
+        elif _re.search(r"\bequal\s*to\b", ql) or _re.search(r"\b=\b", ql):
+            op_norm = "eq"
+
+    if op_norm is None:
+        return None
+
+    # Time window handling (starting with "last N months")
+    within_days: int | None = None
+    m = _re.search(r"\blast\s+(?P<n>\d+)\s*(?P<unit>day|days|week|weeks|month|months|year|years)\b", ql)
+    if m:
+        n = int(m.group("n"))
+        unit = m.group("unit")
+        if unit.startswith("day"):
+            within_days = n
+        elif unit.startswith("week"):
+            within_days = n * 7
+        elif unit.startswith("month"):
+            within_days = n * 30
+        elif unit.startswith("year"):
+            within_days = n * 365
+
+    date_field = "hba1c_date" if within_days is not None else None
+
+    return {
+        "diagnosis_terms": diagnosis_terms,
+        "lab_name": "hba1c",
+        "lab_operator": op_norm,
+        "lab_value": lab_value,
+        "within_days": within_days,
+        "date_field": date_field,
+    }
+
+
+@tool
+def cohort_patient_search(query: str) -> str:
+    """
+    Search across ALL patients for a clinical cohort matching structured criteria.
+
+    Use for: population queries (e.g., diabetes with HbA1c thresholds in a time window).
+    Do NOT use for: single-patient fact lookups (use lookup_clinical_notes).
+    """
+    try:
+        from qdrant_client.models import Filter, FieldCondition, MatchAny, MatchValue, Range, DatetimeRange
+        from document_processing import PAYLOAD_SCHEMA_VERSION
+
+        rag = get_rag_tool_instance()
+        schema_version = PAYLOAD_SCHEMA_VERSION
+
+        parsed = _parse_cohort_query(query)
+        if not parsed:
+            return (
+                "Could not parse the cohort criteria. "
+                "Try using a pattern like: "
+                "`diabetic patients with HbA1c > 9 in the last 3 months`."
+            )
+
+        # Fail fast if the collection wasn't indexed with structured clinical values.
+        schema_check, _ = rag.client.scroll(
+            collection_name=rag.collection_name,
+            scroll_filter=Filter(
+                must=[
+                    FieldCondition(
+                        key="metadata.payload_schema_version",
+                        match=MatchValue(value=schema_version),
+                    )
+                ]
+            ),
+            limit=1,
+            with_payload=True,
+            with_vectors=False,
+        )
+        if not schema_check:
+            return (
+                "Cohort queries require structured clinical payloads (HbA1c numeric/date and "
+                "diagnosis tags). Your vector DB appears to be missing them. "
+                "Please reindex your documents to enable cohort filtering."
+            )
+
+        conditions: list[FieldCondition] = []
+        # Always scope to correct payload schema version.
+        conditions.append(
+            FieldCondition(
+                key="metadata.payload_schema_version",
+                match=MatchValue(value=schema_version),
+            )
+        )
+
+        diagnosis_terms = parsed.get("diagnosis_terms") or []
+        if diagnosis_terms:
+            conditions.append(
+                FieldCondition(
+                    key="metadata.diagnoses_text",
+                    match=MatchAny(any=diagnosis_terms),
+                )
+            )
+
+        # Lab numeric range
+        op = parsed["lab_operator"]
+        v = parsed["lab_value"]
+        range_kwargs = {
+            "gt": Range(gt=v),
+            "gte": Range(gte=v),
+            "lt": Range(lt=v),
+            "lte": Range(lte=v),
+            "eq": Range(gte=v, lte=v),
+        }
+        if op in ("eq", "gt", "gte", "lt", "lte"):
+            conditions.append(
+                FieldCondition(
+                    key="metadata.hba1c",
+                    range=range_kwargs[op],
+                )
+            )
+        else:
+            return "Unsupported HbA1c operator in cohort query."
+
+        # Time window filtering
+        within_days = parsed.get("within_days")
+        if within_days is not None and parsed.get("date_field"):
+            cutoff = _dt.utcnow() - _td(days=int(within_days))
+            iso_cutoff = cutoff.isoformat()
+            conditions.append(
+                FieldCondition(
+                    key=f"metadata.{parsed['date_field']}",
+                    range=DatetimeRange(gte=iso_cutoff),
+                )
+            )
+
+        qdrant_filter = Filter(must=conditions)
+
+        # Scroll through matching points (server-side filter; no vector scoring).
+        max_points = int(os.environ.get("MEDGRAPH_COHORT_SCROLL_MAX_POINTS", "10000"))
+        per_page = 512
+        next_offset = None
+        all_points: list = []
+        while True:
+            points, next_offset = rag.client.scroll(
+                collection_name=rag.collection_name,
+                scroll_filter=qdrant_filter,
+                limit=per_page,
+                with_payload=True,
+                with_vectors=False,
+                offset=next_offset,
+            )
+            if points:
+                all_points.extend(points)
+                if len(all_points) >= max_points:
+                    break
+            if not next_offset:
+                break
+
+        # Deduplicate by patient MRN.
+        def _parse_iso_date(s: str) -> _dt | None:
+            try:
+                return _dt.fromisoformat(s)
+            except Exception:
+                try:
+                    return _dt.strptime(s, "%Y-%m-%d")
+                except Exception:
+                    return None
+
+        patients: dict[str, dict] = {}
+        for p in all_points:
+            meta = p.payload.get("metadata", {}) or {}
+            mrn = str(meta.get("patient_mrn") or "").strip()
+            if not mrn:
+                continue
+            name = str(meta.get("patient_name") or "").strip()
+            location = str(meta.get("patient_location") or "").strip()
+
+            hb = meta.get("hba1c")
+            hb_val: float | None = None
+            try:
+                hb_val = float(hb) if hb is not None else None
+            except Exception:
+                hb_val = None
+            hb_date = meta.get("hba1c_date")
+            hb_dt = _parse_iso_date(str(hb_date)) if hb_date else None
+
+            # If somehow payload doesn't include the lab (shouldn't happen with filter), skip.
+            if hb_val is None:
+                continue
+
+            prev = patients.get(mrn)
+            if not prev:
+                patients[mrn] = {
+                    "mrn": mrn,
+                    "name": name,
+                    "location": location,
+                    "hba1c": hb_val,
+                    "hba1c_date": str(hb_date or ""),
+                    "matched_on": parsed,
+                }
+                continue
+
+            # Choose "best" reading: highest HbA1c; tie-break with most recent date.
+            prev_hb = float(prev["hba1c"])
+            prev_dt = _parse_iso_date(prev.get("hba1c_date") or "")
+            better = hb_val > prev_hb
+            if not better and hb_val == prev_hb:
+                better = (hb_dt is not None and prev_dt is None) or (
+                    hb_dt is not None and prev_dt is not None and hb_dt > prev_dt
+                )
+
+            if better:
+                patients[mrn] = {
+                    "mrn": mrn,
+                    "name": name,
+                    "location": location,
+                    "hba1c": hb_val,
+                    "hba1c_date": str(hb_date or ""),
+                    "matched_on": parsed,
+                }
+
+        if not patients:
+            return "Query Results — 0 patients found.\n\nNo patients matched the structured cohort criteria."
+
+        # Render a markdown table (frontend converts GitHub-style tables to HTML).
+        header = "| MRN | Name | Location | HbA1c | HbA1c Date |\n|---|---|---|---|---|"
+        rows: list[str] = []
+        for mrn, info in sorted(patients.items(), key=lambda kv: kv[1]["hba1c"], reverse=True):
+            loc = (info.get("location") or "").replace("|", "/")
+            nm = (info.get("name") or "").replace("|", "/")
+            hb = info.get("hba1c")
+            hb_date = info.get("hba1c_date") or ""
+            hb_str = f"{hb:.3g}" if isinstance(hb, (int, float)) else str(hb)
+            rows.append(f"| {mrn} | {nm} | {loc} | {hb_str} | {hb_date} |")
+
+        total_found = len(patients)
+        interpretation = (
+            f"Found {total_found} patients matching: "
+            f"diagnosis={diagnosis_terms or ['(any diagnosis)']}, "
+            f"HbA1c {op} {parsed['lab_value']}, "
+            + (f"within {within_days} days" if within_days is not None else "no time window")
+        )
+        return f"Query Results — {total_found} patients found.\n{interpretation}\n\n{header}\n" + "\n".join(rows)
+
+    except Exception as e:
+        return f"Error executing cohort search: {e}"
+
+
 @tool
 def summarize_patient_record(patient_identifier: str) -> str:
     """Generate a comprehensive clinical summary for a patient. Input can be a patient name (e.g. 'Robert Whitfield') or MRN (e.g. 'MRN-2026-004782'). This retrieves the ENTIRE patient record and produces a thorough summary covering all clinical domains. Use this when asked to summarize, review, or give an overview of a patient's record."""
@@ -2234,20 +2787,54 @@ def summarize_uploaded_document(document_id: str) -> str:
         if not doc_id:
             return "Missing document_id. Use list_uploaded_documents() to get an ID."
 
-        # ── Cache (document-scoped) ───────────────────────────────
+        req_mode = _current_summary_mode()
+        bypass_cache = req_mode == "thinking"
+
+        # ── Layer 1: In-memory cache (document-scoped) ───────────
         with _DOC_SUMMARY_CACHE_LOCK:
-            if doc_id in _DOC_SUMMARY_CACHE:
+            if not bypass_cache and doc_id in _DOC_SUMMARY_CACHE:
                 entry = _DOC_SUMMARY_CACHE[doc_id]
+                cache_version = entry.get("pipeline_version", "legacy")
                 age_hours = (_dt.now() - entry["cached_at"]).total_seconds() / 3600
-                if age_hours <= _CACHE_TTL_HOURS:
+                if age_hours <= _CACHE_TTL_HOURS and cache_version == _SUMMARY_PIPELINE_VERSION:
                     _DOC_SUMMARY_CACHE.move_to_end(doc_id)
                     return entry["summary"]
                 del _DOC_SUMMARY_CACHE[doc_id]
+
+        # ── Layer 2: Disk cache ──────────────────────────────────
+        cache_file = _document_summary_cache_file(doc_id)
+        if not bypass_cache and cache_file.exists():
+            try:
+                cached = json.loads(cache_file.read_text(encoding="utf-8"))
+                generated_at = cached.get("generated_at", "")
+                cache_time = _dt.strptime(generated_at, "%Y-%m-%d %H:%M:%S")
+                age_hours = (_dt.now() - cache_time).total_seconds() / 3600
+                cache_version = cached.get("pipeline_version", "legacy")
+
+                if age_hours <= _CACHE_TTL_HOURS and cache_version == _SUMMARY_PIPELINE_VERSION:
+                    summary = cached["summary"]
+                    with _DOC_SUMMARY_CACHE_LOCK:
+                        _DOC_SUMMARY_CACHE[doc_id] = {
+                            "summary": summary,
+                            "cached_at": cache_time,
+                            "pipeline_version": _SUMMARY_PIPELINE_VERSION,
+                        }
+                        _DOC_SUMMARY_CACHE.move_to_end(doc_id)
+                        while len(_DOC_SUMMARY_CACHE) > _DOC_SUMMARY_CACHE_MAX_SIZE:
+                            _DOC_SUMMARY_CACHE.popitem(last=False)
+                    return summary
+
+                cache_file.unlink(missing_ok=True)
+            except (ValueError, TypeError, json.JSONDecodeError):
+                cache_file.unlink(missing_ok=True)
 
         rag = get_rag_tool_instance()
         chunks = rag.get_all_chunks_for_document(doc_id)
         if not chunks:
             return f"No indexed chunks found for document_id={doc_id}. If you just uploaded it, it may still be processing."
+
+        # Keep parity with patient summary flow by supplementing high-risk domains.
+        chunks.extend(_supplement_from_targeted_searches_for_document(rag, doc_id))
 
         # Assign global stable source IDs across the full document order
         indexed_chunks: list[tuple[int, str, dict]] = [(i, txt, meta) for i, (txt, meta) in enumerate(chunks, 1)]
@@ -2256,15 +2843,32 @@ def summarize_uploaded_document(document_id: str) -> str:
         summary, model_name = _run_structured_summary_pipeline(doc_id, indexed_chunks)
 
         elapsed = _time.perf_counter() - t0
-        logger.info("[DocSummary] document_id=%s chunks=%d elapsed=%.1fs model=%s",
-                    doc_id, len(chunks), elapsed, model_name)
+        logger.info("[DocSummary] document_id=%s chunks=%d elapsed=%.1fs model=%s mode=%s",
+                    doc_id, len(chunks), elapsed, model_name, req_mode)
 
-        # ── Cache result ─────────────────────────────────────────
-        with _DOC_SUMMARY_CACHE_LOCK:
-            _DOC_SUMMARY_CACHE[doc_id] = {"summary": summary, "cached_at": _dt.now()}
-            _DOC_SUMMARY_CACHE.move_to_end(doc_id)
-            while len(_DOC_SUMMARY_CACHE) > _DOC_SUMMARY_CACHE_MAX_SIZE:
-                _DOC_SUMMARY_CACHE.popitem(last=False)
+        # ── Cache result (memory + disk parity with patient summaries) ─────
+        if not bypass_cache:
+            now = _dt.now()
+            with _DOC_SUMMARY_CACHE_LOCK:
+                _DOC_SUMMARY_CACHE[doc_id] = {
+                    "summary": summary,
+                    "cached_at": now,
+                    "pipeline_version": _SUMMARY_PIPELINE_VERSION,
+                }
+                _DOC_SUMMARY_CACHE.move_to_end(doc_id)
+                while len(_DOC_SUMMARY_CACHE) > _DOC_SUMMARY_CACHE_MAX_SIZE:
+                    _DOC_SUMMARY_CACHE.popitem(last=False)
+
+            try:
+                cache_file.write_text(json.dumps({
+                    "document_id": doc_id,
+                    "summary": summary,
+                    "model": model_name,
+                    "generated_at": now.strftime("%Y-%m-%d %H:%M:%S"),
+                    "pipeline_version": _SUMMARY_PIPELINE_VERSION,
+                }, ensure_ascii=False), encoding="utf-8")
+            except Exception as ce:
+                logger.warning("Document disk cache write failed (non-critical): %s", ce)
 
         return summary
 

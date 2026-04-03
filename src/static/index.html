@@ -1297,6 +1297,64 @@
             background: rgba(59, 130, 246, 0.08);
         }
 
+        .reply-mode-select {
+            width: 144px;
+            height: 38px;
+            min-width: 144px;
+            border-radius: 8px;
+            border: 1.5px solid var(--border-color);
+            background: var(--bg-secondary);
+            color: var(--text-secondary);
+            font-size: 11px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: var(--transition);
+            padding: 0 28px 0 10px;
+            appearance: none;
+            background-image:
+                linear-gradient(45deg, transparent 50%, var(--text-muted) 50%),
+                linear-gradient(135deg, var(--text-muted) 50%, transparent 50%);
+            background-position:
+                calc(100% - 14px) 16px,
+                calc(100% - 9px) 16px;
+            background-size: 5px 5px, 5px 5px;
+            background-repeat: no-repeat;
+        }
+
+        .reply-mode-select:hover,
+        .reply-mode-select:focus {
+            border-color: var(--accent);
+            color: var(--accent);
+            outline: none;
+        }
+
+        .regen-btn {
+            width: 38px;
+            height: 38px;
+            min-width: 38px;
+            border-radius: 8px;
+            border: 1.5px solid var(--border-color);
+            background: var(--bg-secondary);
+            color: var(--text-muted);
+            font-size: 13px;
+            cursor: pointer;
+            transition: var(--transition);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+
+        .regen-btn:hover:not(:disabled) {
+            border-color: var(--accent);
+            color: var(--accent);
+            background: var(--accent-bg);
+        }
+
+        .regen-btn:disabled {
+            opacity: 0.35;
+            cursor: not-allowed;
+        }
+
         .tools-popup {
             position: absolute;
             bottom: calc(100% + 8px);
@@ -1669,6 +1727,8 @@
             .samples-grid { grid-template-columns: 1fr; }
             .messages-container { max-width: 100%; }
             .input-row { max-width: 100%; }
+            .provider-btn { width: 64px; min-width: 64px; }
+            .reply-mode-select { width: 120px; min-width: 120px; }
         }
     </style>
 </head>
@@ -1885,6 +1945,10 @@
                             <div class="sample-text">Show the patient's lab results and highlight any abnormal values</div>
                         </div>
                         <div class="sample-card" onclick="useSample(this)">
+                            <div class="sample-icon purple"><i class="fa-solid fa-users"></i></div>
+                            <div class="sample-text">Show all diabetic patients with HbA1c greater than 9 in the last 3 months</div>
+                        </div>
+                        <div class="sample-card" onclick="useSample(this)">
                             <div class="sample-icon teal"><i class="fa-solid fa-heart-pulse"></i></div>
                             <div class="sample-text">What was the hospital course and what procedures were performed?</div>
                         </div>
@@ -1912,7 +1976,7 @@
                                 <div class="tool-option-icon auto"><i class="fa-solid fa-wand-magic-sparkles"></i></div>
                                 <div class="tool-option-text">
                                     <div class="tool-option-name">Auto</div>
-                                    <div class="tool-option-desc">AI chooses the best tool</div>
+                                    <div class="tool-option-desc">AI chooses tools (including cohort search)</div>
                                 </div>
                                 <i class="fa-solid fa-check tool-check"></i>
                             </div>
@@ -1954,9 +2018,23 @@
                             OPENAI
                         </button>
                     </div>
+                    <div style="position:relative;flex-shrink:0;">
+                        <select id="replyModeSelect" class="reply-mode-select" title="Select reply style">
+                            <option value="">Mode: Normal</option>
+                            <option value="refine">Mode: Refine</option>
+                            <option value="shorten">Mode: Shorten</option>
+                            <option value="simplify">Mode: Simplify</option>
+                            <option value="enhance">Mode: Enhance</option>
+                            <option value="highlight">Mode: Highlight</option>
+                            <option value="regenerate">Mode: Regenerate</option>
+                        </select>
+                    </div>
                     <div class="input-wrapper">
                         <textarea id="messageInput" rows="1" placeholder="Ask about patient records, medications, lab results..." 
                                   onkeydown="handleKey(event)" oninput="autoResize(this)"></textarea>
+                        <button class="regen-btn" id="regenBtn" onclick="regenerateLastResponse()" title="Clear summary cache and regenerate last reply with fast model">
+                            <i class="fa-solid fa-rotate-right"></i>
+                        </button>
                         <button class="send-btn" id="sendBtn" onclick="sendMessage()" disabled>
                             <i class="fa-solid fa-arrow-up"></i>
                         </button>
@@ -1968,7 +2046,7 @@
                         <span id="activeToolName"></span>
                         <i class="fa-solid fa-xmark badge-x"></i>
                     </span>
-                    <kbd>Enter</kbd> to send &nbsp;&middot;&nbsp; <kbd>Shift+Enter</kbd> for new line
+                    <kbd>Enter</kbd> to send &nbsp;&middot;&nbsp; <kbd>Shift+Enter</kbd> for new line &nbsp;&middot;&nbsp; Regenerate clears summary cache and runs fast model
                 </div>
             </div>
         </main>
@@ -1998,6 +2076,7 @@
         let lastUserQuery = '';           // for feedback context
         let selectedTool = 'auto';        // tool override: auto, vector_db, web_search, sql
         let thinkingMode = false;         // deep thinking toggle
+        let selectedReplyMode = '';       // reply style hint sent to backend
         let selectedProvider = (localStorage.getItem('medgraph-llm-provider') || 'openai').toLowerCase();
         if (!['openai', 'google'].includes(selectedProvider)) selectedProvider = 'openai';
         const startTime = Date.now();
@@ -2208,6 +2287,16 @@
         const messagesContainer = document.getElementById('messagesContainer');
         const messageInput = document.getElementById('messageInput');
         const sendBtn = document.getElementById('sendBtn');
+        const regenBtn = document.getElementById('regenBtn');
+        const replyModeSelect = document.getElementById('replyModeSelect');
+
+        if (regenBtn) regenBtn.disabled = true;
+        if (replyModeSelect) {
+            selectedReplyMode = replyModeSelect.value || '';
+            replyModeSelect.addEventListener('change', () => {
+                selectedReplyMode = replyModeSelect.value || '';
+            });
+        }
 
         setInterval(() => {
             const secs = Math.floor((Date.now() - startTime) / 1000);
@@ -2416,6 +2505,7 @@
             }
             if (role === 'user') {
                 lastUserQuery = content;
+                if (regenBtn) regenBtn.disabled = false;
             }
 
             messagesContainer.appendChild(row);
@@ -2549,13 +2639,18 @@
             });
         }
 
-        async function sendMessage() {
-            const text = messageInput.value.trim();
+        async function sendMessage(options = {}) {
+            const forcedText = typeof options.forcedText === 'string' ? options.forcedText : null;
+            const oneShotReplyMode = typeof options.replyMode === 'string' ? options.replyMode : null;
+            const text = (forcedText !== null ? forcedText : messageInput.value).trim();
             if (!text) return;
+            const effectiveReplyMode = oneShotReplyMode || selectedReplyMode || null;
+            const useThinking = thinkingMode && effectiveReplyMode !== 'regenerate';
 
             messageInput.value = '';
             messageInput.style.height = 'auto';
             sendBtn.disabled = true;
+            if (regenBtn) regenBtn.disabled = true;
             messageInput.disabled = true;
 
             lastUserQuery = text;
@@ -2564,7 +2659,7 @@
 
             // Safety timeout — never leave typing indicator stuck
             // 180s for normal mode (summarization takes 30-90s + synthesis), 300s for thinking
-            const safetyTimeout = thinkingMode ? 300000 : 180000;
+            const safetyTimeout = useThinking ? 300000 : 180000;
             const safetyTimer = setTimeout(() => {
                 console.warn('[SSE] Safety timeout reached');
                 hideTyping();
@@ -2572,6 +2667,7 @@
                     addMessage('bot', 'Request timed out. The server may still be processing — please try again.');
                 }
                 messageInput.disabled = false;
+                if (regenBtn) regenBtn.disabled = !lastUserQuery;
                 messageInput.focus();
             }, safetyTimeout);
 
@@ -2584,12 +2680,16 @@
                         message: text,
                         session_id: sessionId,
                         tool_override: selectedTool === 'auto' ? null : selectedTool,
-                        thinking: thinkingMode,
+                        thinking: useThinking,
+                        reply_mode: effectiveReplyMode,
                         llm_provider: selectedProvider
                     })
                 });
 
-                if (resp.status === 401) { handleLogout(); return; }
+                if (resp.status === 401) {
+                    handleLogout();
+                    throw new Error('Unauthorized');
+                }
 
                 if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
                 console.log('[SSE] Stream connected, reading...');
@@ -2682,6 +2782,16 @@
             messageInput.disabled = false;
             messageInput.focus();
             sendBtn.disabled = !messageInput.value.trim();
+            if (regenBtn) regenBtn.disabled = !lastUserQuery;
+        }
+
+        function regenerateLastResponse() {
+            const previousQuery = (lastUserQuery || '').trim();
+            if (!previousQuery) {
+                alert('No previous user query found to regenerate.');
+                return;
+            }
+            sendMessage({ forcedText: previousQuery, replyMode: 'regenerate' });
         }
 
         async function clearChat() {
@@ -2708,6 +2818,7 @@
             document.getElementById('sessionLabel').textContent = 'Session: —';
             document.getElementById('metricSessionTokens').textContent = '—';
             document.getElementById('metricSessionCost').textContent = '—';
+            if (regenBtn) regenBtn.disabled = true;
             // Deactivate history items
             document.querySelectorAll('.history-item.active').forEach(el => el.classList.remove('active'));
             refreshUsageMetrics();
@@ -2733,7 +2844,9 @@
                 const resp = await authFetch('/api/cache/clear', { method: 'POST' });
                 const data = await resp.json();
                 if (data.status === 'ok') {
-                    alert(`Cache cleared: ${data.deleted} file(s) removed.`);
+                    const diskDeleted = Number(data.disk_deleted ?? data.deleted ?? 0);
+                    const memoryCleared = Number(data.memory_cleared ?? 0);
+                    alert(`Cache cleared: disk files=${diskDeleted}, memory entries=${memoryCleared}.`);
                 } else {
                     alert('Cache clear failed: ' + (data.message || 'Unknown error'));
                 }

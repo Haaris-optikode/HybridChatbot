@@ -30,6 +30,7 @@ import csv
 import logging
 import asyncio
 import re
+import random
 import queue as _queue_mod
 import threading as _threading
 import uvicorn
@@ -43,7 +44,7 @@ from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel
-from typing import List, Optional, Dict, Tuple
+from typing import List, Optional, Dict, Tuple, Literal
 from dotenv import load_dotenv
 from pyprojroot import here
 from slowapi import Limiter
@@ -88,7 +89,11 @@ from utils.app_utils import create_directory
 from chatbot.memory import Memory
 from langchain_core.messages import SystemMessage, HumanMessage, AIMessage
 from observability.token_cost import RequestUsageCallback, summarize_request, LEDGER, PRICING_TABLE
-from agent_graph.tool_clinical_notes_rag import set_summary_request_mode, reset_summary_request_mode
+from agent_graph.tool_clinical_notes_rag import (
+    set_summary_request_mode,
+    reset_summary_request_mode,
+    clear_summary_caches,
+)
 
 PROJECT_CFG = LoadProjectConfig()
 TOOLS_CFG = LoadToolsConfig()
@@ -286,6 +291,212 @@ def _normalize_content(content) -> str:
         return "".join(parts)
     return str(content) if content else ""
 
+
+def _sentence_candidates(text: str) -> List[str]:
+    t = re.sub(r"\s+", " ", (text or "")).strip()
+    if not t:
+        return []
+    # Prefer natural sentence boundaries; fallback to line-level chunks.
+    sents = [s.strip(" -\t\n") for s in re.split(r"(?<=[.!?])\s+", t) if s.strip()]
+    if not sents:
+        sents = [s.strip(" -\t\n") for s in t.split("\n") if s.strip()]
+    # De-duplicate while preserving order.
+    seen = set()
+    out: List[str] = []
+    for s in sents:
+        k = s.lower()
+        if k in seen:
+            continue
+        seen.add(k)
+        out.append(s)
+    return out
+
+
+def _bullets(items: List[str], max_items: int = 5) -> str:
+    cleaned = []
+    for item in items:
+        it = re.sub(r"\s+", " ", (item or "")).strip(" -\t\n")
+        if it:
+            cleaned.append(it)
+    if not cleaned:
+        return "- No key points available."
+    return "\n".join(f"- {x}" for x in cleaned[:max_items])
+
+
+def _simple_medical_to_plain(text: str) -> str:
+    replacements = {
+        r"\bHbA1c\b": "A1C blood sugar test",
+        r"\bA1C\b": "A1C blood sugar test",
+        r"\bhypertension\b": "high blood pressure",
+        r"\bdyspnea\b": "shortness of breath",
+        r"\bedema\b": "swelling",
+        r"\bmyocardial infarction\b": "heart attack",
+        r"\bBNP\b": "BNP heart strain test",
+        r"\bcreatinine\b": "kidney function blood test",
+    }
+    out = text
+    for pat, repl in replacements.items():
+        out = re.sub(pat, repl, out, flags=re.IGNORECASE)
+    return out
+
+
+def _extract_by_keywords(sentences: List[str], keywords: List[str], max_items: int = 3) -> List[str]:
+    out: List[str] = []
+    for s in sentences:
+        sl = s.lower()
+        if any(k in sl for k in keywords):
+            out.append(s)
+            if len(out) >= max_items:
+                break
+    return out
+
+
+def _followup_checks(query: str) -> List[str]:
+    q = (query or "").lower()
+    checks: List[str] = []
+    if any(k in q for k in ["hba1c", "a1c", "glucose", "diabet"]):
+        checks.extend([
+            "Confirm trend over time with exact dates (not one value).",
+            "Verify current diabetes medication plan and adherence.",
+            "Check kidney-function context when adjusting therapy.",
+        ])
+    if any(k in q for k in ["medication", "dose", "drug", "rx"]):
+        checks.extend([
+            "Confirm dose, route, and frequency against latest order timestamp.",
+            "Check duplicate therapy and high-risk interaction flags.",
+        ])
+    if any(k in q for k in ["lab", "critical", "abnormal"]):
+        checks.extend([
+            "Compare abnormal values to reference ranges and prior baseline.",
+            "Verify whether repeat testing was ordered/completed.",
+        ])
+    if not checks:
+        checks.extend([
+            "Confirm date/time recency of the cited findings.",
+            "Verify missing fields before making clinical decisions.",
+        ])
+    return checks[:4]
+
+
+def _format_highlight_mode(raw_reply: str) -> str:
+    sents = _sentence_candidates(raw_reply)
+    diagnoses = _extract_by_keywords(sents, ["diagnos", "impression", "condition", "problem"], max_items=4)
+    meds = _extract_by_keywords(sents, ["medication", "dose", "mg", "insulin", "metformin", "rx"], max_items=4)
+    labs = _extract_by_keywords(sents, ["lab", "hba1c", "a1c", "glucose", "creatinine", "bnp", "wbc", "hgb"], max_items=4)
+    plan = _extract_by_keywords(sents, ["plan", "recommend", "continue", "start", "stop", "monitor", "ordered"], max_items=4)
+    followup = _extract_by_keywords(sents, ["follow-up", "follow up", "return", "appointment", "recheck", "within"], max_items=3)
+    safety = _extract_by_keywords(sents, ["critical", "urgent", "emergency", "warning", "red flag", "severe"], max_items=3)
+
+    def _list_or_na(items: List[str]) -> str:
+        return "; ".join(items) if items else "Not documented in retrieved response."
+
+    return (
+        f"DIAGNOSES: {_list_or_na(diagnoses)}\n"
+        f"ACTIVE MEDICATIONS: {_list_or_na(meds)}\n"
+        f"CRITICAL LABS: {_list_or_na(labs)}\n"
+        f"PLAN ACTIONS: {_list_or_na(plan)}\n"
+        f"FOLLOW-UP: {_list_or_na(followup)}\n"
+        f"SAFETY ALERTS: {_list_or_na(safety)}"
+    )
+
+
+def _format_regenerate_mode(raw_reply: str, query: str) -> str:
+    sents = _sentence_candidates(raw_reply)
+    if not sents:
+        return raw_reply
+
+    # Intentionally vary structure to ensure a visible, useful alternative rendering.
+    style = random.choice(["timeline", "problem", "qa", "checklist"])
+
+    if style == "timeline":
+        ordered = sents[:6]
+        lines = [f"{i + 1}. {s}" for i, s in enumerate(ordered)]
+        return "Alternative View (Timeline):\n" + "\n".join(lines)
+
+    if style == "problem":
+        key = sents[0]
+        support = sents[1:5]
+        return (
+            "Alternative View (Problem-Oriented):\n"
+            f"Primary Problem: {key}\n"
+            "Supporting Findings:\n"
+            + _bullets(support, max_items=4)
+        )
+
+    if style == "qa":
+        q_clean = (query or "the requested clinical question").strip()
+        answer = sents[0]
+        evidence = _bullets(sents[1:5], max_items=4)
+        return (
+            "Alternative View (Q/A Brief):\n"
+            f"Q: {q_clean}\n"
+            f"A: {answer}\n"
+            "Evidence:\n"
+            f"{evidence}"
+        )
+
+    # checklist
+    items = sents[:5]
+    return (
+        "Alternative View (Clinical Checklist):\n"
+        + "\n".join(f"[ ] {x}" for x in items)
+    )
+
+
+def _apply_reply_mode_transform_sync(mode: Optional[str], raw_reply: str, query: str) -> str:
+    if not mode:
+        return raw_reply
+
+    base = (raw_reply or "").strip()
+    if not base:
+        return raw_reply
+
+    sents = _sentence_candidates(base)
+    if not sents:
+        return raw_reply
+
+    if mode == "shorten":
+        return "Short Summary:\n" + _bullets(sents, max_items=5)
+
+    if mode == "simplify":
+        plain = _simple_medical_to_plain(base)
+        plain_sents = _sentence_candidates(plain)
+        return "Plain-English Summary:\n" + _bullets(plain_sents, max_items=5)
+
+    if mode == "highlight":
+        return _format_highlight_mode(base)
+
+    if mode == "refine":
+        top = sents[:4]
+        checks = _followup_checks(query)
+        return (
+            "Refined Clinical Focus:\n"
+            "Key Points:\n"
+            f"{_bullets(top, max_items=4)}\n"
+            "Suggested Follow-Up Checks:\n"
+            f"{_bullets(checks, max_items=4)}"
+        )
+
+    if mode == "enhance":
+        top = sents[:5]
+        checks = _followup_checks(query)
+        return (
+            "Enhanced Clinical Brief:\n"
+            "Documented Findings:\n"
+            f"{_bullets(top, max_items=5)}\n"
+            "Additional Clinical Context To Verify:\n"
+            f"{_bullets(checks, max_items=4)}"
+        )
+
+    if mode == "regenerate":
+        return _format_regenerate_mode(base, query)
+
+    return raw_reply
+
+
+async def _apply_reply_mode_transform(mode: Optional[str], raw_reply: str, query: str) -> str:
+    return await asyncio.to_thread(_apply_reply_mode_transform_sync, mode, raw_reply, query)
+
 # ── Rate Limiting ────────────────────────────────────────────────────
 limiter = Limiter(key_func=get_remote_address)
 
@@ -381,9 +592,11 @@ Tools:
 5. **tavily_search_results_json(query)** — Web search for general medical knowledge.
 6. **list_uploaded_documents()** — List all uploaded documents with their IDs, filenames, and processing status.
 7. **summarize_uploaded_document(document_id)** — Generate a clinically grounded summary of ONE uploaded document by ID, with source citations.
+8. **cohort_patient_search(query)** — Population/cohort queries across many patients using diagnosis tags + numeric lab filters + time windows. Returns matched patients as a table.
 
 TOOL SELECTION (strict):
 - ANY specific question about a patient (DOB, allergies, meds, labs, vitals, diagnoses, procedures, imaging, history) → `lookup_clinical_notes`
+- Cohort/population queries asking for ALL matching patients (e.g., “show all diabetic patients with HbA1c > 9 in the last 3 months”) → `cohort_patient_search`
 - Queries asking for "all orders", "complete order list", "what was ordered", "list all medications/labs/procedures/referrals", or any COMPREHENSIVE orders request → `lookup_patient_orders`
 - ONLY when the user explicitly asks to "summarize the record", "give me an overview", or "review the full record" with NO specific analytical question → `summarize_patient_record`
 - ANALYTICAL questions that mention a patient (readmission risk, differential diagnosis, treatment effectiveness, drug interactions, risk factors, prognosis, clinical reasoning) → `lookup_clinical_notes` (use MULTIPLE targeted searches to gather all relevant data, then synthesize)
@@ -575,6 +788,14 @@ class ChatRequest(BaseModel):
     tool_override: Optional[str] = None  # "vector_db", "web_search" or None (auto)
     thinking: Optional[bool] = False     # use deeper reasoning model when True
     llm_provider: Optional[str] = None   # "openai" | "google"
+    reply_mode: Optional[Literal[
+        "refine",
+        "shorten",
+        "simplify",
+        "enhance",
+        "regenerate",
+        "highlight"
+    ]] = None
 
 
 class ChatResponse(BaseModel):
@@ -743,6 +964,42 @@ TOOL_PROMPTS = {
 }
 
 
+_REPLY_MODE_INSTRUCTIONS = {
+    "refine": (
+        "REPLY MODE: REFINE. Provide more depth on the most clinically relevant aspect of the user's request. "
+        "Keep the same grounding/citation standards; do not fabricate. If key details are missing, state they "
+        "are not documented in the retrieved context."
+    ),
+    "shorten": (
+        "REPLY MODE: SHORTEN. Condense your previous/overall answer to maximum 5 bullet points. "
+        "Prioritize diagnosis > plan > medications > follow-up. Drop all narrative prose."
+    ),
+    "simplify": (
+        "REPLY MODE: SIMPLIFY. Rewrite the answer in plain English for a patient with no medical training. "
+        "Maintain clinical accuracy (do not omit safety-critical information); remove medical jargon."
+    ),
+    "enhance": (
+        "REPLY MODE: ENHANCE. Expand with clinically useful context (e.g., typical workup, key guideline framing, "
+        "and red-flag symptoms). Clearly distinguish added context from source-documented facts. "
+        "Do not invent any new source-specific patient facts."
+    ),
+    "regenerate": (
+        "REPLY MODE: REGENERATE. Produce a fresh answer (do not reuse prior phrasing). "
+        "Prefer a different structure while preserving all facts that are present in retrieved sources. "
+        "If this request uses summary tools, server-side summary caches are cleared before generation."
+    ),
+    "highlight": (
+        "REPLY MODE: HIGHLIGHT KEY INFO. Output the most critical clinical facts in exactly this format:\n"
+        "DIAGNOSES: [list]\n"
+        "ACTIVE MEDICATIONS: [list with doses when present]\n"
+        "CRITICAL LABS: [values + dates when present]\n"
+        "PLAN ACTIONS: [ordered list]\n"
+        "FOLLOW-UP: [timeline]\n"
+        "SAFETY ALERTS: [anything requiring urgent attention]\n"
+    ),
+}
+
+
 # ── Routes ───────────────────────────────────────────────────────────
 @app.get("/")
 async def serve_frontend():
@@ -772,6 +1029,8 @@ async def chat(req: ChatRequest, request: Request, user: dict = Depends(get_curr
     validated_msg = _validate_message(req.message)
     req_provider = _normalize_provider(req.llm_provider)
     effective_tool_override = req.tool_override or _auto_tool_override(validated_msg)
+    effective_reply_mode = req.reply_mode
+    effective_thinking = bool(req.thinking)
     _audit_log("chat_request", user, tool_override=effective_tool_override or "auto", llm_provider=req_provider)
 
     # Session management
@@ -901,10 +1160,24 @@ async def chat(req: ChatRequest, request: Request, user: dict = Depends(get_curr
         )
         return ChatResponse(reply=fast_reply, session_id=sid, latency_ms=elapsed_ms, usage=request_usage)
 
+    if effective_reply_mode == "regenerate":
+        cache_result = clear_summary_caches()
+        _audit_log(
+            "regenerate_cache_cleared",
+            user,
+            session_id=sid,
+            patient_memory_cleared=cache_result.get("patient_memory_cleared", 0),
+            document_memory_cleared=cache_result.get("document_memory_cleared", 0),
+            disk_deleted=cache_result.get("disk_deleted", 0),
+        )
+
     # Build LangChain message list (trimmed to last N turns)
     system_prompt = SYSTEM_PROMPT
     if effective_tool_override and effective_tool_override in TOOL_PROMPTS:
         system_prompt += " " + TOOL_PROMPTS[effective_tool_override]
+
+    if effective_reply_mode and effective_reply_mode in _REPLY_MODE_INSTRUCTIONS:
+        system_prompt += "\n\n" + _REPLY_MODE_INSTRUCTIONS[effective_reply_mode]
 
     trimmed = _trim_history(history)
     messages = [SystemMessage(content=system_prompt)]
@@ -918,9 +1191,9 @@ async def chat(req: ChatRequest, request: Request, user: dict = Depends(get_curr
     # Run through LangGraph agent — with retry on transient LLM errors
     usage_cb = RequestUsageCallback(PRICING_TABLE)
     config = {"callbacks": [usage_cb]}
-    active_graph = thinking_graph if req.thinking else graph
+    active_graph = thinking_graph if effective_thinking else graph
     max_retries = 2
-    summary_mode_token = set_summary_request_mode("thinking" if req.thinking else "normal")
+    summary_mode_token = set_summary_request_mode("thinking" if effective_thinking else "normal")
     try:
         for attempt in range(max_retries + 1):
             try:
@@ -928,6 +1201,8 @@ async def chat(req: ChatRequest, request: Request, user: dict = Depends(get_curr
                     {"messages": messages}, config, stream_mode="values"
                 ))
                 reply = _normalize_content(events[-1]["messages"][-1].content)
+                if effective_reply_mode:
+                    reply = await _apply_reply_mode_transform(effective_reply_mode, reply, validated_msg)
                 break
             except Exception as exc:
                 exc_str = str(exc).lower()
@@ -938,9 +1213,9 @@ async def chat(req: ChatRequest, request: Request, user: dict = Depends(get_curr
                     if swapped:
                         _GRAPH_CACHE.pop(req_provider, None)
                         graph, thinking_graph = _get_graph_pair(req_provider)
-                        active_graph = thinking_graph if req.thinking else graph
+                        active_graph = thinking_graph if effective_thinking else graph
                         logger.warning("Rebuilt graphs with backup API key after rate limit")
-                    elif req.thinking and active_graph is not graph:
+                    elif effective_thinking and active_graph is not graph:
                         allow_downgrade = os.environ.get("MEDGRAPH_ALLOW_THINKING_DOWNGRADE", "").strip().lower() in ("1", "true", "yes")
                         if allow_downgrade:
                             active_graph = graph
@@ -949,10 +1224,10 @@ async def chat(req: ChatRequest, request: Request, user: dict = Depends(get_curr
                             logger.warning("Thinking model quota exhausted; preserving thinking mode (no silent downgrade)")
                             raise HTTPException(status_code=503, detail="Thinking model temporarily unavailable. Please retry in a few moments.")
                 if is_transient and attempt < max_retries:
-                    advanced_model = _advance_graph_model_fallback(req.thinking, req_provider)
+                    advanced_model = _advance_graph_model_fallback(effective_thinking, req_provider)
                     if advanced_model:
                         graph, thinking_graph = _get_graph_pair(req_provider)
-                        active_graph = thinking_graph if req.thinking else graph
+                        active_graph = thinking_graph if effective_thinking else graph
                         logger.warning("Rebuilt graphs with fallback model after transient error")
                     wait = (attempt + 1) * 5  # 5s, 10s
                     logger.warning("Transient LLM error (attempt %d/%d), retrying in %ds: %s",
@@ -1007,6 +1282,7 @@ _TOOL_STATUS = {
     "summarize_uploaded_document": "Summarizing uploaded document...",
     "lookup_clinical_notes": "Searching clinical notes...",
     "lookup_patient_orders": "Retrieving patient orders...",
+    "cohort_patient_search": "Running cohort search...",
     "list_available_patients": "Listing patients...",
     "list_uploaded_documents": "Checking uploaded documents...",
     "tavily_search_results_json": "Searching the web...",
@@ -1031,6 +1307,8 @@ async def chat_stream(req: ChatRequest, request: Request, user: dict = Depends(g
     validated_msg = _validate_message(req.message)
     req_provider = _normalize_provider(req.llm_provider)
     effective_tool_override = req.tool_override or _auto_tool_override(validated_msg)
+    effective_reply_mode = req.reply_mode
+    effective_thinking = bool(req.thinking)
     is_full_record_summary_request = effective_tool_override == "summarize"
     _audit_log("chat_stream_request", user, tool_override=effective_tool_override or "auto", llm_provider=req_provider)
 
@@ -1144,6 +1422,17 @@ async def chat_stream(req: ChatRequest, request: Request, user: dict = Depends(g
             },
         )
 
+    if effective_reply_mode == "regenerate":
+        cache_result = clear_summary_caches()
+        _audit_log(
+            "regenerate_cache_cleared",
+            user,
+            session_id=sid,
+            patient_memory_cleared=cache_result.get("patient_memory_cleared", 0),
+            document_memory_cleared=cache_result.get("document_memory_cleared", 0),
+            disk_deleted=cache_result.get("disk_deleted", 0),
+        )
+
     graph, thinking_graph = _get_graph_pair(req_provider)
 
     # Instant fast-path for simple conversational/capabilities requests.
@@ -1204,6 +1493,9 @@ async def chat_stream(req: ChatRequest, request: Request, user: dict = Depends(g
     if effective_tool_override and effective_tool_override in TOOL_PROMPTS:
         system_prompt += " " + TOOL_PROMPTS[effective_tool_override]
 
+    if effective_reply_mode and effective_reply_mode in _REPLY_MODE_INSTRUCTIONS:
+        system_prompt += "\n\n" + _REPLY_MODE_INSTRUCTIONS[effective_reply_mode]
+
     trimmed = _trim_history(history)
     messages = [SystemMessage(content=system_prompt)]
     for msg in trimmed:
@@ -1215,7 +1507,7 @@ async def chat_stream(req: ChatRequest, request: Request, user: dict = Depends(g
 
     usage_cb = RequestUsageCallback(PRICING_TABLE)
     config = {"callbacks": [usage_cb]}
-    active_graph = thinking_graph if req.thinking else graph
+    active_graph = thinking_graph if effective_thinking else graph
 
     # ── Thread-safe queue bridges sync graph → async SSE generator ──
     q: _queue_mod.Queue = _queue_mod.Queue()
@@ -1227,7 +1519,7 @@ async def chat_stream(req: ChatRequest, request: Request, user: dict = Depends(g
         max_retries = 2
         _ended = False  # Track whether we already sent end/error
 
-        summary_mode_token = set_summary_request_mode("thinking" if req.thinking else "normal")
+        summary_mode_token = set_summary_request_mode("thinking" if effective_thinking else "normal")
         try:
             for attempt in range(max_retries + 1):
                 try:
@@ -1246,7 +1538,7 @@ async def chat_stream(req: ChatRequest, request: Request, user: dict = Depends(g
                         if swapped:
                             _GRAPH_CACHE.pop(req_provider, None)
                             graph, thinking_graph = _get_graph_pair(req_provider)
-                            _graph_holder["active"] = thinking_graph if req.thinking else graph
+                            _graph_holder["active"] = thinking_graph if effective_thinking else graph
                             import time as _t
                             _t.sleep(2)
                             continue
@@ -1263,9 +1555,9 @@ async def chat_stream(req: ChatRequest, request: Request, user: dict = Depends(g
                         if swapped:
                             _GRAPH_CACHE.pop(req_provider, None)
                             graph, thinking_graph = _get_graph_pair(req_provider)
-                            _graph_holder["active"] = thinking_graph if req.thinking else graph
+                            _graph_holder["active"] = thinking_graph if effective_thinking else graph
                             logger.warning(f"Rebuilt graphs with backup API key (SSE), retrying... [{exc_str}]")
-                        elif req.thinking and _graph_holder["active"] is not graph:
+                        elif effective_thinking and _graph_holder["active"] is not graph:
                             allow_downgrade = os.environ.get("MEDGRAPH_ALLOW_THINKING_DOWNGRADE", "").strip().lower() in ("1", "true", "yes")
                             if allow_downgrade:
                                 _graph_holder["active"] = graph
@@ -1275,10 +1567,10 @@ async def chat_stream(req: ChatRequest, request: Request, user: dict = Depends(g
                                 q.put(("error", "Thinking model temporarily unavailable. Please retry in a few moments."))
                                 _ended = True
                                 return
-                        elif is_transient and _advance_graph_model_fallback(req.thinking, req_provider):
+                        elif is_transient and _advance_graph_model_fallback(effective_thinking, req_provider):
                             _GRAPH_CACHE.pop(req_provider, None)
                             graph, thinking_graph = _get_graph_pair(req_provider)
-                            _graph_holder["active"] = thinking_graph if req.thinking else graph
+                            _graph_holder["active"] = thinking_graph if effective_thinking else graph
                             logger.warning("Rebuilt graphs with fallback model (SSE), retrying...")
                         import time as _t
                         _t.sleep((attempt + 1) * 2)
@@ -1296,6 +1588,7 @@ async def chat_stream(req: ChatRequest, request: Request, user: dict = Depends(g
     async def event_generator():
         full_response = ""
         _last_ai_content = ""   # tracks latest non-empty AI text from ANY node (safety net)
+        _defer_token_emission = bool(effective_reply_mode)
         _STREAM_TIMEOUT_S = 180  # max seconds — must exceed graph timeout (180s) for summarization
         _STREAM_CHUNK_CHARS = 220
         _STREAM_CHUNK_DELAY_S = 0.05 if is_full_record_summary_request else 0.0
@@ -1373,14 +1666,16 @@ async def chat_stream(req: ChatRequest, request: Request, user: dict = Depends(g
                         # this is an intermediate multi-hop step, not the final answer.
                         if content and node_name in ("synthesizer", "chatbot") and not tool_calls:
                             full_response = content
-                            async for _chunk in _emit_token_stream(content):
-                                yield _chunk
+                            if not _defer_token_emission:
+                                async for _chunk in _emit_token_stream(content):
+                                    yield _chunk
                         elif content and node_name == "router" and not tool_calls:
                             # Router answered directly (no tool calls) — this IS the
                             # final response (e.g., greetings, simple conversation).
                             full_response = content
-                            async for _chunk in _emit_token_stream(content):
-                                yield _chunk
+                            if not _defer_token_emission:
+                                async for _chunk in _emit_token_stream(content):
+                                    yield _chunk
                         elif content and tool_calls:
                             # Intermediate step (tool invocation) — don't emit as answer,
                             # but keep tracking in _last_ai_content (already done above).
@@ -1394,12 +1689,19 @@ async def chat_stream(req: ChatRequest, request: Request, user: dict = Depends(g
         if not full_response.strip() and _last_ai_content.strip():
             logger.warning("[SSE] full_response empty after graph — using _last_ai_content fallback")
             full_response = _last_ai_content
-            async for _chunk in _emit_token_stream(full_response):
-                yield _chunk
+            if not _defer_token_emission:
+                async for _chunk in _emit_token_stream(full_response):
+                    yield _chunk
 
         # ── Fallback: if no content was collected at all ──
         if not full_response.strip():
             full_response = "I was unable to generate a response. Please try rephrasing your question or try again."
+            if not _defer_token_emission:
+                async for _chunk in _emit_token_stream(full_response):
+                    yield _chunk
+
+        if effective_reply_mode:
+            full_response = await _apply_reply_mode_transform(effective_reply_mode, full_response, validated_msg)
             async for _chunk in _emit_token_stream(full_response):
                 yield _chunk
 
@@ -1541,23 +1843,11 @@ async def metrics():
 async def clear_summary_cache(user: dict = Depends(get_current_user)):
     """Delete all cached patient summaries (both disk and in-memory) so they regenerate fresh."""
     _audit_log("cache_cleared", user)
-    # Clear in-memory cache
-    from agent_graph.tool_clinical_notes_rag import _memory_cache, _memory_cache_lock
-    with _memory_cache_lock:
-        memory_cleared = len(_memory_cache)
-        _memory_cache.clear()
-
-    # Clear disk cache
-    cache_dir = Path(here("data")) / "summary_cache"
-    disk_deleted = 0
-    if cache_dir.exists():
-        for f in cache_dir.glob("*.json"):
-            try:
-                f.unlink()
-                disk_deleted += 1
-            except Exception:
-                pass
-    return {"status": "ok", "disk_deleted": disk_deleted, "memory_cleared": memory_cleared}
+    result = clear_summary_caches()
+    # Keep backward-compatible aliases for existing UI handlers.
+    result["memory_cleared"] = int(result.get("patient_memory_cleared", 0)) + int(result.get("document_memory_cleared", 0))
+    result["deleted"] = int(result.get("disk_deleted", 0))
+    return result
 
 
 # ── Delete Chat History API ───────────────────────────────────────────

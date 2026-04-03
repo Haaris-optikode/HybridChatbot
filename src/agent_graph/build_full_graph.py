@@ -7,6 +7,7 @@ from langchain_core.messages import ToolMessage as _ToolMessage, AIMessage as _A
 from agent_graph.tool_clinical_notes_rag import (
     lookup_clinical_notes,
     lookup_patient_orders,
+    cohort_patient_search,
     summarize_patient_record,
     summarize_uploaded_document,
     list_available_patients,
@@ -118,6 +119,7 @@ def build_graph(thinking_mode: bool = False):
     tools = [search_tool,
              lookup_clinical_notes,
              lookup_patient_orders,
+             cohort_patient_search,
              summarize_patient_record,
              summarize_uploaded_document,
              list_available_patients,
@@ -128,7 +130,87 @@ def build_graph(thinking_mode: bool = False):
     router_with_tools = router_llm.bind_tools(tools)
 
     def router(state: State):
-        """Fast tool-routing: picks which tool to call."""
+        """Fast tool-routing + deterministic decomposition for multi-part questions."""
+        # Detect last user query text.
+        last_user_text = ""
+        for m in reversed(state.get("messages", [])):
+            # Avoid depending on exact message classes; content is enough.
+            if getattr(m, "type", "") == "human" or m.__class__.__name__ == "HumanMessage":
+                last_user_text = getattr(m, "content", "") or ""
+                break
+        q_lower = (last_user_text or "").lower()
+
+        # Heuristic: multi-part analytical questions often contain multiple domains.
+        domains = set()
+        if any(k in q_lower for k in ["medication", "medications", "meds", "drug", "rx", "prescription"]):
+            domains.add("meds")
+        if any(k in q_lower for k in ["lab", "labs", "hba1c", "a1c", "cbc", "bmp", "cmp", "creatinine", "glucose", "test", "ordered"]):
+            domains.add("labs")
+        if any(k in q_lower for k in ["diagnosis", "diagnoses", "impression", "differential", "icd"]):
+            domains.add("dx")
+        if any(k in q_lower for k in ["procedure", "procedures", "surgery", "imaging", "ct", "mri", "x-ray", "ultrasound", "referral", "consult"]):
+            domains.add("proc")
+
+        should_decompose = (
+            (" and " in q_lower or "&" in q_lower)
+            and len(domains) >= 2
+            and ("patients" not in q_lower)
+            and ("cohort" not in q_lower)
+            and ("diabetic" not in q_lower or "hba1c" in q_lower)
+        )
+
+        if should_decompose and last_user_text.strip():
+            # Ask the router LLM for sub-queries, then trigger multiple lookup_clinical_notes calls.
+            try:
+                from langchain_core.messages import SystemMessage as _SysMsg2, HumanMessage as _HumanMsg2
+
+                decomp_prompt = _SysMsg2(
+                    content=(
+                        "You are a clinical query decomposition engine. "
+                        "Decompose the user's question into focused sub-queries optimized for lookup_clinical_notes. "
+                        "Each sub-query must be a standalone search for one clinical domain "
+                        "(e.g., medications, labs, diagnoses, procedures) and keep the original time context "
+                        "(e.g., 'last encounter', 'during hospitalization'). "
+                        "Return STRICT JSON only in this format: {\"sub_queries\": [\"...\", \"...\" ]}."
+                    )
+                )
+                decomp_user = _HumanMsg2(content=last_user_text)
+                raw = router_llm.invoke([decomp_prompt, decomp_user]).content
+
+                # Safe JSON extraction (strip fences).
+                t = str(raw or "").strip()
+                t = t.replace("```json", "```").replace("```", "")
+                if not t.startswith("{"):
+                    m = _json.search(r"\{[\s\S]*\}", t) if hasattr(_json, "search") else None
+                    # Fallback to no match.
+                try:
+                    obj = _json.loads(t)
+                except Exception:
+                    # Last chance: extract first JSON object substring.
+                    import re as _re2
+                    m2 = _re2.search(r"\{[\s\S]*\}", str(raw or ""))
+                    if not m2:
+                        raise
+                    obj = _json.loads(m2.group(0))
+
+                sub_queries = obj.get("sub_queries") or []
+                sub_queries = [str(s).strip() for s in sub_queries if str(s).strip()]
+                if len(sub_queries) >= 2:
+                    tool_calls = []
+                    for i, sq in enumerate(sub_queries[:4]):
+                        tool_calls.append(
+                            {
+                                "name": "lookup_clinical_notes",
+                                "args": {"query": sq, "document_id": ""},
+                                "id": f"decomp_{i}",
+                            }
+                        )
+                    return {"messages": [_AIMessage(content="", tool_calls=tool_calls)]}
+            except Exception:
+                # Fall back to normal router behavior.
+                pass
+
+        # Default: rely on the router's tool selection.
         return {"messages": [router_with_tools.invoke(state["messages"])]}
 
     # Synthesizer: generates final answer from tool output.
@@ -230,6 +312,7 @@ def build_graph(thinking_mode: bool = False):
             search_tool,
             lookup_clinical_notes,
             lookup_patient_orders,
+            cohort_patient_search,
             summarize_patient_record,
             summarize_uploaded_document,
             list_available_patients,

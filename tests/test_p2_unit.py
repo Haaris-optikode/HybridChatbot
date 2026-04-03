@@ -435,6 +435,268 @@ class TestPrometheusMetrics:
 
 
 # ═══════════════════════════════════════════════════════════════════════
+# New P2 unit tests — cohort + semantic fallback + reply_mode injection
+# ═══════════════════════════════════════════════════════════════════════
+
+class TestSemanticChunkingFallbackHook:
+    """Ensure semantic fallback is used when no headings are detectable."""
+
+    def test_semantic_fallback_called_and_labelled(self):
+        from document_processing.adaptive_chunker import AdaptiveDocumentChunker
+
+        chunker = AdaptiveDocumentChunker(chunk_size=500, chunk_overlap=50)
+
+        # Force semantic fallback output deterministically.
+        chunker._split_semantic_fallback = lambda _text: ["PART_A", "PART_B"]
+
+        narrative = (
+            "The patient is a 54-year-old male presenting with fatigue and intermittent headaches. "
+            "No structured headings are included in this narrative text. "
+            "It should fall back to semantic splitting."
+        )
+        sections = chunker._split_by_headers(narrative)
+        labels = [s[0] for s in sections]
+        assert any(l.startswith("Narrative Semantic Part 1") for l in labels)
+        assert any(l.startswith("Narrative Semantic Part 2") for l in labels)
+
+
+class TestCohortQueryParsing:
+    def test_parse_hba1c_diabetes_time_window(self):
+        from agent_graph.tool_clinical_notes_rag import _parse_cohort_query
+
+        q = "Show all diabetic patients with HbA1c > 9 in the last 3 months"
+        spec = _parse_cohort_query(q)
+        assert spec is not None
+        assert "diabetes" in (spec["diagnosis_terms"] or [])
+        assert spec["lab_name"] == "hba1c"
+        assert spec["lab_operator"] == "gt"
+        assert spec["lab_value"] == 9.0
+        assert spec["within_days"] == 90
+        assert spec["date_field"] == "hba1c_date"
+
+
+class TestCohortExecutionMockedQdrant:
+    def test_filter_builder_and_dedupe_best_hba1c(self, monkeypatch):
+        from agent_graph import tool_clinical_notes_rag as t
+        from document_processing import PAYLOAD_SCHEMA_VERSION
+
+        class FakePoint:
+            def __init__(self, payload):
+                self.payload = payload
+
+        class FakeClient:
+            def __init__(self):
+                self.filters = []
+
+            def scroll(
+                self,
+                collection_name,
+                scroll_filter,
+                limit,
+                with_payload=True,
+                with_vectors=False,
+                offset=None,
+            ):
+                self.filters.append(scroll_filter)
+                # First call: schema existence check.
+                if len(self.filters) == 1:
+                    return (
+                        [FakePoint(payload={"metadata": {"payload_schema_version": PAYLOAD_SCHEMA_VERSION}})],
+                        None,
+                    )
+
+                # Second call: actual cohort query results (two chunks for same patient).
+                points = [
+                    FakePoint(
+                        payload={
+                            "metadata": {
+                                "patient_mrn": "MRN-1",
+                                "patient_name": "Alice",
+                                "patient_location": "Unit A",
+                                "hba1c": 8.0,
+                                "hba1c_date": "2026-01-01T00:00:00",
+                                "payload_schema_version": PAYLOAD_SCHEMA_VERSION,
+                                "diagnoses_text": ["diabetes"],
+                            }
+                        }
+                    ),
+                    FakePoint(
+                        payload={
+                            "metadata": {
+                                "patient_mrn": "MRN-1",
+                                "patient_name": "Alice",
+                                "patient_location": "Unit A",
+                                "hba1c": 10.0,
+                                "hba1c_date": "2026-01-15T00:00:00",
+                                "payload_schema_version": PAYLOAD_SCHEMA_VERSION,
+                                "diagnoses_text": ["diabetes"],
+                            }
+                        }
+                    ),
+                ]
+                return (points, None)
+
+        class FakeRag:
+            def __init__(self):
+                self.collection_name = "fake_collection"
+                self.client = FakeClient()
+
+        fake_rag = FakeRag()
+        monkeypatch.setattr(t, "get_rag_tool_instance", lambda: fake_rag)
+
+        q = "Show all diabetic patients with HbA1c > 9 in the last 3 months"
+        tool = t.cohort_patient_search
+        if hasattr(tool, "invoke"):
+            out = tool.invoke({"query": q})
+        else:
+            out = tool(q)
+
+        assert "Query Results —" in out
+        # Dedupe must pick the highest HbA1c (10.0)
+        assert "| MRN-1 | Alice | Unit A | 10 | 2026-01-15T00:00:00 |" in out
+
+        # Validate filter builder: ensure hba1c + hba1c_date constraints exist.
+        assert len(fake_rag.client.filters) >= 2
+        cohort_filter = fake_rag.client.filters[1]
+        must = getattr(cohort_filter, "must", [])
+        keys = [getattr(c, "key", None) for c in must]
+        assert "metadata.hba1c" in keys
+        assert "metadata.hba1c_date" in keys
+
+    def test_no_time_window_query_no_datetime_scope_error(self, monkeypatch):
+        from agent_graph import tool_clinical_notes_rag as t
+        from document_processing import PAYLOAD_SCHEMA_VERSION
+
+        class FakePoint:
+            def __init__(self, payload):
+                self.payload = payload
+
+        class FakeClient:
+            def __init__(self):
+                self.filters = []
+
+            def scroll(
+                self,
+                collection_name,
+                scroll_filter,
+                limit,
+                with_payload=True,
+                with_vectors=False,
+                offset=None,
+            ):
+                self.filters.append(scroll_filter)
+                if len(self.filters) == 1:
+                    return (
+                        [FakePoint(payload={"metadata": {"payload_schema_version": PAYLOAD_SCHEMA_VERSION}})],
+                        None,
+                    )
+
+                points = [
+                    FakePoint(
+                        payload={
+                            "metadata": {
+                                "patient_mrn": "MRN-2",
+                                "patient_name": "Bob",
+                                "patient_location": "Unit B",
+                                "hba1c": 7.2,
+                                "hba1c_date": "2026-02-01T00:00:00",
+                                "payload_schema_version": PAYLOAD_SCHEMA_VERSION,
+                                "diagnoses_text": ["diabetes"],
+                            }
+                        }
+                    )
+                ]
+                return (points, None)
+
+        class FakeRag:
+            def __init__(self):
+                self.collection_name = "fake_collection"
+                self.client = FakeClient()
+
+        monkeypatch.setattr(t, "get_rag_tool_instance", lambda: FakeRag())
+
+        q = "Show all diabetic patients with HbA1c > 6"
+        tool = t.cohort_patient_search
+        out = tool.invoke({"query": q}) if hasattr(tool, "invoke") else tool(q)
+
+        assert "Error executing cohort search" not in out
+        assert "Query Results —" in out
+
+
+class TestUploadedDocumentSummaryParity:
+    def test_uploaded_summary_uses_targeted_supplement(self, monkeypatch):
+        from agent_graph import tool_clinical_notes_rag as t
+
+        class FakeRag:
+            def get_all_chunks_for_document(self, _doc_id):
+                return [("Primary document chunk", {"section_title": "Main", "page_number": 1})]
+
+            def search(self, query, document_id=None):
+                assert document_id == "doc-1"
+                if "allergies" in query:
+                    return "[Source 1 | Section: Allergies | Page 2]\nPenicillin allergy documented"
+                return "No relevant documents found for query"
+
+        seen = {"count": 0}
+
+        def _fake_pipeline(_entity_id, indexed_chunks, hierarchical=True):
+            seen["count"] = len(indexed_chunks)
+            return "SUMMARY", "mock-model"
+
+        monkeypatch.setattr(t, "get_rag_tool_instance", lambda: FakeRag())
+        monkeypatch.setattr(t, "_run_structured_summary_pipeline", _fake_pipeline)
+
+        with t._DOC_SUMMARY_CACHE_LOCK:
+            t._DOC_SUMMARY_CACHE.clear()
+
+        # Force cache bypass so this test remains deterministic even if a
+        # prior run left a valid disk cache entry for the same document ID.
+        token = t.set_summary_request_mode("thinking")
+        try:
+            tool = t.summarize_uploaded_document
+            out = tool.invoke({"document_id": "doc-1"}) if hasattr(tool, "invoke") else tool("doc-1")
+        finally:
+            t.reset_summary_request_mode(token)
+
+        assert out == "SUMMARY"
+        assert seen["count"] >= 2  # base chunk + supplemental chunk
+
+    def test_uploaded_summary_thinking_mode_bypasses_cache(self, monkeypatch):
+        from agent_graph import tool_clinical_notes_rag as t
+
+        class FakeRag:
+            def get_all_chunks_for_document(self, _doc_id):
+                return [("Fresh document chunk", {"section_title": "Main", "page_number": 1})]
+
+            def search(self, query, document_id=None):
+                return "No relevant documents found for query"
+
+        monkeypatch.setattr(t, "get_rag_tool_instance", lambda: FakeRag())
+        monkeypatch.setattr(
+            t,
+            "_run_structured_summary_pipeline",
+            lambda _entity_id, _chunks, hierarchical=True: ("FRESH", "mock-model"),
+        )
+
+        with t._DOC_SUMMARY_CACHE_LOCK:
+            t._DOC_SUMMARY_CACHE.clear()
+            t._DOC_SUMMARY_CACHE["doc-2"] = {
+                "summary": "CACHED",
+                "cached_at": t._dt.now(),
+                "pipeline_version": t._SUMMARY_PIPELINE_VERSION,
+            }
+
+        token = t.set_summary_request_mode("thinking")
+        try:
+            tool = t.summarize_uploaded_document
+            out = tool.invoke({"document_id": "doc-2"}) if hasattr(tool, "invoke") else tool("doc-2")
+        finally:
+            t.reset_summary_request_mode(token)
+
+        assert out == "FRESH"
+
+
+# ═══════════════════════════════════════════════════════════════════════
 # Integration Tests — require FastAPI TestClient (no live server needed)
 # ═══════════════════════════════════════════════════════════════════════
 
@@ -454,6 +716,192 @@ def auth_header(client):
     assert r.status_code == 200
     token = r.json()["token"]
     return {"Authorization": f"Bearer {token}"}
+
+
+class TestReplyModeAPI:
+    class _FakeGraph:
+        def __init__(self, response_text="OK"):
+            self.last_system_prompt = None
+            self.called = False
+            self.response_text = response_text
+
+        def stream(self, payload, _config, stream_mode="values"):
+            self.called = True
+            msgs = payload.get("messages") or []
+            if msgs:
+                self.last_system_prompt = msgs[0].content
+            from langchain_core.messages import AIMessage
+            yield {"messages": [AIMessage(content=self.response_text)]}
+
+    def test_invalid_reply_mode_returns_422(self, client, auth_header):
+        r = client.post(
+            "/api/chat",
+            headers=auth_header,
+            json={"message": "Any lab results?", "reply_mode": "nope"},
+        )
+        assert r.status_code == 422
+
+    def test_reply_mode_injected_into_system_prompt(self, client, auth_header, monkeypatch):
+        import api as api_mod
+
+        fake_normal = self._FakeGraph()
+        fake_thinking = self._FakeGraph()
+
+        monkeypatch.setattr(api_mod, "_get_graph_pair", lambda _provider: (fake_normal, fake_thinking))
+
+        r = client.post(
+            "/api/chat",
+            headers=auth_header,
+            json={
+                "message": "What is the patient's HbA1c?",
+                "tool_override": "vector_db",
+                "reply_mode": "shorten",
+                "thinking": False,
+                "llm_provider": "openai",
+            },
+        )
+        assert r.status_code == 200
+        assert fake_normal.called is True
+        assert "REPLY MODE: SHORTEN" in (fake_normal.last_system_prompt or "")
+
+    def test_regenerate_clears_cache_and_uses_fast_graph(self, client, auth_header, monkeypatch):
+        import api as api_mod
+
+        fake_normal = self._FakeGraph()
+        fake_thinking = self._FakeGraph()
+        cache_clear_calls = {"n": 0}
+
+        monkeypatch.setattr(api_mod, "_get_graph_pair", lambda _provider: (fake_normal, fake_thinking))
+        monkeypatch.setattr(
+            api_mod,
+            "clear_summary_caches",
+            lambda: cache_clear_calls.__setitem__("n", cache_clear_calls["n"] + 1) or {
+                "status": "ok",
+                "disk_deleted": 0,
+                "patient_memory_cleared": 0,
+                "document_memory_cleared": 0,
+            },
+        )
+
+        r = client.post(
+            "/api/chat",
+            headers=auth_header,
+            json={
+                "message": "What is the patient's HbA1c?",
+                "tool_override": "vector_db",
+                "reply_mode": "regenerate",
+                "thinking": False,
+                "llm_provider": "openai",
+            },
+        )
+        assert r.status_code == 200
+        assert cache_clear_calls["n"] == 1
+        assert fake_normal.called is True
+        assert fake_thinking.called is False
+        assert "REPLY MODE: REGENERATE" in (fake_normal.last_system_prompt or "")
+
+    def test_shorten_mode_returns_bulleted_summary(self, client, auth_header, monkeypatch):
+        import api as api_mod
+
+        long_answer = (
+            "Patient has type 2 diabetes with elevated HbA1c. "
+            "Current regimen includes metformin and insulin. "
+            "Recent labs also show mild renal impairment. "
+            "Follow-up is advised in two weeks. "
+            "Medication adherence counseling was documented. "
+            "No immediate safety alert was documented."
+        )
+        fake_normal = self._FakeGraph(response_text=long_answer)
+        fake_thinking = self._FakeGraph(response_text=long_answer)
+        monkeypatch.setattr(api_mod, "_get_graph_pair", lambda _provider: (fake_normal, fake_thinking))
+
+        r = client.post(
+            "/api/chat",
+            headers=auth_header,
+            json={
+                "message": "For patient MRN-1, summarize key diabetes points and HbA1c context.",
+                "reply_mode": "shorten",
+                "tool_override": "vector_db",
+                "thinking": False,
+                "llm_provider": "openai",
+            },
+        )
+        assert r.status_code == 200
+        body = r.json().get("reply", "")
+        assert body.startswith("Short Summary:")
+        assert "- " in body
+
+    def test_highlight_mode_returns_required_sections(self, client, auth_header, monkeypatch):
+        import api as api_mod
+
+        rich_answer = (
+            "Diagnosis: Type 2 diabetes mellitus. "
+            "Medication: Metformin 500 mg twice daily. "
+            "Lab: HbA1c 9.2%. "
+            "Plan: Continue therapy and monitor. "
+            "Follow-up in 2 weeks. "
+            "Critical alert: none documented."
+        )
+        fake_normal = self._FakeGraph(response_text=rich_answer)
+        fake_thinking = self._FakeGraph(response_text=rich_answer)
+        monkeypatch.setattr(api_mod, "_get_graph_pair", lambda _provider: (fake_normal, fake_thinking))
+
+        r = client.post(
+            "/api/chat",
+            headers=auth_header,
+            json={
+                "message": "Highlight key clinical details",
+                "reply_mode": "highlight",
+                "thinking": False,
+                "llm_provider": "openai",
+            },
+        )
+        assert r.status_code == 200
+        body = r.json().get("reply", "")
+        assert "DIAGNOSES:" in body
+        assert "ACTIVE MEDICATIONS:" in body
+        assert "CRITICAL LABS:" in body
+        assert "PLAN ACTIONS:" in body
+        assert "FOLLOW-UP:" in body
+        assert "SAFETY ALERTS:" in body
+
+    def test_regenerate_mode_returns_alternate_structure(self, client, auth_header, monkeypatch):
+        import api as api_mod
+
+        answer = (
+            "Patient has diabetes with poor glycemic control. "
+            "HbA1c remains elevated. "
+            "Continue medications and monitor closely."
+        )
+        fake_normal = self._FakeGraph(response_text=answer)
+        fake_thinking = self._FakeGraph(response_text=answer)
+        monkeypatch.setattr(api_mod, "_get_graph_pair", lambda _provider: (fake_normal, fake_thinking))
+        monkeypatch.setattr(
+            api_mod,
+            "clear_summary_caches",
+            lambda: {
+                "status": "ok",
+                "disk_deleted": 0,
+                "patient_memory_cleared": 0,
+                "document_memory_cleared": 0,
+            },
+        )
+
+        r = client.post(
+            "/api/chat",
+            headers=auth_header,
+            json={
+                "message": "For patient MRN-1, regenerate the HbA1c answer.",
+                "reply_mode": "regenerate",
+                "tool_override": "vector_db",
+                "thinking": False,
+                "llm_provider": "openai",
+            },
+        )
+        assert r.status_code == 200
+        body = r.json().get("reply", "")
+        assert body != answer
+        assert "Alternative View" in body
 
 
 class TestHealthEndpoint:
