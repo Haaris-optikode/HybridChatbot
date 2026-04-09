@@ -231,7 +231,23 @@ class ClinicalNotesRAGTool:
         except Exception as e:
             logger.warning("BM25 index build failed: %s", e)
 
-    def search(self, query: str, document_id: str = None) -> str:
+    @staticmethod
+    def _doc_scope_key(doc) -> tuple[str, str, str, int]:
+        """Return a stable scope key for retrieval and neighbor expansion."""
+        meta = getattr(doc, "metadata", {}) or {}
+        chunk_index = meta.get("chunk_index", -1)
+        try:
+            chunk_index = int(chunk_index)
+        except Exception:
+            chunk_index = -1
+        return (
+            str(meta.get("patient_mrn", "") or ""),
+            str(meta.get("document_id", "") or ""),
+            str(meta.get("filename", "") or ""),
+            chunk_index,
+        )
+
+    def search(self, query: str, document_id: str = None, patient_mrn: str = None) -> str:
         """
         Hybrid retrieval: dense MMR + BM25 sparse + RRF fusion + cross-encoder reranking.
         Optimized for latency: reduced candidate pool, efficient reranking.
@@ -243,16 +259,26 @@ class ClinicalNotesRAGTool:
         try:
             t0 = _time.perf_counter()
 
-            # Build optional Qdrant filter for document scoping
+            # Build optional Qdrant filter for patient/document scoping.
             _qdrant_filter = None
-            if document_id:
+            must_conditions = []
+            if patient_mrn or document_id:
                 from qdrant_client.models import Filter, FieldCondition, MatchValue
-                _qdrant_filter = Filter(
-                    must=[FieldCondition(
-                        key="metadata.document_id",
-                        match=MatchValue(value=document_id),
-                    )]
-                )
+                if patient_mrn:
+                    must_conditions.append(
+                        FieldCondition(
+                            key="metadata.patient_mrn",
+                            match=MatchValue(value=patient_mrn),
+                        )
+                    )
+                if document_id:
+                    must_conditions.append(
+                        FieldCondition(
+                            key="metadata.document_id",
+                            match=MatchValue(value=document_id),
+                        )
+                    )
+                _qdrant_filter = Filter(must=must_conditions)
 
             # Stage 1: Dense MMR search (original query — no augmentation)
             search_kwargs = {
@@ -277,6 +303,10 @@ class ClinicalNotesRAGTool:
                     scores = self._bm25_index.get_scores(tokenized_query)
                     top_indices = np.argsort(scores)[::-1][:self.fetch_k]
                     bm25_docs = [self._bm25_docs[i] for i in top_indices if scores[i] > 0]
+                    if patient_mrn:
+                        bm25_docs = [
+                            d for d in bm25_docs if d.metadata.get("patient_mrn") == patient_mrn
+                        ]
                     # Filter by document_id if scoped
                     if document_id:
                         bm25_docs = [d for d in bm25_docs
@@ -320,7 +350,11 @@ class ClinicalNotesRAGTool:
             # For each retrieved doc, also pull its chunk_index ± 1 neighbor
             # from the same source file so the LLM gets complete context
             # (e.g., full Day 7 SOAP with Assessment & Plan).
-            docs = self._expand_with_neighbors(docs)
+            docs = self._expand_with_neighbors(
+                docs,
+                patient_mrn=patient_mrn,
+                document_id=document_id,
+            )
 
             t_total = _time.perf_counter() - t0
             logger.info("Search: %.2fs (dense=%.2fs, bm25=%.2fs, rerank+fuse+expand=%.2fs) → %d docs",
@@ -351,14 +385,22 @@ class ClinicalNotesRAGTool:
 
         for rank_list in rank_lists:
             for rank, doc in enumerate(rank_list):
-                key = hashlib.md5(doc.page_content.encode()).hexdigest()
+                meta = getattr(doc, "metadata", {}) or {}
+                key_seed = "||".join([
+                    str(meta.get("patient_mrn", "") or ""),
+                    str(meta.get("document_id", "") or ""),
+                    str(meta.get("filename", "") or ""),
+                    str(meta.get("chunk_index", "") or ""),
+                    str(getattr(doc, "page_content", "") or ""),
+                ])
+                key = hashlib.md5(key_seed.encode()).hexdigest()
                 scores[key] = scores.get(key, 0.0) + 1.0 / (k + rank + 1)
                 doc_map[key] = doc
 
         sorted_keys = sorted(scores, key=scores.get, reverse=True)
         return [doc_map[k] for k in sorted_keys]
 
-    def _expand_with_neighbors(self, docs: list) -> list:
+    def _expand_with_neighbors(self, docs: list, patient_mrn: str = None, document_id: str = None) -> list:
         """Expand each retrieved document with its ±1 chunk-index neighbors.
 
         Clinical SOAP notes and long sections often split across consecutive
@@ -376,22 +418,29 @@ class ClinicalNotesRAGTool:
         if not self._bm25_docs:
             return docs
 
-        # Build a lookup: (filename, chunk_index) → Document
-        idx_lookup: dict[tuple[str, int], object] = {}
+        # Build a lookup: (patient_mrn, document_id, filename, chunk_index) → Document
+        idx_lookup: dict[tuple[str, str, str, int], object] = {}
         for d in self._bm25_docs:
-            key = (d.metadata.get("filename", ""), d.metadata.get("chunk_index", -1))
+            if patient_mrn and d.metadata.get("patient_mrn") != patient_mrn:
+                continue
+            if document_id and d.metadata.get("document_id") != document_id:
+                continue
+            key = self._doc_scope_key(d)
             idx_lookup[key] = d
 
         # Collect original + neighbor chunk keys (deduplicated, preserving order)
-        seen_keys: set[tuple[str, int]] = set()
-        expanded_keys: list[tuple[str, int]] = []
+        seen_keys: set[tuple[str, str, str, int]] = set()
+        expanded_keys: list[tuple[str, str, str, int]] = []
 
         for d in docs:
-            fname = d.metadata.get("filename", "")
-            cidx = d.metadata.get("chunk_index", -1)
+            if patient_mrn and d.metadata.get("patient_mrn") != patient_mrn:
+                continue
+            if document_id and d.metadata.get("document_id") != document_id:
+                continue
+            patient_key, doc_key, fname, cidx = self._doc_scope_key(d)
             if cidx < 0:
                 # No chunk_index metadata — keep original doc as-is
-                key = (fname, cidx)
+                key = (patient_key, doc_key, fname, cidx)
                 if key not in seen_keys:
                     seen_keys.add(key)
                     expanded_keys.append(key)
@@ -400,27 +449,27 @@ class ClinicalNotesRAGTool:
 
             # Add prev, current, next chunk (if they exist in the corpus)
             for offset in (-1, 0, 1):
-                nkey = (fname, cidx + offset)
+                nkey = (patient_key, doc_key, fname, cidx + offset)
                 if nkey not in seen_keys and nkey in idx_lookup:
                     seen_keys.add(nkey)
                     expanded_keys.append(nkey)
 
-        # Sort by (filename, chunk_index) for coherent reading order
-        expanded_keys.sort(key=lambda k: (k[0], k[1]))
+        # Sort by scope + chunk index for coherent reading order
+        expanded_keys.sort(key=lambda k: (k[0], k[1], k[2], k[3]))
 
         # Build expanded doc list, merging overlap between consecutive chunks
         expanded: list[object] = []
         prev_content: str | None = None
-        prev_key: tuple[str, int] | None = None
+        prev_key: tuple[str, str, str, int] | None = None
 
         for key in expanded_keys:
             d = idx_lookup[key]
             content = d.page_content
-            fname, cidx = key
+            _, _, fname, cidx = key
 
             # If consecutive chunks from same file, strip overlap
-            if (prev_key and prev_key[0] == fname
-                    and prev_key[1] == cidx - 1 and prev_content):
+            if (prev_key and prev_key[2] == fname
+                    and prev_key[3] == cidx - 1 and prev_content):
                 overlap = self._find_overlap(prev_content, content)
                 if overlap > 0:
                     content = content[overlap:]
@@ -2175,7 +2224,7 @@ def _supplement_from_targeted_searches(rag: "ClinicalNotesRAGTool", patient_mrn:
     seen = set()
     for q in queries:
         try:
-            text = rag.search(q)
+            text = rag.search(q, patient_mrn=patient_mrn)
         except Exception:
             continue
         if not text or text.startswith("No relevant"):
@@ -2390,8 +2439,8 @@ def _map_reduce_summarize(patient_mrn: str, full_record: str) -> tuple:
 
 
 @tool
-def lookup_clinical_notes(query: str, document_id: str = "") -> str:
-    """Search among clinical notes to find specific information. Use this for ANY targeted question about patient data including: date of birth, demographics, allergies, medications, labs, vitals, procedures, diagnoses, imaging, or any other specific clinical detail. Input should be the clinical question. Optionally pass document_id to restrict search to a specific uploaded document (get IDs from list_uploaded_documents)."""
+def lookup_clinical_notes(query: str, patient_mrn: str = "", document_id: str = "") -> str:
+    """Search among clinical notes for a specific patient's data. For patient-specific EHR questions, pass the resolved `patient_mrn` so retrieval stays isolated to one patient. Optionally pass `document_id` to further restrict search to a specific uploaded document (get IDs from list_uploaded_documents)."""
     try:
         import signal
         import threading
@@ -2402,6 +2451,7 @@ def lookup_clinical_notes(query: str, document_id: str = "") -> str:
         
         # Use document_id filter if provided (strip whitespace, treat empty as None)
         doc_filter = document_id.strip() if document_id else None
+        mrn_filter = patient_mrn.strip() if patient_mrn else None
         
         def _is_unhelpful_search_result(text: str) -> bool:
             t = (text or "").strip().lower()
@@ -2417,7 +2467,7 @@ def lookup_clinical_notes(query: str, document_id: str = "") -> str:
 
         def _search_with_timeout():
             try:
-                result[0] = rag.search(query, document_id=doc_filter)
+                result[0] = rag.search(query, document_id=doc_filter, patient_mrn=mrn_filter)
             except Exception as e:
                 exception[0] = e
         
@@ -2435,7 +2485,7 @@ def lookup_clinical_notes(query: str, document_id: str = "") -> str:
         # Production fallback: if broad search misses and no explicit document_id
         # was provided, try patient-aware document-scoped retrieval on likely
         # uploaded documents inferred from the query itself.
-        if not doc_filter and _is_unhelpful_search_result(result[0] or ""):
+        if not doc_filter and not mrn_filter and _is_unhelpful_search_result(result[0] or ""):
             try:
                 candidate_doc_ids = rag.find_documents_for_patient_identifier(query, max_docs=3)
                 fallback_hits: list[str] = []

@@ -339,17 +339,37 @@ class AdaptiveDocumentChunker:
         when there are no markdown headers and no numbered section titles.
 
         Examples: SOAP (`Subjective`, `Objective`, `Assessment`, `Plan`),
-        HPI, ROS, Impression.
+        HPI, ROS, Impression, PMH/FH/SH, medication/allergy sections, and
+        discharge/follow-up headings. Supports both:
+          - full-line headings: `Assessment:`
+          - inline headings: `Assessment: Patient stable`
         """
-        # Headings often appear as a full line like "Subjective:" or "Assessment & Plan:".
+        # Headings may appear as a standalone line or inline with content.
         keyword_re = re.compile(
             r"^(?P<label>"
-            r"Subjective|Objective|Assessment(?:\s*&\s*|\s+and\s+)?Plan|Assessment & Plan|A\s*/\s*P|A/P|HPI|History of Present Illness|ROS|Review of Systems|Physical Exam|Physical Examination|Impression|Plan|Chief Complaint"
-            r")\s*:?\s*$",
+            r"Subjective|Objective"
+            r"|Assessment(?:\s*[&/]\s*|\s+and\s+)?Plan"
+            r"|Assessment"
+            r"|A\s*/\s*P|A/P"
+            r"|HPI|History of Present Illness"
+            r"|ROS|Review of Systems"
+            r"|Physical Exam(?:ination)?"
+            r"|Impression|Plan|Chief Complaint"
+            r"|Past Medical History|PMH"
+            r"|Family History|FH"
+            r"|Social History|SH"
+            r"|Vital Signs?|VS"
+            r"|(?:Current\s+)?Medications?"
+            r"|Allergies?"
+            r"|Discharge (?:Instructions?|Summary|Diagnosis|Medications?)"
+            r"|Follow[\-\s]?Up(?: Instructions?| Plan| Appointments?)?"
+            r"|Admission Diagnosis"
+            r"|Problem List"
+            r")\s*:?(?:\s+(?P<inline>[^\n].*))?$",
             flags=re.IGNORECASE | re.MULTILINE,
         )
 
-        matches = list(keyword_re.finditer(text))
+        matches = [m for m in keyword_re.finditer(text) if (m.group("label") or "").strip()]
         if len(matches) < 2:
             return None
 
@@ -363,9 +383,16 @@ class AdaptiveDocumentChunker:
 
         for i, m in enumerate(matches):
             label = m.group("label").strip()
+            inline_body = (m.group("inline") or "").strip()
             start = m.end()
             end = matches[i + 1].start() if i + 1 < len(matches) else len(text)
-            body = text[start:end].strip()
+            trailing_body = text[start:end].strip()
+            parts = []
+            if inline_body:
+                parts.append(inline_body)
+            if trailing_body:
+                parts.append(trailing_body)
+            body = "\n".join(parts).strip()
             if body:
                 sections.append((label, body))
 

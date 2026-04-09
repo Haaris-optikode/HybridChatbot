@@ -12,6 +12,7 @@ from agent_graph.tool_clinical_notes_rag import (
     summarize_uploaded_document,
     list_available_patients,
     list_uploaded_documents,
+    get_rag_tool_instance,
 )
 from agent_graph.tool_tavily_search import load_tavily_search_tool
 from agent_graph.load_tools_config import LoadToolsConfig, get_google_api_key, get_active_llm_provider
@@ -25,6 +26,10 @@ logger = logging.getLogger(__name__)
 load_dotenv()
 
 TOOLS_CFG = LoadToolsConfig()
+_UNSCOPED_PATIENT_QUERY_MSG = (
+    "I need the patient name or MRN before searching clinical notes. "
+    "Please specify which patient you want me to review."
+)
 
 
 def _is_reasoning_model(model_name: str) -> bool:
@@ -70,6 +75,92 @@ def _make_llm(model_name: str, timeout: int = 60, max_tokens: int = None, thinki
         if max_tokens:
             kwargs["max_tokens"] = max_tokens
     return ChatOpenAI(**kwargs)
+
+
+def _last_user_text(state: State) -> str:
+    """Return the most recent user utterance from the graph state."""
+    for m in reversed(state.get("messages", [])):
+        if getattr(m, "type", "") == "human" or m.__class__.__name__ == "HumanMessage":
+            return getattr(m, "content", "") or ""
+    return ""
+
+
+def _recent_human_texts(state: State) -> list[str]:
+    """Return human messages in reverse chronological order."""
+    out: list[str] = []
+    for m in reversed(state.get("messages", [])):
+        if getattr(m, "type", "") == "human" or m.__class__.__name__ == "HumanMessage":
+            content = getattr(m, "content", "") or ""
+            if content:
+                out.append(content)
+    return out
+
+
+def _resolve_active_patient_mrn(state: State, current_query: str = "") -> str:
+    """Resolve the active patient MRN from the current query or prior chat history."""
+    existing = (state.get("active_patient_mrn", "") or "").strip()
+    if existing:
+        return existing
+
+    try:
+        rag = get_rag_tool_instance()
+    except Exception:
+        return ""
+
+    candidates = []
+    if current_query and current_query.strip():
+        candidates.append(current_query)
+    candidates.extend(_recent_human_texts(state))
+
+    seen = set()
+    for text in candidates:
+        norm = (text or "").strip()
+        if not norm or norm in seen:
+            continue
+        seen.add(norm)
+        try:
+            mrn = rag.resolve_to_mrn(norm)
+        except Exception:
+            mrn = None
+        if mrn:
+            return str(mrn).strip()
+    return ""
+
+
+def _copy_ai_message_with_tool_calls(message: _AIMessage, tool_calls: list[dict]) -> _AIMessage:
+    """Clone an AIMessage while replacing tool calls."""
+    try:
+        if hasattr(message, "model_copy"):
+            return message.model_copy(update={"tool_calls": tool_calls})
+        return message.copy(update={"tool_calls": tool_calls})
+    except Exception:
+        return _AIMessage(content=str(getattr(message, "content", "") or ""), tool_calls=tool_calls)
+
+
+def _scope_lookup_tool_calls(message: _AIMessage, active_mrn: str) -> _AIMessage:
+    """Inject MRN scoping into lookup_clinical_notes calls or block unscoped calls."""
+    tool_calls = getattr(message, "tool_calls", []) or []
+    if not tool_calls:
+        return message
+
+    updated_calls = []
+    for tool_call in tool_calls:
+        if tool_call.get("name") != "lookup_clinical_notes":
+            updated_calls.append(tool_call)
+            continue
+
+        args = dict(tool_call.get("args") or {})
+        has_document_scope = bool(str(args.get("document_id", "") or "").strip())
+        if active_mrn:
+            args["patient_mrn"] = active_mrn
+        elif not has_document_scope:
+            return _AIMessage(content=_UNSCOPED_PATIENT_QUERY_MSG)
+
+        updated_call = dict(tool_call)
+        updated_call["args"] = args
+        updated_calls.append(updated_call)
+
+    return _copy_ai_message_with_tool_calls(message, updated_calls)
 
 
 def build_graph(thinking_mode: bool = False):
@@ -130,13 +221,8 @@ def build_graph(thinking_mode: bool = False):
 
     def router(state: State):
         """Fast tool-routing + deterministic decomposition for multi-part questions."""
-        # Detect last user query text.
-        last_user_text = ""
-        for m in reversed(state.get("messages", [])):
-            # Avoid depending on exact message classes; content is enough.
-            if getattr(m, "type", "") == "human" or m.__class__.__name__ == "HumanMessage":
-                last_user_text = getattr(m, "content", "") or ""
-                break
+        last_user_text = _last_user_text(state)
+        active_mrn = _resolve_active_patient_mrn(state, current_query=last_user_text)
         q_lower = (last_user_text or "").lower()
 
         # Heuristic: multi-part analytical questions often contain multiple domains.
@@ -195,22 +281,39 @@ def build_graph(thinking_mode: bool = False):
                 sub_queries = obj.get("sub_queries") or []
                 sub_queries = [str(s).strip() for s in sub_queries if str(s).strip()]
                 if len(sub_queries) >= 2:
+                    if not active_mrn:
+                        return {
+                            "messages": [_AIMessage(content=_UNSCOPED_PATIENT_QUERY_MSG)],
+                            "active_patient_mrn": "",
+                        }
                     tool_calls = []
                     for i, sq in enumerate(sub_queries[:4]):
                         tool_calls.append(
                             {
                                 "name": "lookup_clinical_notes",
-                                "args": {"query": sq, "document_id": ""},
+                                "args": {
+                                    "query": sq,
+                                    "patient_mrn": active_mrn,
+                                    "document_id": "",
+                                },
                                 "id": f"decomp_{i}",
                             }
                         )
-                    return {"messages": [_AIMessage(content="", tool_calls=tool_calls)]}
+                    return {
+                        "messages": [_AIMessage(content="", tool_calls=tool_calls)],
+                        "active_patient_mrn": active_mrn,
+                    }
             except Exception:
                 # Fall back to normal router behavior.
                 pass
 
         # Default: rely on the router's tool selection.
-        return {"messages": [router_with_tools.invoke(state["messages"])]}
+        routed = router_with_tools.invoke(state["messages"])
+        routed = _scope_lookup_tool_calls(routed, active_mrn)
+        return {
+            "messages": [routed],
+            "active_patient_mrn": active_mrn,
+        }
 
     # Synthesizer: generates final answer from tool output.
     # Binds tools so it CAN call more if needed (multi-hop), but we prefer
@@ -237,6 +340,7 @@ def build_graph(thinking_mode: bool = False):
     def synthesizer(state: State):
         """High-quality answer synthesis from retrieved context."""
         msgs = state["messages"]
+        active_mrn = (state.get("active_patient_mrn", "") or "").strip()
 
         # OpenAI thinking mode can hit "input limit exceeded" when tool outputs
         # are large. Truncate ToolMessage contents to keep the prompt within
@@ -301,7 +405,12 @@ def build_graph(thinking_mode: bool = False):
                 insert_at = 2 if len(msgs) > 2 else len(msgs)
                 msgs = list(msgs[:insert_at]) + [_OPENAI_THINKING_HINT] + list(msgs[insert_at:])
 
-        return {"messages": [synth_with_tools.invoke(msgs)]}
+        synth_msg = synth_with_tools.invoke(msgs)
+        synth_msg = _scope_lookup_tool_calls(synth_msg, active_mrn)
+        return {
+            "messages": [synth_msg],
+            "active_patient_mrn": active_mrn,
+        }
 
 
     graph_builder.add_node("router", router)
