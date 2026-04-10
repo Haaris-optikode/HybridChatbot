@@ -368,7 +368,15 @@ class ClinicalNotesRAGTool:
                 sec = d.metadata.get("section_title", "Section")
                 page = d.metadata.get("page_number", "?")
                 mrn = d.metadata.get("patient_mrn", "")
-                parts.append(f"[Source {i} | Section: {sec} | Page {page} | MRN: {mrn}]\n{d.page_content}")
+                encounter_date = d.metadata.get("encounter_date", "")
+                document_type = d.metadata.get("document_type", "")
+                header = f"[Source {i} | Section: {sec} | Page {page} | MRN: {mrn}"
+                if encounter_date:
+                    header += f" | Date: {encounter_date}"
+                if document_type:
+                    header += f" | DocType: {document_type}"
+                header += "]"
+                parts.append(f"{header}\n{d.page_content}")
             return "\n\n---\n\n".join(parts)
         except Exception as e:
             return f"Error during search: {e}"
@@ -999,6 +1007,15 @@ class ClinicalNotesRAGTool:
         t = _re.sub(r"\s+", " ", t).strip()
         return t
 
+    @staticmethod
+    def _compact_identifier(value: str) -> str:
+        """Compact an identifier for tolerant MRN matching."""
+        t = (value or "").strip().lower()
+        if not t:
+            return ""
+        t = _re.sub(r"^(?:mrn|patient\s*id)\s*:?\s*", "", t)
+        return _re.sub(r"[^a-z0-9]", "", t)
+
     def _extract_query_variants(self, identifier: str) -> list[str]:
         """Generate candidate identifier variants from natural language input."""
         norm = self._normalize_lookup_text(identifier)
@@ -1006,6 +1023,21 @@ class ClinicalNotesRAGTool:
             return []
 
         variants = {norm}
+
+        # Explicit identifier patterns, including repeated label syntax such as
+        # "MRN: MRN-2026-004782" and numeric MRNs like "MRN: 250813000000794".
+        explicit_patterns = [
+            r"\bmrn\s*:?\s*((?:mrn\s*:?\s*)?[a-z0-9\-]{4,})",
+            r"\bpatient\s*id\s*:?\s*([a-z0-9\-]{4,})",
+        ]
+        for pat in explicit_patterns:
+            for raw in _re.findall(pat, identifier or "", flags=_re.IGNORECASE):
+                qn = self._normalize_lookup_text(raw)
+                if qn:
+                    variants.add(qn)
+                    compact = self._compact_identifier(qn)
+                    if compact:
+                        variants.add(compact)
 
         # Capture quoted identifiers when users explicitly provide a patient label.
         for quoted in _re.findall(r"['\"]([^'\"]{3,})['\"]", identifier or ""):
@@ -1049,6 +1081,13 @@ class ClinicalNotesRAGTool:
         for n in (2, 3, 4):
             if len(tokens) >= n:
                 variants.add(" ".join(tokens[-n:]))
+
+        # Add standalone long numeric/alphanumeric identifiers that commonly
+        # represent MRNs or patient IDs.
+        for tok in tokens:
+            compact = self._compact_identifier(tok)
+            if compact and (compact.isdigit() and len(compact) >= 6):
+                variants.add(compact)
 
         return sorted((v for v in variants if v), key=len, reverse=True)
 
@@ -1162,21 +1201,27 @@ class ClinicalNotesRAGTool:
 
         for mrn, name in patients.items():
             mrn_norm = self._normalize_lookup_text(mrn)
+            mrn_compact = self._compact_identifier(mrn)
             name_norm = self._normalize_lookup_text(name)
             name_tokens = set(name_norm.split()) if name_norm else set()
 
             for variant in query_variants:
                 score = 0
                 variant_norm = self._normalize_lookup_text(variant)
+                variant_compact = self._compact_identifier(variant)
                 variant_tokens = {t for t in variant_norm.split() if t not in stop_tokens}
 
                 # Exact MRN match
                 if mrn_norm == variant_norm and variant_norm:
                     return mrn  # perfect match, return immediately
+                if mrn_compact and variant_compact and mrn_compact == variant_compact:
+                    return mrn
 
                 # Partial MRN match
                 if variant_norm and variant_norm in mrn_norm:
                     score = max(score, 95)
+                if variant_compact and mrn_compact and variant_compact in mrn_compact:
+                    score = max(score, 96)
 
                 # Exact/partial name match
                 if name_norm and variant_norm == name_norm:

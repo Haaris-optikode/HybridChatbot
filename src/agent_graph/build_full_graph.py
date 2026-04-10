@@ -19,6 +19,8 @@ from agent_graph.load_tools_config import LoadToolsConfig, get_google_api_key, g
 from agent_graph.agent_backend import State, BasicToolNode, route_tools, plot_agent_schema
 import os
 import json as _json
+import re as _re
+from datetime import datetime as _dt
 from dotenv import load_dotenv
 
 logger = logging.getLogger(__name__)
@@ -30,6 +32,647 @@ _UNSCOPED_PATIENT_QUERY_MSG = (
     "I need the patient name or MRN before searching clinical notes. "
     "Please specify which patient you want me to review."
 )
+_STRICT_GROUNDING_NOT_FOUND_MSG = "Not found after targeted review of the retrieved record."
+
+
+def _safe_json_object(text: str) -> dict:
+    """Best-effort JSON object parse."""
+    if not text:
+        return {}
+    t = str(text).strip()
+    t = _re.sub(r"^```(?:json)?\s*", "", t, flags=_re.IGNORECASE).strip()
+    t = _re.sub(r"\s*```$", "", t).strip()
+    if not t.startswith("{"):
+        m = _re.search(r"\{[\s\S]*\}", t)
+        if m:
+            t = m.group(0)
+    try:
+        obj = _json.loads(t)
+        return obj if isinstance(obj, dict) else {}
+    except Exception:
+        return {}
+
+
+def _normalize_match_text(text: str) -> str:
+    """Normalize text for quote containment checks."""
+    return _re.sub(r"\s+", " ", str(text or "")).strip().lower()
+
+
+def _extract_query_scope(query: str) -> dict:
+    """Derive a conservative answer scope from the user's question."""
+    q = (query or "").strip().lower()
+    requested_topics: list[str] = []
+    focus = "general"
+    exclude_sections: list[str] = []
+
+    if (
+        "past medical history" in q
+        or _re.search(r"\bpmh\b", q)
+        or (
+            "medical history" in q
+            and "family history" not in q
+            and "surgical history" not in q
+            and "social history" not in q
+        )
+    ):
+        focus = "past_medical_history"
+        requested_topics.append("other")
+        exclude_sections.extend([
+            "family history",
+            "past surgical history",
+            "surgical history",
+            "social history",
+            "preventive care",
+            "immunization",
+            "screening",
+        ])
+    elif "family history" in q or _re.search(r"\bfh\b", q):
+        focus = "family_history"
+        requested_topics.append("other")
+        exclude_sections.extend([
+            "past medical history",
+            "past surgical history",
+            "surgical history",
+            "social history",
+            "preventive care",
+        ])
+    elif "past surgical history" in q or "surgical history" in q:
+        focus = "surgical_history"
+        requested_topics.append("other")
+        exclude_sections.extend([
+            "past medical history",
+            "family history",
+            "social history",
+            "preventive care",
+        ])
+
+    if any(k in q for k in ["follow-up", "follow up", "appointment", "after discharge", "discharge follow"]):
+        requested_topics.append("follow_up")
+    if any(k in q for k in ["long-term", "long term", "planned", "future", "repeat echo", "repeat echocardiogram", "icd", "cardiac decision"]):
+        requested_topics.append("long_term_plan")
+    if any(k in q for k in ["medication", "medications", "meds", "drug", "prescription"]):
+        requested_topics.append("medications")
+    if any(k in q for k in ["lab", "labs", "bloodwork", "creatinine", "glucose", "bnp", "a1c", "hba1c"]):
+        requested_topics.append("labs")
+    if focus == "general" and any(k in q for k in ["diagnosis", "diagnoses", "problem list", "condition", "conditions", "history"]):
+        requested_topics.append("diagnoses")
+    if any(k in q for k in ["procedure", "procedures", "surgery", "operation", "thoracentesis", "catheterization"]):
+        requested_topics.append("procedures")
+    if any(k in q for k in ["imaging", "echo", "echocardiogram", "ct", "mri", "x-ray", "ultrasound", "ecg", "ekg"]):
+        requested_topics.append("imaging")
+    if any(k in q for k in ["instruction", "instructions", "diet", "activity", "fluid restriction", "weights"]):
+        requested_topics.append("instructions")
+    if any(k in q for k in ["home health", "care logistics", "pt", "ot", "transport", "services"]):
+        requested_topics.append("care_logistics")
+
+    requested_topics = list(dict.fromkeys(requested_topics or ["other"]))
+
+    # Guard against over-answering for common discharge/follow-up asks.
+    if "follow_up" in requested_topics and "instructions" not in requested_topics:
+        exclude_sections.extend(["discharge instructions", "activity", "diet"])
+    if "follow_up" in requested_topics and "care_logistics" not in requested_topics:
+        exclude_sections.extend(["home health", "physical therapy", "occupational therapy"])
+
+    return {
+        "requested_topics": requested_topics,
+        "focus": focus,
+        "exclude_sections": [s.lower() for s in exclude_sections],
+        "query": query or "",
+    }
+
+
+def _recent_assistant_texts(state: State) -> list[str]:
+    """Return assistant messages in reverse chronological order."""
+    out: list[str] = []
+    for m in reversed(state.get("messages", [])):
+        if getattr(m, "type", "") == "ai" or m.__class__.__name__ == "AIMessage":
+            content = getattr(m, "content", "") or ""
+            if content:
+                out.append(content)
+    return out
+
+
+def _extract_query_scope_with_context(state: State, query: str) -> dict:
+    """Resolve scope using the current turn plus recent conversational context."""
+    scope = _extract_query_scope(query)
+    if scope.get("focus") != "general":
+        return scope
+
+    q = (query or "").strip().lower()
+    recent_humans = _recent_human_texts(state)
+    recent_assistant = _recent_assistant_texts(state)
+    context_text = "\n".join((recent_humans[:3] + recent_assistant[:2]))
+    context_lower = context_text.lower()
+
+    history_followup_markers = [
+        "what about",
+        "you missed",
+        "missed that",
+        "anything else",
+        "complete",
+        "full",
+        "entire",
+        "all of it",
+    ]
+    pmh_context = (
+        "past medical history" in context_lower
+        or "the past medical history includes:" in context_lower
+        or "medical history includes:" in context_lower
+    )
+
+    if pmh_context and (
+        any(marker in q for marker in history_followup_markers)
+        or any(term in q for term in ["prediabetes", "asthma", "chickenpox", "hyperlipidemia"])
+    ):
+        return _extract_query_scope("past medical history")
+
+    return scope
+
+
+def _parse_lookup_tool_content(content: str, source_start_idx: int = 1) -> tuple[list[dict], dict[str, dict]]:
+    """Parse lookup_clinical_notes content into stable source records."""
+    ordered_sources: list[dict] = []
+    source_map: dict[str, dict] = {}
+    source_idx = max(1, int(source_start_idx or 1))
+    header_re = _re.compile(
+        r"^\[Source\s+\d+\s+\|\s+Section:\s*(?P<section>.*?)\s+\|\s+Page\s+(?P<page>[^|\]]+)"
+        r"(?:\s+\|\s+MRN:\s*(?P<mrn>[^|\]]*))?"
+        r"(?:\s+\|\s+Date:\s*(?P<encounter_date>[^|\]]*))?"
+        r"(?:\s+\|\s+DocType:\s*(?P<document_type>[^\]]*))?"
+        r"\]\s*(?P<body>[\s\S]*)$",
+        flags=_re.IGNORECASE,
+    )
+
+    content = str(content or "")
+    for part in [p.strip() for p in content.split("\n\n---\n\n") if p.strip()]:
+        match = header_re.match(part)
+        if not match:
+            continue
+        body = (match.group("body") or "").strip()
+        first_line = body.splitlines()[0] if body else ""
+        doc_type = (match.group("document_type") or "").strip()
+        if not doc_type:
+            m_doc = _re.search(r"DocType:\s*([^|\]]+)", first_line)
+            doc_type = (m_doc.group(1).strip() if m_doc else "")
+        sid = f"S{source_idx}"
+        source = {
+            "citation": sid,
+            "section_title": (match.group("section") or "Section").strip(),
+            "page_number": (match.group("page") or "?").strip(),
+            "patient_mrn": (match.group("mrn") or "").strip(),
+            "encounter_date": (match.group("encounter_date") or "").strip(),
+            "document_type": doc_type,
+            "body": body,
+        }
+        ordered_sources.append(source)
+        source_map[sid] = source
+        source_idx += 1
+
+    return ordered_sources, source_map
+
+
+def _parse_lookup_tool_sources(messages: list) -> tuple[list[dict], dict[str, dict]]:
+    """Parse lookup_clinical_notes tool outputs into a global source map."""
+    ordered_sources: list[dict] = []
+    source_map: dict[str, dict] = {}
+    next_idx = 1
+
+    for m in messages:
+        if not isinstance(m, _ToolMessage) or (getattr(m, "name", "") or "") != "lookup_clinical_notes":
+            continue
+        parsed_sources, parsed_map = _parse_lookup_tool_content(
+            str(getattr(m, "content", "") or ""),
+            source_start_idx=next_idx,
+        )
+        ordered_sources.extend(parsed_sources)
+        source_map.update(parsed_map)
+        next_idx += len(parsed_sources)
+
+    return ordered_sources, source_map
+
+
+def _source_identity(source: dict) -> tuple[str, str, str, str, str, str]:
+    """Stable identity for deduplicating grounded sources across retries."""
+    return (
+        str(source.get("patient_mrn", "") or "").strip(),
+        str(source.get("section_title", "") or "").strip().lower(),
+        str(source.get("page_number", "") or "").strip(),
+        str(source.get("encounter_date", "") or "").strip(),
+        str(source.get("document_type", "") or "").strip().lower(),
+        _normalize_match_text(source.get("body", "") or ""),
+    )
+
+
+def _merge_lookup_sources(
+    ordered_sources: list[dict],
+    source_map: dict[str, dict],
+    new_sources: list[dict],
+) -> tuple[list[dict], dict[str, dict]]:
+    """Merge retry sources without duplicating equivalent records."""
+    merged_ordered = list(ordered_sources)
+    merged_map = dict(source_map)
+    seen = {_source_identity(src) for src in merged_ordered}
+
+    next_idx = len(merged_ordered) + 1
+    for source in new_sources:
+        source_id = _source_identity(source)
+        if source_id in seen:
+            continue
+        seen.add(source_id)
+        new_source = dict(source)
+        citation = f"S{next_idx}"
+        new_source["citation"] = citation
+        merged_ordered.append(new_source)
+        merged_map[citation] = new_source
+        next_idx += 1
+
+    return merged_ordered, merged_map
+
+
+def _build_targeted_retry_query(user_query: str, scope: dict, topic: str) -> str:
+    """Create a focused follow-up retrieval query for a missing topic."""
+    focus = str(scope.get("focus", "general") or "general")
+    normalized_topic = str(topic or "").strip().lower()
+
+    if normalized_topic == "other":
+        if focus == "past_medical_history":
+            q = (user_query or "").strip()
+            return f"past medical history {q}".strip()
+        if focus == "family_history":
+            q = (user_query or "").strip()
+            return f"family history {q}".strip()
+        if focus == "surgical_history":
+            q = (user_query or "").strip()
+            return f"past surgical history {q}".strip()
+        return (user_query or "").strip()
+
+    topic_queries = {
+        "follow_up": "follow-up appointments after discharge",
+        "long_term_plan": "long-term plan after discharge",
+        "medications": "current medications",
+        "labs": "relevant lab results",
+        "diagnoses": "diagnoses and problem list",
+        "procedures": "procedures and surgeries",
+        "imaging": "imaging and echocardiogram findings",
+        "instructions": "discharge instructions",
+        "care_logistics": "home health and care logistics",
+    }
+    return topic_queries.get(normalized_topic, (user_query or "").strip())
+
+
+def _run_targeted_lookup_retry(
+    active_mrn: str,
+    user_query: str,
+    scope: dict,
+    missing_topics: list[str],
+    ordered_sources: list[dict],
+    source_map: dict[str, dict],
+) -> tuple[list[dict], dict[str, dict]]:
+    """Run one focused retrieval retry for each still-missing topic."""
+    merged_ordered = list(ordered_sources)
+    merged_map = dict(source_map)
+
+    for topic in missing_topics:
+        retry_query = _build_targeted_retry_query(user_query, scope, topic)
+        if not retry_query:
+            continue
+        try:
+            retry_content = lookup_clinical_notes.func(
+                retry_query,
+                patient_mrn=active_mrn,
+                document_id="",
+            )
+        except Exception:
+            continue
+        parsed_sources, _ = _parse_lookup_tool_content(
+            str(retry_content or ""),
+            source_start_idx=len(merged_ordered) + 1,
+        )
+        if not parsed_sources:
+            continue
+        merged_ordered, merged_map = _merge_lookup_sources(
+            merged_ordered,
+            merged_map,
+            parsed_sources,
+        )
+
+    return merged_ordered, merged_map
+
+
+def _format_sources_for_grounding(ordered_sources: list[dict]) -> str:
+    """Render parsed sources with global stable citation IDs."""
+    parts = []
+    for src in ordered_sources:
+        header = f"[{src['citation']} | Section: {src['section_title']} | Page {src['page_number']}"
+        if src.get("patient_mrn"):
+            header += f" | MRN: {src['patient_mrn']}"
+        if src.get("encounter_date"):
+            header += f" | Date: {src['encounter_date']}"
+        if src.get("document_type"):
+            header += f" | DocType: {src['document_type']}"
+        header += "]"
+        parts.append(f"{header}\n{src.get('body', '')}")
+    return "\n\n---\n\n".join(parts)
+
+
+def _build_grounding_prompt(scope: dict, sources_blob: str, missing_topics: list[str] | None = None) -> str:
+    """Build a strict scoped extraction prompt."""
+    requested = missing_topics or list(scope.get("requested_topics") or ["other"])
+    focus = scope.get("focus", "general")
+    exclusions = scope.get("exclude_sections") or []
+    exclusion_text = ", ".join(exclusions) if exclusions else "none"
+    exhaustive_history = focus in {"past_medical_history", "family_history", "surgical_history"}
+    history_rule = (
+        "- For history-focused questions, extract all distinct documented items from the relevant section, not just a few examples.\n"
+        if exhaustive_history else ""
+    )
+    return (
+        "You are a clinical evidence extraction engine.\n\n"
+        f"USER QUESTION: {scope.get('query', '')}\n"
+        f"REQUESTED TOPICS: {', '.join(requested)}\n"
+        f"FOCUS: {focus}\n"
+        f"EXCLUDED SECTIONS/CONTENT: {exclusion_text}\n\n"
+        "Return STRICT JSON only in this format:\n"
+        "{\n"
+        '  "items": [\n'
+        "    {\n"
+        '      "topic": "follow_up|long_term_plan|medications|labs|diagnoses|procedures|imaging|instructions|care_logistics|other",\n'
+        '      "claim": "",\n'
+        '      "supports": [\n'
+        '        {"citation": "S1", "evidence_quote": "", "encounter_date": "", "document_type": ""}\n'
+        "      ]\n"
+        "    }\n"
+        "  ],\n"
+        '  "missing_topics": ["topic_name"]\n'
+        "}\n\n"
+        "RULES:\n"
+        "- Only include facts that directly answer the user's question.\n"
+        "- Do not include related but unasked sections.\n"
+        "- For past_medical_history focus, exclude family history, surgical history, preventive care, social history, and immunizations unless explicitly asked.\n"
+        f"{history_rule}"
+        "- Each claim must be atomic and directly supported by an exact quote copied from one cited source.\n"
+        "- If unsure, omit the claim and mark the topic as missing.\n\n"
+        f"SOURCES:\n{sources_blob}"
+    )
+
+
+def _document_type_authority(document_type: str, section_title: str = "") -> int:
+    """Rank support authority for same-date tie breaking."""
+    doc_type = str(document_type or "").strip().lower()
+    section = str(section_title or "").strip().lower()
+    if doc_type == "discharge_summary":
+        return 4
+    if "follow-up" in section or "follow up" in section or "plan" in section:
+        return 3
+    if doc_type in {"progress_note", "clinical_note"}:
+        return 2
+    return 1
+
+
+def _parse_support_date(value: str):
+    """Parse an ISO-like support date for sorting."""
+    text = str(value or "").strip()
+    if not text:
+        return None
+    for fmt in ("%Y-%m-%d", "%m/%d/%Y", "%m/%d/%y", "%Y/%m/%d"):
+        try:
+            return _dt.strptime(text, fmt).date()
+        except Exception:
+            continue
+    return None
+
+
+def _sort_supports(supports: list[dict]) -> list[dict]:
+    """Sort supports by newest date, then by document authority."""
+    def _key(support: dict):
+        parsed = _parse_support_date(support.get("encounter_date", ""))
+        ordinal = parsed.toordinal() if parsed else -1
+        authority = _document_type_authority(
+            support.get("document_type", ""),
+            support.get("section_title", ""),
+        )
+        return (ordinal, authority, support.get("citation", ""))
+
+    return sorted(supports, key=_key, reverse=True)
+
+
+def _sort_items(items: list[dict]) -> list[dict]:
+    """Sort claims by their strongest supporting source."""
+    def _item_key(item: dict):
+        supports = _sort_supports(list(item.get("supports") or []))
+        if not supports:
+            return (-1, -1, item.get("claim", ""))
+        top = supports[0]
+        parsed = _parse_support_date(top.get("encounter_date", ""))
+        ordinal = parsed.toordinal() if parsed else -1
+        authority = _document_type_authority(
+            top.get("document_type", ""),
+            top.get("section_title", ""),
+        )
+        return (ordinal, authority, item.get("claim", ""))
+
+    normalized = []
+    for item in items:
+        item_copy = dict(item)
+        item_copy["supports"] = _sort_supports(list(item.get("supports") or []))
+        normalized.append(item_copy)
+    return sorted(normalized, key=_item_key, reverse=True)
+
+
+def _source_is_excluded(source: dict, scope: dict) -> bool:
+    """Return True when a source section is excluded by scope policy."""
+    section = (source.get("section_title", "") or "").lower()
+    body = (source.get("body", "") or "").lower()
+    haystack = f"{section}\n{body[:300]}"
+    for token in scope.get("exclude_sections") or []:
+        if token and token in haystack:
+            return True
+    return False
+
+
+def _validate_grounded_payload(payload: dict, source_map: dict[str, dict], scope: dict) -> dict:
+    """Mechanically validate extracted claims against the parsed source map."""
+    requested = set(scope.get("requested_topics") or ["other"])
+    seen = set()
+    items = []
+
+    for raw in payload.get("items") or []:
+        if not isinstance(raw, dict):
+            continue
+        topic = str(raw.get("topic", "") or "").strip().lower() or "other"
+        if topic not in requested:
+            continue
+        claim = str(raw.get("claim", "") or "").strip()
+        if not claim:
+            continue
+
+        supports = []
+        for sup in raw.get("supports") or []:
+            if not isinstance(sup, dict):
+                continue
+            citation = str(sup.get("citation", "") or "").strip().upper()
+            evidence_quote = str(sup.get("evidence_quote", "") or "").strip()
+            source = source_map.get(citation)
+            if not citation or not evidence_quote or not source:
+                continue
+            if _source_is_excluded(source, scope):
+                continue
+            if _normalize_match_text(evidence_quote) not in _normalize_match_text(source.get("body", "")):
+                continue
+            supports.append({
+                "citation": citation,
+                "evidence_quote": evidence_quote,
+                "encounter_date": source.get("encounter_date", "") or str(sup.get("encounter_date", "") or "").strip(),
+                "document_type": source.get("document_type", "") or str(sup.get("document_type", "") or "").strip(),
+                "section_title": source.get("section_title", ""),
+                "page_number": source.get("page_number", ""),
+            })
+
+        if not supports:
+            continue
+
+        key = (topic, _normalize_match_text(claim))
+        if key in seen:
+            continue
+        seen.add(key)
+        items.append({"topic": topic, "claim": claim, "supports": _sort_supports(supports)})
+
+    extracted_missing = []
+    for topic in payload.get("missing_topics") or []:
+        t = str(topic or "").strip().lower()
+        if t and t in requested:
+            extracted_missing.append(t)
+
+    covered = {item["topic"] for item in items}
+    computed_missing = sorted((requested - covered) | set(extracted_missing))
+    return {"items": _sort_items(items), "missing_topics": computed_missing}
+
+
+def _semantic_filter_grounded_items(verifier_llm, query: str, scope: dict, grounded: dict) -> dict:
+    """Use a lightweight verifier to reject claim/quote mismatches."""
+    items = list(grounded.get("items") or [])
+    if not verifier_llm or not items:
+        return grounded
+
+    verifier_payload = {
+        "query": query,
+        "focus": scope.get("focus", "general"),
+        "requested_topics": scope.get("requested_topics") or [],
+        "items": [
+            {
+                "index": idx,
+                "topic": item.get("topic", ""),
+                "claim": item.get("claim", ""),
+                "supports": [
+                    {
+                        "citation": s.get("citation", ""),
+                        "section_title": s.get("section_title", ""),
+                        "evidence_quote": s.get("evidence_quote", ""),
+                    }
+                    for s in item.get("supports", [])
+                ],
+            }
+            for idx, item in enumerate(items)
+        ],
+    }
+    prompt = (
+        "You are a clinical grounding verifier.\n"
+        "Return STRICT JSON only in this format:\n"
+        '{"verdicts":[{"index":0,"supported":true}]}\n\n'
+        "Mark supported=true only if the evidence quotes directly support the claim for the user's question.\n"
+        "If the claim adds details not present in the quotes, mark it false.\n\n"
+        f"PAYLOAD:\n{_json.dumps(verifier_payload, ensure_ascii=True)}"
+    )
+    try:
+        raw = verifier_llm.invoke(prompt).content
+        verdict_obj = _safe_json_object(raw)
+    except Exception:
+        return grounded
+
+    supported_indexes = {
+        int(v.get("index"))
+        for v in verdict_obj.get("verdicts", [])
+        if isinstance(v, dict) and v.get("supported") is True and str(v.get("index", "")).isdigit()
+    }
+    filtered = [item for idx, item in enumerate(items) if idx in supported_indexes]
+    covered = {item["topic"] for item in filtered}
+    missing = sorted(set(scope.get("requested_topics") or []) - covered)
+    return {"items": _sort_items(filtered), "missing_topics": missing}
+
+
+def _render_grounded_answer(scope: dict, grounded: dict) -> str:
+    """Deterministically render the validated grounded answer."""
+    items = list(grounded.get("items") or [])
+    missing_topics = list(grounded.get("missing_topics") or [])
+    if not items:
+        return _STRICT_GROUNDING_NOT_FOUND_MSG
+
+    topic_order = ["follow_up", "long_term_plan", "medications", "labs", "diagnoses", "procedures", "imaging", "instructions", "care_logistics", "other"]
+    grouped: dict[str, list[dict]] = {k: [] for k in topic_order}
+    for item in items:
+        grouped.setdefault(item["topic"], []).append(item)
+
+    def _cite_text(item: dict) -> str:
+        cites = []
+        for s in item.get("supports", []):
+            section = str(s.get("section_title", "") or "").strip()
+            page = str(s.get("page_number", "") or "").strip()
+            parts = []
+            if section:
+                parts.append(section)
+            if page:
+                parts.append(f"p. {page}")
+            if not parts:
+                parts.append(str(s.get("citation", "") or "").strip())
+            display = ", ".join(parts)
+            if display and display not in cites:
+                cites.append(display)
+        return f" ({'; '.join(cites)})" if cites else ""
+
+    focus = scope.get("focus", "general")
+    if focus == "past_medical_history":
+        lines = ["The past medical history includes:"]
+        for item in grouped.get("other", []):
+            lines.append(f"- {item['claim']} {_cite_text(item)}".rstrip())
+        if not grouped.get("other") and missing_topics:
+            lines.append(f"- {_STRICT_GROUNDING_NOT_FOUND_MSG}")
+        return "\n".join(lines)
+    if focus == "family_history":
+        lines = ["The family history includes:"]
+        for item in grouped.get("other", []):
+            lines.append(f"- {item['claim']} {_cite_text(item)}".rstrip())
+        return "\n".join(lines)
+    if focus == "surgical_history":
+        lines = ["The past surgical history includes:"]
+        for item in grouped.get("other", []):
+            lines.append(f"- {item['claim']} {_cite_text(item)}".rstrip())
+        return "\n".join(lines)
+
+    labels = {
+        "follow_up": "Follow-Up",
+        "long_term_plan": "Long-Term Plan",
+        "medications": "Medications",
+        "labs": "Labs",
+        "diagnoses": "Diagnoses",
+        "procedures": "Procedures",
+        "imaging": "Imaging",
+        "instructions": "Instructions",
+        "care_logistics": "Care Logistics",
+        "other": "Relevant Findings",
+    }
+    sections = []
+    for topic in topic_order:
+        topic_items = grouped.get(topic) or []
+        if not topic_items:
+            if topic in missing_topics and len(scope.get("requested_topics") or []) > 1:
+                sections.append(f"{labels.get(topic, topic.title())}:")
+                sections.append(f"- {_STRICT_GROUNDING_NOT_FOUND_MSG}")
+            continue
+        if len(scope.get("requested_topics") or []) > 1:
+            sections.append(f"{labels.get(topic, topic.title())}:")
+        for item in topic_items:
+            sections.append(f"- {item['claim']} {_cite_text(item)}".rstrip())
+    return "\n".join(sections) if sections else _STRICT_GROUNDING_NOT_FOUND_MSG
 
 
 def _is_reasoning_model(model_name: str) -> bool:
@@ -96,24 +739,43 @@ def _recent_human_texts(state: State) -> list[str]:
     return out
 
 
+def _query_has_explicit_patient_identifier(query: str) -> bool:
+    """Return True when the user explicitly mentions a patient identifier."""
+    q = (query or "").strip().lower()
+    if not q:
+        return False
+    if any(marker in q for marker in ("mrn", "patient id", "patient name")):
+        return True
+    return False
+
+
 def _resolve_active_patient_mrn(state: State, current_query: str = "") -> str:
     """Resolve the active patient MRN from the current query or prior chat history."""
     existing = (state.get("active_patient_mrn", "") or "").strip()
-    if existing:
-        return existing
 
     try:
         rag = get_rag_tool_instance()
     except Exception:
-        return ""
+        return existing
 
-    candidates = []
-    if current_query and current_query.strip():
-        candidates.append(current_query)
-    candidates.extend(_recent_human_texts(state))
+    current = (current_query or "").strip()
+    if current:
+        try:
+            current_mrn = rag.resolve_to_mrn(current)
+        except Exception:
+            current_mrn = None
+        if current_mrn:
+            return str(current_mrn).strip()
+        if _query_has_explicit_patient_identifier(current):
+            # User explicitly named a different patient/identifier; do not fall
+            # back to stale session context if resolution failed.
+            return ""
 
-    seen = set()
-    for text in candidates:
+    if existing:
+        return existing
+
+    seen = {current} if current else set()
+    for text in _recent_human_texts(state):
         norm = (text or "").strip()
         if not norm or norm in seen:
             continue
@@ -202,6 +864,20 @@ def build_graph(thinking_mode: bool = False):
         synth_llm = _make_llm(synth_model, timeout=60, max_tokens=4096)
         logger.info("Router LLM: %s (timeout=20s)", router_model)
         logger.info("Synthesizer LLM: %s (timeout=60s, max_tokens=4096)", synth_model)
+
+    semantic_verifier_llm = None
+    if os.getenv("OPENAI_API_KEY"):
+        try:
+            semantic_verifier_llm = ChatOpenAI(
+                model="gpt-4.1-mini",
+                api_key=os.getenv("OPENAI_API_KEY"),
+                request_timeout=30,
+                max_retries=1,
+                max_tokens=600,
+                temperature=0,
+            )
+        except Exception:
+            semantic_verifier_llm = None
 
     # ── Build the graph ───────────────────────────────────────────────
     graph_builder = StateGraph(State)
@@ -341,6 +1017,7 @@ def build_graph(thinking_mode: bool = False):
         """High-quality answer synthesis from retrieved context."""
         msgs = state["messages"]
         active_mrn = (state.get("active_patient_mrn", "") or "").strip()
+        user_query = _last_user_text(state)
 
         # OpenAI thinking mode can hit "input limit exceeded" when tool outputs
         # are large. Truncate ToolMessage contents to keep the prompt within
@@ -388,6 +1065,90 @@ def build_graph(thinking_mode: bool = False):
                     return {"messages": [_AIMessage(content=str(getattr(m, "content", "") or ""))]}
                 # Stop at the first tool message seen in reverse order
                 break
+
+        ordered_sources, source_map = _parse_lookup_tool_sources(msgs)
+        if active_mrn and source_map:
+            initial_source_count = len(source_map)
+            scope = _extract_query_scope_with_context(state, user_query)
+            sources_blob = _format_sources_for_grounding(ordered_sources)
+
+            grounding_prompt = _build_grounding_prompt(scope, sources_blob)
+            grounded_payload = _safe_json_object(str(getattr(synth_llm.invoke(grounding_prompt), "content", "") or ""))
+            grounded = _validate_grounded_payload(grounded_payload, source_map, scope)
+            grounded = _semantic_filter_grounded_items(semantic_verifier_llm, user_query, scope, grounded)
+
+            if grounded.get("missing_topics"):
+                retry_prompt = _build_grounding_prompt(
+                    scope,
+                    sources_blob,
+                    missing_topics=grounded.get("missing_topics") or [],
+                ) + (
+                    "\n\nIMPORTANT: A prior extraction missed or over-generated content. "
+                    "Return only directly supported claims for the listed missing topics."
+                )
+                retry_payload = _safe_json_object(str(getattr(synth_llm.invoke(retry_prompt), "content", "") or ""))
+                retry_grounded = _validate_grounded_payload(retry_payload, source_map, scope)
+                retry_grounded = _semantic_filter_grounded_items(semantic_verifier_llm, user_query, scope, retry_grounded)
+                if retry_grounded.get("items"):
+                    existing_keys = {
+                        (item.get("topic", ""), _normalize_match_text(item.get("claim", "")))
+                        for item in grounded.get("items", [])
+                    }
+                    for item in retry_grounded.get("items", []):
+                        key = (item.get("topic", ""), _normalize_match_text(item.get("claim", "")))
+                        if key not in existing_keys:
+                            grounded.setdefault("items", []).append(item)
+                            existing_keys.add(key)
+                    covered = {item.get("topic", "") for item in grounded.get("items", [])}
+                    grounded["missing_topics"] = sorted(set(scope.get("requested_topics") or []) - covered)
+
+            if grounded.get("missing_topics"):
+                ordered_sources, source_map = _run_targeted_lookup_retry(
+                    active_mrn=active_mrn,
+                    user_query=user_query,
+                    scope=scope,
+                    missing_topics=list(grounded.get("missing_topics") or []),
+                    ordered_sources=ordered_sources,
+                    source_map=source_map,
+                )
+                if len(source_map) > initial_source_count:
+                    retry_sources_blob = _format_sources_for_grounding(ordered_sources)
+                    targeted_prompt = _build_grounding_prompt(
+                        scope,
+                        retry_sources_blob,
+                        missing_topics=grounded.get("missing_topics") or [],
+                    ) + (
+                        "\n\nIMPORTANT: This is a targeted retrieval retry for missing topics only. "
+                        "Return only directly supported claims from the cited sources."
+                    )
+                    targeted_payload = _safe_json_object(
+                        str(getattr(synth_llm.invoke(targeted_prompt), "content", "") or "")
+                    )
+                    targeted_grounded = _validate_grounded_payload(targeted_payload, source_map, scope)
+                    targeted_grounded = _semantic_filter_grounded_items(
+                        semantic_verifier_llm,
+                        user_query,
+                        scope,
+                        targeted_grounded,
+                    )
+                    if targeted_grounded.get("items"):
+                        existing_keys = {
+                            (item.get("topic", ""), _normalize_match_text(item.get("claim", "")))
+                            for item in grounded.get("items", [])
+                        }
+                        for item in targeted_grounded.get("items", []):
+                            key = (item.get("topic", ""), _normalize_match_text(item.get("claim", "")))
+                            if key not in existing_keys:
+                                grounded.setdefault("items", []).append(item)
+                                existing_keys.add(key)
+                        covered = {item.get("topic", "") for item in grounded.get("items", [])}
+                        grounded["missing_topics"] = sorted(set(scope.get("requested_topics") or []) - covered)
+
+            rendered = _render_grounded_answer(scope, grounded)
+            return {
+                "messages": [_AIMessage(content=rendered)],
+                "active_patient_mrn": active_mrn,
+            }
         # Inject synthesis hint right before synthesizer's call (idempotent for multi-hop).
         if not any(
             isinstance(m, _SysMsg) and "Synthesize a clear" in str(getattr(m, "content", ""))

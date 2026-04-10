@@ -16,6 +16,7 @@ class State(TypedDict):
         by adding messages using the `add_messages` function.
     """
     messages: Annotated[list, add_messages]
+    active_patient_mrn: str
 
 
 class BasicToolNode:

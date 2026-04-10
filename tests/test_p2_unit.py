@@ -175,6 +175,33 @@ class TestPatientIdentifierResolution:
         variants = rag._extract_query_variants("What disease is Ayesha Malik suffering from")
         assert any(v == "ayesha malik" for v in variants)
 
+    def test_extract_query_variants_captures_explicit_mrn_formats(self):
+        from agent_graph.tool_clinical_notes_rag import ClinicalNotesRAGTool
+
+        rag = object.__new__(ClinicalNotesRAGTool)
+        variants = rag._extract_query_variants("patient with MRN: MRN-2026-004782")
+        assert "mrn-2026-004782" in variants
+
+        variants2 = rag._extract_query_variants("the patient with the mrn 250813000000794")
+        assert "250813000000794" in variants2
+
+    def test_resolve_to_mrn_accepts_numeric_and_prefixed_mrn_mentions(self):
+        from agent_graph.tool_clinical_notes_rag import ClinicalNotesRAGTool
+
+        rag = object.__new__(ClinicalNotesRAGTool)
+
+        class _Point:
+            def __init__(self, payload):
+                self.payload = payload
+
+        rag._scroll_all_points = lambda limit=512: [
+            _Point({"metadata": {"patient_mrn": "MRN-2026-004782", "patient_name": "Robert James Whitfield"}}),
+            _Point({"metadata": {"patient_mrn": "250813000000794", "patient_name": "Ayesha Malik"}}),
+        ]
+
+        assert rag.resolve_to_mrn("patient with MRN: MRN-2026-004782") == "MRN-2026-004782"
+        assert rag.resolve_to_mrn("when did the patient with the mrn 250813000000794 get chickenpox") == "250813000000794"
+
     def test_summarize_patient_record_uses_document_fallback_when_mrn_missing(self, monkeypatch):
         import agent_graph.tool_clinical_notes_rag as rag_mod
 
@@ -316,6 +343,47 @@ class TestPatientIsolation:
 
 
 class TestPatientScopedGraphRouting:
+    def test_explicit_new_identifier_overrides_existing_session_patient(self, monkeypatch):
+        from agent_graph import build_full_graph as graph_mod
+
+        class DummyRag:
+            def resolve_to_mrn(self, identifier):
+                text = (identifier or "").lower()
+                if "250813000000794" in text:
+                    return "250813000000794"
+                if "robert" in text:
+                    return "MRN-2026-004782"
+                return None
+
+        monkeypatch.setattr(graph_mod, "get_rag_tool_instance", lambda: DummyRag())
+
+        mrn = graph_mod._resolve_active_patient_mrn(
+            {
+                "active_patient_mrn": "MRN-2026-004782",
+                "messages": [],
+            },
+            current_query="okay then check in the patient with the MRN: 250813000000794 and Patient ID: 123456",
+        )
+        assert mrn == "250813000000794"
+
+    def test_failed_explicit_identifier_does_not_fall_back_to_stale_session_patient(self, monkeypatch):
+        from agent_graph import build_full_graph as graph_mod
+
+        class DummyRag:
+            def resolve_to_mrn(self, _identifier):
+                return None
+
+        monkeypatch.setattr(graph_mod, "get_rag_tool_instance", lambda: DummyRag())
+
+        mrn = graph_mod._resolve_active_patient_mrn(
+            {
+                "active_patient_mrn": "MRN-2026-004782",
+                "messages": [],
+            },
+            current_query="patient with MRN: 999999999",
+        )
+        assert mrn == ""
+
     def test_resolve_active_patient_mrn_uses_prior_human_context(self, monkeypatch):
         from langchain_core.messages import HumanMessage
         from agent_graph import build_full_graph as graph_mod
@@ -380,6 +448,339 @@ class TestPatientScopedGraphRouting:
         )
         scoped = _scope_lookup_tool_calls(msg, "MRN-2026-004782")
         assert scoped.tool_calls[0]["args"]["patient_mrn"] == "MRN-2026-004782"
+
+    def test_graph_synthesizer_renders_minimal_grounded_pmh_answer(self, monkeypatch):
+        from langchain_core.messages import AIMessage, HumanMessage
+        from langchain_core.tools import tool
+        from agent_graph import build_full_graph as graph_mod
+
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+
+        class FakeRouterLLM:
+            def bind_tools(self, _tools):
+                return self
+
+            def invoke(self, _messages):
+                return AIMessage(
+                    content="",
+                    tool_calls=[{
+                        "name": "lookup_clinical_notes",
+                        "args": {"query": "past medical history"},
+                        "id": "call-1",
+                    }],
+                )
+
+        class FakeSynthLLM:
+            def bind_tools(self, _tools):
+                return self
+
+            def invoke(self, prompt):
+                prompt_text = str(prompt or "")
+                assert "clinical evidence extraction engine" in prompt_text.lower()
+                return AIMessage(content=json.dumps({
+                    "items": [
+                        {
+                            "topic": "other",
+                            "claim": "Childhood chickenpox in 1987 with complete resolution and no sequelae.",
+                            "supports": [{
+                                "citation": "S1",
+                                "evidence_quote": "Childhood chickenpox in 1987 with complete resolution and no sequelae.",
+                            }],
+                        },
+                        {
+                            "topic": "other",
+                            "claim": "Family history includes paternal myocardial infarction and diabetes.",
+                            "supports": [{
+                                "citation": "S2",
+                                "evidence_quote": "Father had myocardial infarction and diabetes.",
+                            }],
+                        },
+                    ],
+                    "missing_topics": [],
+                }))
+
+        class DummyRag:
+            def resolve_to_mrn(self, identifier):
+                if "250813000000794" in str(identifier):
+                    return "250813000000794"
+                return None
+
+        @tool("lookup_clinical_notes")
+        def fake_lookup_clinical_notes(query: str, patient_mrn: str = "", document_id: str = "") -> str:
+            """Return deterministic note content for grounding tests."""
+            assert patient_mrn == "250813000000794"
+            return (
+                "[Source 1 | Section: Past Medical History | Page 5 | MRN: 250813000000794 | Date: 2026-01-15 | DocType: clinical_note]\n"
+                "Childhood chickenpox in 1987 with complete resolution and no sequelae.\n\n---\n\n"
+                "[Source 2 | Section: Family History | Page 6 | MRN: 250813000000794 | Date: 2026-01-15 | DocType: clinical_note]\n"
+                "Father had myocardial infarction and diabetes."
+            )
+
+        llms = [FakeRouterLLM(), FakeSynthLLM()]
+        monkeypatch.setattr(graph_mod, "_make_llm", lambda *args, **kwargs: llms.pop(0))
+        monkeypatch.setattr(graph_mod, "lookup_clinical_notes", fake_lookup_clinical_notes)
+        monkeypatch.setattr(graph_mod, "plot_agent_schema", lambda _graph: None)
+        monkeypatch.setattr(graph_mod, "load_tavily_search_tool", lambda _max_results: MagicMock(name="web_tool"))
+        monkeypatch.setattr(graph_mod, "get_rag_tool_instance", lambda: DummyRag())
+
+        graph = graph_mod.build_graph(thinking_mode=False)
+        events = list(graph.stream({
+            "messages": [HumanMessage(content="tell me about the past medical history for patient with MRN: 250813000000794")]
+        }, stream_mode="values"))
+        final_message = events[-1]["messages"][-1]
+
+        assert "past medical history includes" in final_message.content.lower()
+        assert "chickenpox" in final_message.content.lower()
+        assert "(Past Medical History, p. 5)" in final_message.content
+        assert "family history" not in final_message.content.lower()
+
+    def test_graph_synthesizer_uses_targeted_retry_for_missing_topic(self, monkeypatch):
+        from langchain_core.messages import AIMessage, HumanMessage
+        from langchain_core.tools import tool
+        from agent_graph import build_full_graph as graph_mod
+
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+
+        class FakeRouterLLM:
+            def bind_tools(self, _tools):
+                return self
+
+            def invoke(self, _messages):
+                return AIMessage(
+                    content="",
+                    tool_calls=[{
+                        "name": "lookup_clinical_notes",
+                        "args": {"query": "when did the patient get chickenpox"},
+                        "id": "call-1",
+                    }],
+                )
+
+        class FakeSynthLLM:
+            def bind_tools(self, _tools):
+                return self
+
+            def invoke(self, prompt):
+                prompt_text = str(prompt or "")
+                if "Past Medical History" in prompt_text:
+                    return AIMessage(content=json.dumps({
+                        "items": [
+                            {
+                                "topic": "other",
+                                "claim": "Childhood chickenpox occurred in 1987.",
+                                "supports": [{
+                                    "citation": "S2",
+                                    "evidence_quote": "Childhood chickenpox in 1987 with complete resolution and no sequelae.",
+                                }],
+                            }
+                        ],
+                        "missing_topics": [],
+                    }))
+                return AIMessage(content=json.dumps({"items": [], "missing_topics": ["other"]}))
+
+        class DummyRag:
+            def resolve_to_mrn(self, identifier):
+                if "250813000000794" in str(identifier):
+                    return "250813000000794"
+                return None
+
+        call_log = []
+
+        @tool("lookup_clinical_notes")
+        def fake_lookup_clinical_notes(query: str, patient_mrn: str = "", document_id: str = "") -> str:
+            """Return deterministic note content for retry tests."""
+            call_log.append((query, patient_mrn, document_id))
+            assert patient_mrn == "250813000000794"
+            if "past medical history" in (query or "").lower():
+                return (
+                    "[Source 1 | Section: Past Medical History | Page 5 | MRN: 250813000000794 | Date: 2026-01-15 | DocType: clinical_note]\n"
+                    "Childhood chickenpox in 1987 with complete resolution and no sequelae."
+                )
+            return (
+                "[Source 1 | Section: Chief Complaint | Page 1 | MRN: 250813000000794 | Date: 2026-01-15 | DocType: clinical_note]\n"
+                "Patient presents for routine follow-up."
+            )
+
+        llms = [FakeRouterLLM(), FakeSynthLLM()]
+        monkeypatch.setattr(graph_mod, "_make_llm", lambda *args, **kwargs: llms.pop(0))
+        monkeypatch.setattr(graph_mod, "lookup_clinical_notes", fake_lookup_clinical_notes)
+        monkeypatch.setattr(graph_mod, "plot_agent_schema", lambda _graph: None)
+        monkeypatch.setattr(graph_mod, "load_tavily_search_tool", lambda _max_results: MagicMock(name="web_tool"))
+        monkeypatch.setattr(graph_mod, "get_rag_tool_instance", lambda: DummyRag())
+
+        graph = graph_mod.build_graph(thinking_mode=False)
+        events = list(graph.stream({
+            "messages": [HumanMessage(content="tell me about the past medical history for patient with MRN: 250813000000794")]
+        }, stream_mode="values"))
+        final_message = events[-1]["messages"][-1]
+
+        assert any("past medical history" in q.lower() for q, _, _ in call_log)
+        assert "chickenpox" in final_message.content.lower()
+        assert "(Past Medical History, p. 5)" in final_message.content
+
+
+class TestStrictGroundingHelpers:
+    def test_extract_query_scope_for_past_medical_history_excludes_unasked_sections(self):
+        from agent_graph.build_full_graph import _extract_query_scope
+
+        scope = _extract_query_scope("tell me about the past medical history for patient with MRN: 250813000000794")
+        assert scope["focus"] == "past_medical_history"
+        assert scope["requested_topics"] == ["other"]
+        assert "family history" in scope["exclude_sections"]
+        assert "past surgical history" in scope["exclude_sections"]
+
+    def test_extract_query_scope_treats_medical_history_as_pmh(self):
+        from agent_graph.build_full_graph import _extract_query_scope
+
+        scope = _extract_query_scope("give me the complete medical history for this patient")
+        assert scope["focus"] == "past_medical_history"
+        assert scope["requested_topics"] == ["other"]
+
+    def test_extract_query_scope_with_context_inherits_pmh_focus_for_followup(self):
+        from langchain_core.messages import AIMessage, HumanMessage
+        from agent_graph.build_full_graph import _extract_query_scope_with_context
+
+        scope = _extract_query_scope_with_context(
+            {
+                "messages": [
+                    HumanMessage(content="i want you to tell me about the past medical history for patient with MRN: 250813000000794"),
+                    AIMessage(content="The past medical history includes:\n- Childhood chickenpox in 1987 (Past Medical History, p. 5)"),
+                    HumanMessage(content="what about the prediabetes and asthma you missed that"),
+                ]
+            },
+            "what about the prediabetes and asthma you missed that",
+        )
+        assert scope["focus"] == "past_medical_history"
+        assert scope["requested_topics"] == ["other"]
+
+    def test_validate_grounded_payload_filters_family_history_for_pmh_query(self):
+        from agent_graph.build_full_graph import _extract_query_scope, _validate_grounded_payload
+
+        scope = _extract_query_scope("tell me about the past medical history")
+        source_map = {
+            "S1": {
+                "citation": "S1",
+                "section_title": "Past Medical History",
+                "page_number": "5",
+                "body": "Childhood chickenpox in 1987 with complete resolution and no sequelae.",
+                "document_type": "general",
+                "encounter_date": "",
+            },
+            "S2": {
+                "citation": "S2",
+                "section_title": "Family History",
+                "page_number": "6",
+                "body": "Father had myocardial infarction and diabetes.",
+                "document_type": "general",
+                "encounter_date": "",
+            },
+        }
+        payload = {
+            "items": [
+                {
+                    "topic": "other",
+                    "claim": "Childhood chickenpox in 1987 with complete resolution and no sequelae.",
+                    "supports": [{"citation": "S1", "evidence_quote": "Childhood chickenpox in 1987 with complete resolution and no sequelae."}],
+                },
+                {
+                    "topic": "other",
+                    "claim": "Family history includes paternal myocardial infarction and diabetes.",
+                    "supports": [{"citation": "S2", "evidence_quote": "Father had myocardial infarction and diabetes."}],
+                },
+            ],
+            "missing_topics": [],
+        }
+
+        grounded = _validate_grounded_payload(payload, source_map, scope)
+        assert len(grounded["items"]) == 1
+        assert "chickenpox" in grounded["items"][0]["claim"].lower()
+
+    def test_render_grounded_answer_for_pmh_is_deterministic_and_minimal(self):
+        from agent_graph.build_full_graph import _extract_query_scope, _render_grounded_answer
+
+        scope = _extract_query_scope("tell me about the past medical history")
+        grounded = {
+            "items": [
+                {
+                    "topic": "other",
+                    "claim": "Childhood chickenpox in 1987 with complete resolution and no sequelae.",
+                    "supports": [{"citation": "S1", "section_title": "Past Medical History", "page_number": "5"}],
+                }
+            ],
+            "missing_topics": [],
+        }
+        rendered = _render_grounded_answer(scope, grounded)
+        assert "The past medical history includes:" in rendered
+        assert "chickenpox" in rendered.lower()
+        assert "(Past Medical History, p. 5)" in rendered
+        assert "family history" not in rendered.lower()
+
+    def test_run_targeted_lookup_retry_adds_new_grounding_sources(self, monkeypatch):
+        from agent_graph import build_full_graph as graph_mod
+
+        def fake_lookup(query, patient_mrn="", document_id=""):
+            assert patient_mrn == "250813000000794"
+            assert document_id == ""
+            if "past medical history" in (query or "").lower():
+                return (
+                    "[Source 1 | Section: Past Medical History | Page 5 | MRN: 250813000000794 | Date: 2026-01-15 | DocType: clinical_note]\n"
+                    "Childhood chickenpox in 1987 with complete resolution and no sequelae."
+                )
+            return "No relevant documents found for: query"
+
+        monkeypatch.setattr(graph_mod, "lookup_clinical_notes", types.SimpleNamespace(func=fake_lookup))
+
+        scope = graph_mod._extract_query_scope("tell me about the past medical history")
+        ordered_sources, source_map = graph_mod._run_targeted_lookup_retry(
+            active_mrn="250813000000794",
+            user_query="tell me about the past medical history",
+            scope=scope,
+            missing_topics=["other"],
+            ordered_sources=[],
+            source_map={},
+        )
+        assert len(ordered_sources) == 1
+        assert len(source_map) == 1
+        assert "chickenpox" in ordered_sources[0]["body"].lower()
+
+    def test_sort_items_prefers_newer_support_then_document_authority(self):
+        from agent_graph.build_full_graph import _sort_items
+
+        items = [
+            {
+                "topic": "follow_up",
+                "claim": "Older progress note claim.",
+                "supports": [{
+                    "citation": "S1",
+                    "encounter_date": "2026-01-10",
+                    "document_type": "progress_note",
+                    "section_title": "Progress Note",
+                }],
+            },
+            {
+                "topic": "follow_up",
+                "claim": "Newer discharge summary claim.",
+                "supports": [{
+                    "citation": "S2",
+                    "encounter_date": "2026-01-12",
+                    "document_type": "discharge_summary",
+                    "section_title": "Discharge Summary",
+                }],
+            },
+            {
+                "topic": "follow_up",
+                "claim": "Same-date lower-authority claim.",
+                "supports": [{
+                    "citation": "S3",
+                    "encounter_date": "2026-01-12",
+                    "document_type": "progress_note",
+                    "section_title": "Progress Note",
+                }],
+            },
+        ]
+
+        sorted_items = _sort_items(items)
+        assert sorted_items[0]["claim"] == "Newer discharge summary claim."
+        assert sorted_items[1]["claim"] == "Same-date lower-authority claim."
 
 
 class TestOrderCategoryInference:
