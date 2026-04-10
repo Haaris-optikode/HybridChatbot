@@ -368,13 +368,7 @@ class ClinicalNotesRAGTool:
                 sec = d.metadata.get("section_title", "Section")
                 page = d.metadata.get("page_number", "?")
                 mrn = d.metadata.get("patient_mrn", "")
-                encounter_date = d.metadata.get("encounter_date", "")
-                document_type = d.metadata.get("document_type", "")
                 header = f"[Source {i} | Section: {sec} | Page {page} | MRN: {mrn}"
-                if encounter_date:
-                    header += f" | Date: {encounter_date}"
-                if document_type:
-                    header += f" | DocType: {document_type}"
                 header += "]"
                 parts.append(f"{header}\n{d.page_content}")
             return "\n\n---\n\n".join(parts)
