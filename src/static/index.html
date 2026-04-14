@@ -1997,14 +1997,6 @@
         // Token and cost tracking
         let totalTokens = 0;
         let totalCost = 0;
-        
-        // Cost per 1K tokens (approximate)
-        const COST_PER_1K = {
-            'gpt-4.1-mini': { input: 0.00015, output: 0.0006 },
-            'gpt-4.1': { input: 0.002, output: 0.008 },
-            'gemini-2.5-flash': { input: 0.000075, output: 0.0003 },
-            'gemini-2.5-pro': { input: 0.00125, output: 0.005 }
-        };
 
         // Model configurations
         const MODEL_CONFIG = {
@@ -2023,37 +2015,19 @@
             const mode = thinkingMode ? 'thinking' : 'standard';
             return MODEL_CONFIG[selectedProvider][mode];
         }
+
+        function normalizeUsage(usage) {
+            const inputTokens = Number(usage?.input_tokens ?? usage?.prompt_tokens ?? 0);
+            const outputTokens = Number(usage?.output_tokens ?? usage?.completion_tokens ?? 0);
+            const totalRequestTokens = Number(usage?.total_tokens ?? (inputTokens + outputTokens));
+            const requestCost = Number(usage?.cost_usd ?? 0);
+            return { inputTokens, outputTokens, totalRequestTokens, requestCost };
+        }
         
         // Update token and cost metrics
         function updateTokenMetrics(usage) {
             if (!usage) return;
-            
-            const currentModel = getCurrentModel();
-            const costs = COST_PER_1K[currentModel] || { input: 0.001, output: 0.002 };
-            
-            const promptTokens = usage.prompt_tokens || 0;
-            const completionTokens = usage.completion_tokens || 0;
-            const totalRequestTokens = usage.total_tokens || (promptTokens + completionTokens);
-            
-            // Calculate cost for this request
-            let requestCost = 0;
-            let displayPromptTokens = promptTokens;
-            let displayCompletionTokens = completionTokens;
-            
-            if (promptTokens > 0 || completionTokens > 0) {
-                // If we have the breakdown, use separate input/output rates
-                const inputCost = (promptTokens / 1000) * costs.input;
-                const outputCost = (completionTokens / 1000) * costs.output;
-                requestCost = inputCost + outputCost;
-            } else if (totalRequestTokens > 0) {
-                // Fallback: if only total_tokens is available, estimate using a blended rate
-                // Assume roughly 70% input, 30% output distribution
-                displayPromptTokens = Math.round(totalRequestTokens * 0.7);
-                displayCompletionTokens = Math.round(totalRequestTokens * 0.3);
-                const inputCost = (displayPromptTokens / 1000) * costs.input;
-                const outputCost = (displayCompletionTokens / 1000) * costs.output;
-                requestCost = inputCost + outputCost;
-            }
+            const { inputTokens, outputTokens, totalRequestTokens, requestCost } = normalizeUsage(usage);
             
             // Update totals
             totalTokens += totalRequestTokens;
@@ -2065,8 +2039,8 @@
             
             // Update request details
             document.getElementById('lastRequestTokens').textContent = totalRequestTokens.toLocaleString();
-            document.getElementById('promptTokens').textContent = (promptTokens > 0 ? '' : '~') + displayPromptTokens.toLocaleString();
-            document.getElementById('completionTokens').textContent = (completionTokens > 0 ? '' : '~') + displayCompletionTokens.toLocaleString();
+            document.getElementById('promptTokens').textContent = inputTokens.toLocaleString();
+            document.getElementById('completionTokens').textContent = outputTokens.toLocaleString();
             document.getElementById('lastRequestCost').textContent = '$' + requestCost.toFixed(6);
         }
 
@@ -2385,20 +2359,8 @@
                 metaHtml += `<span class="msg-pill">&#9889; ${(latencyMs / 1000).toFixed(2)}s</span>`;
             }
             if (usage) {
-                const tokens = usage.total_tokens || 0;
+                const { totalRequestTokens: tokens, requestCost: msgCost } = normalizeUsage(usage);
                 metaHtml += `<span class="msg-pill">&#128187; ${tokens.toLocaleString()} tokens</span>`;
-                // Calculate and display cost
-                const currentModel = getCurrentModel();
-                const costs = COST_PER_1K[currentModel] || { input: 0.001, output: 0.002 };
-                const promptTokens = usage.prompt_tokens || 0;
-                const completionTokens = usage.completion_tokens || 0;
-                let msgCost = 0;
-                if (promptTokens > 0 || completionTokens > 0) {
-                    msgCost = (promptTokens / 1000) * costs.input + (completionTokens / 1000) * costs.output;
-                } else if (tokens > 0) {
-                    // Fallback: estimate using blended rate (70% input, 30% output)
-                    msgCost = (tokens * 0.7 / 1000) * costs.input + (tokens * 0.3 / 1000) * costs.output;
-                }
                 metaHtml += `<span class="msg-pill">&#36; $${msgCost.toFixed(6)}</span>`;
             }
             let feedbackHtml = '';
@@ -2518,20 +2480,8 @@
                 metaHtml += `<span class="msg-pill">&#9889; ${(latencyMs / 1000).toFixed(2)}s</span>`;
             }
             if (usage) {
-                const tokens = usage.total_tokens || 0;
+                const { totalRequestTokens: tokens, requestCost: msgCost } = normalizeUsage(usage);
                 metaHtml += `<span class="msg-pill">&#128187; ${tokens.toLocaleString()} tokens</span>`;
-                // Calculate and display cost
-                const currentModel = getCurrentModel();
-                const costs = COST_PER_1K[currentModel] || { input: 0.001, output: 0.002 };
-                const promptTokens = usage.prompt_tokens || 0;
-                const completionTokens = usage.completion_tokens || 0;
-                let msgCost = 0;
-                if (promptTokens > 0 || completionTokens > 0) {
-                    msgCost = (promptTokens / 1000) * costs.input + (completionTokens / 1000) * costs.output;
-                } else if (tokens > 0) {
-                    // Fallback: estimate using blended rate (70% input, 30% output)
-                    msgCost = (tokens * 0.7 / 1000) * costs.input + (tokens * 0.3 / 1000) * costs.output;
-                }
                 metaHtml += `<span class="msg-pill">&#36; $${msgCost.toFixed(6)}</span>`;
             }
             if (metaHtml) {
