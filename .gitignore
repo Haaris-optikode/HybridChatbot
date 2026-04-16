@@ -136,6 +136,7 @@ feedback/
 
 # Application log
 logs.txt
+SampleQuestions.txt
 ImplementationPlan.md
 
 # ---------- Project-specific: old / test / unused files ----------
