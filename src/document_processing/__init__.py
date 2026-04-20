@@ -1,11 +1,15 @@
 """
 document_processing — Adaptive, format-agnostic document processing pipeline.
 
-Replaces the rigid clinical-note-specific chunking with a universal pipeline:
-  PDF → Structured Markdown (pymupdf4llm) → Element-aware chunking
+Supports multiple document formats with quality validation and deduplication:
+  PDF  → pymupdf4llm → pymupdf fallback → OCR fallback
+  DOCX → python-docx
+  Images → Tesseract OCR
 
 Public API:
-    process_document(pdf_path, chunk_size, chunk_overlap, document_id) -> list[Document]
+    process_document(file_path, chunk_size, chunk_overlap, document_id) -> list[Document]
+    compute_content_hash(text) -> str
+    validate_document_text(text, source_path, page_count) -> (bool, str)
 
 Usage:
     from document_processing import process_document
@@ -14,15 +18,17 @@ Usage:
     # Returns list of LangChain Document objects ready for Qdrant indexing
 """
 
+import hashlib
 import os
 import uuid
 import logging
 from datetime import datetime
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 from langchain_core.documents import Document
 
-from document_processing.pdf_parser import parse_pdf_to_markdown
+from document_processing.format_handlers import extract_text
+from document_processing.quality_gate import validate_extracted_text
 from document_processing.metadata_extractor import (
     extract_mrn,
     extract_patient_name,
@@ -36,6 +42,31 @@ from document_processing.adaptive_chunker import AdaptiveDocumentChunker
 logger = logging.getLogger(__name__)
 
 PAYLOAD_SCHEMA_VERSION = "clinical_values_v1"
+
+
+def compute_content_hash(text: str) -> str:
+    """Compute SHA-256 hash of normalized document text for deduplication.
+
+    Normalization: lowercased, whitespace-collapsed, stripped.
+    Two documents with the same clinical content but different formatting
+    will produce the same hash.
+    """
+    import re
+    normalized = re.sub(r'\s+', ' ', text.lower().strip())
+    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+
+
+def validate_document_text(
+    text: str,
+    source_path: str,
+    page_count: int = 0,
+) -> Tuple[bool, str]:
+    """Public wrapper for the quality gate validation.
+
+    Returns:
+        (is_valid, reason) — True if text passes quality checks.
+    """
+    return validate_extracted_text(text, source_path, page_count)
 
 
 def _normalize_date_to_iso(raw: Optional[str]) -> Optional[str]:
@@ -55,38 +86,51 @@ def _normalize_date_to_iso(raw: Optional[str]) -> Optional[str]:
 
 
 def process_document(
-    pdf_path: str,
+    pdf_path: str = "",
     chunk_size: int = 1000,
     chunk_overlap: int = 200,
     document_id: Optional[str] = None,
     min_chunk_size: int = 150,
+    *,
+    file_path: Optional[str] = None,
 ) -> List[Document]:
-    """Process a PDF into chunked Documents with rich metadata.
+    """Process a document into chunked Documents with rich metadata.
+
+    Supports PDF, DOCX, and image files. Includes OCR fallback for scanned
+    PDFs, quality gate validation, and content hashing for deduplication.
 
     Full pipeline:
-      1. PDF → structured markdown (preserves headers, tables, lists)
-      2. Extract metadata (MRN, patient name, document type, encounter date)
-      3. Adaptive element-aware chunking (tables kept whole, SOAP per-day, etc.)
-      4. Context prefixing and metadata attachment
+      1. Format-aware text extraction (PDF/DOCX/image with OCR fallback)
+      2. Quality gate — rejects empty, corrupted, or garbled documents
+      3. Extract metadata (MRN, patient name, document type, encounter date)
+      4. Adaptive element-aware chunking (tables kept whole, SOAP per-day, etc.)
+      5. Context prefixing, metadata attachment, and content hash
 
     Args:
-        pdf_path: Full path to the PDF file.
+        pdf_path: Path to the document file (kept for backward compatibility).
         chunk_size: Target max characters per chunk (default 1000).
         chunk_overlap: Character overlap for narrative text splits (default 200).
         document_id: Optional unique ID for this document. Auto-generated if None.
         min_chunk_size: Minimum chunk size before merging with neighbors (default 150).
+        file_path: Path to the document file. Takes precedence over pdf_path.
 
     Returns:
         List of LangChain Document objects ready for vector DB indexing.
+        Empty list if the document fails quality validation.
     """
-    pdf_file = os.path.basename(pdf_path)
-    doc_id = document_id or str(uuid.uuid4())
-    logger.info("[DocProcessor] Processing: %s (id=%s)", pdf_file, doc_id[:8])
+    # Support both old (pdf_path) and new (file_path) parameter names
+    actual_path = file_path or pdf_path
+    if not actual_path:
+        raise ValueError("Either file_path or pdf_path must be provided")
 
-    # Step 1: PDF → Structured Markdown
-    pages = parse_pdf_to_markdown(pdf_path)
+    source_file = os.path.basename(actual_path)
+    doc_id = document_id or str(uuid.uuid4())
+    logger.info("[DocProcessor] Processing: %s (id=%s)", source_file, doc_id[:8])
+
+    # Step 1: Format-aware text extraction (with OCR fallback for PDFs)
+    pages = extract_text(actual_path)
     if not pages:
-        logger.warning("[DocProcessor] No content extracted from %s", pdf_file)
+        logger.warning("[DocProcessor] No content extracted from %s", source_file)
         return []
 
     # Build full markdown text and page offset map
@@ -100,6 +144,20 @@ def process_document(
         full_markdown += page_data["markdown"]
         end = len(full_markdown)
         page_map.append((start, end, page_data["page_number"]))
+
+    # Step 1.5: Quality gate — reject documents with unusable text
+    is_valid, reason = validate_extracted_text(
+        full_markdown, actual_path, page_count=len(pages)
+    )
+    if not is_valid:
+        logger.warning(
+            "[DocProcessor] Document rejected by quality gate: %s (reason=%s)",
+            source_file, reason,
+        )
+        return []
+
+    # Compute content hash for deduplication
+    content_hash = compute_content_hash(full_markdown)
 
     # Step 2: Extract metadata
     patient_mrn = extract_mrn(full_markdown)
@@ -115,6 +173,7 @@ def process_document(
     logger.info("  Patient  : %s", patient_name or "not found")
     logger.info("  Doc Type : %s", doc_type)
     logger.info("  Date     : %s", encounter_date or "not found")
+    logger.info("  Hash     : %s", content_hash[:16])
 
     # Step 3: Adaptive chunking
     chunker = AdaptiveDocumentChunker(
@@ -124,12 +183,13 @@ def process_document(
     )
 
     base_metadata = {
-        "source": pdf_file,
-        "filename": pdf_file,
+        "source": source_file,
+        "filename": source_file,
         "patient_mrn": patient_mrn,
         "patient_name": patient_name,
         "document_type": doc_type,
         "document_id": doc_id,
+        "content_hash": content_hash,
     }
     if encounter_date:
         iso = _normalize_date_to_iso(encounter_date)

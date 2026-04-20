@@ -126,17 +126,17 @@ class ClinicalNotesVectorizer:
 
     # ── PDF Processing ────────────────────────────────────────────────────
 
-    def process_pdf(self, pdf_path: str, document_id: Optional[str] = None) -> List[Document]:
-        """Process a single PDF into chunked Documents with rich metadata.
+    # Supported file extensions for document processing
+    SUPPORTED_EXTENSIONS = {".pdf", ".docx", ".png", ".jpg", ".jpeg", ".tiff", ".tif", ".bmp"}
 
-        Uses the adaptive document processing pipeline:
-          1. PDF → structured markdown (pymupdf4llm: preserves tables, headers)
-          2. Multi-pattern metadata extraction (MRN, name, doc type)
-          3. Element-aware chunking (tables whole, SOAP per-day, narrative split)
-          4. Context prefixing and metadata attachment
+    def process_file(self, file_path: str, document_id: Optional[str] = None) -> List[Document]:
+        """Process a single document file into chunked Documents with rich metadata.
+
+        Supports PDF, DOCX, and image files. Includes OCR fallback for scanned
+        PDFs and quality gate validation.
 
         Args:
-            pdf_path: Full path to the PDF file.
+            file_path: Full path to the document file.
             document_id: Optional unique document ID. Auto-generated if None.
 
         Returns:
@@ -145,36 +145,41 @@ class ClinicalNotesVectorizer:
         from document_processing import process_document
 
         return process_document(
-            pdf_path=pdf_path,
+            file_path=file_path,
             chunk_size=self.chunk_size,
             chunk_overlap=self.chunk_overlap,
             document_id=document_id,
         )
 
+    def process_pdf(self, pdf_path: str, document_id: Optional[str] = None) -> List[Document]:
+        """Process a single PDF (backward-compatible wrapper for process_file)."""
+        return self.process_file(pdf_path, document_id)
+
     def process_folder(self, folder_path: str) -> List[Document]:
-        """Process all PDFs in a folder.
+        """Process all supported documents in a folder.
 
         Args:
-            folder_path: Path to folder containing PDF files.
+            folder_path: Path to folder containing document files.
 
         Returns:
-            Combined list of Document objects from all PDFs.
+            Combined list of Document objects from all files.
         """
         if not os.path.exists(folder_path):
             raise FileNotFoundError(f"Folder not found: {folder_path}")
 
-        pdf_files = sorted(
-            [f for f in os.listdir(folder_path) if f.lower().endswith(".pdf")]
+        supported_files = sorted(
+            f for f in os.listdir(folder_path)
+            if os.path.splitext(f)[1].lower() in self.SUPPORTED_EXTENSIONS
         )
-        if not pdf_files:
-            raise FileNotFoundError(f"No PDF files in: {folder_path}")
+        if not supported_files:
+            raise FileNotFoundError(f"No supported document files in: {folder_path}")
 
-        logger.info(f"\n[Documents] Found {len(pdf_files)} PDF(s): {pdf_files}")
+        logger.info(f"\n[Documents] Found {len(supported_files)} file(s): {supported_files}")
 
         all_documents = []
-        for pdf_file in pdf_files:
-            pdf_path = os.path.join(folder_path, pdf_file)
-            docs = self.process_pdf(pdf_path)
+        for doc_file in supported_files:
+            file_path = os.path.join(folder_path, doc_file)
+            docs = self.process_file(file_path)
             all_documents.extend(docs)
 
         logger.info(f"\n[Summary] Total chunks to index: {len(all_documents)}")
@@ -260,6 +265,8 @@ class ClinicalNotesVectorizer:
             "metadata.document_type",
             # Versioning marker (lets query-time detect schema compatibility)
             "metadata.payload_schema_version",
+            # Deduplication
+            "metadata.content_hash",
             # Cohort-filter fields
             "metadata.diagnoses_text",
             "metadata.active_medications",
@@ -383,14 +390,14 @@ class ClinicalNotesVectorizer:
         collection_name: str = "PatientData",
         append: bool = True,
     ) -> None:
-        """Vectorize a single PDF and add to a Qdrant collection.
+        """Vectorize a single document and add to a Qdrant collection.
 
         Args:
-            pdf_path: Full path to the PDF file.
+            pdf_path: Full path to the document file (any supported format).
             collection_name: Qdrant collection name.
             append: If True, add to existing collection. If False, recreate.
         """
-        documents = self.process_pdf(pdf_path)
+        documents = self.process_file(pdf_path)
         client = self._connect()
 
         if not append:
@@ -400,6 +407,174 @@ class ClinicalNotesVectorizer:
 
         info = client.get_collection(collection_name)
         logger.info(f"\n[Done] '{collection_name}' now has {info.points_count} vectors")
+
+    # ── Deduplication ─────────────────────────────────────────────────────
+
+    def _get_existing_hashes(
+        self,
+        client: QdrantClient,
+        collection_name: str,
+    ) -> set:
+        """Retrieve all content_hash values currently in the collection.
+
+        Used for deduplication: if a document's content_hash is already
+        present, it can be skipped during incremental indexing.
+        """
+        from qdrant_client.models import Filter, ScrollRequest
+        existing_hashes = set()
+
+        try:
+            if not client.collection_exists(collection_name):
+                return existing_hashes
+
+            offset = None
+            while True:
+                result = client.scroll(
+                    collection_name=collection_name,
+                    scroll_filter=None,
+                    limit=100,
+                    offset=offset,
+                    with_payload=["metadata.content_hash"],
+                    with_vectors=False,
+                )
+                points, next_offset = result
+                for point in points:
+                    payload = point.payload or {}
+                    meta = payload.get("metadata", {})
+                    h = meta.get("content_hash")
+                    if h:
+                        existing_hashes.add(h)
+                if next_offset is None:
+                    break
+                offset = next_offset
+
+        except Exception as e:
+            logger.warning("[Dedup] Could not retrieve existing hashes: %s", e)
+
+        return existing_hashes
+
+    def _delete_by_content_hash(
+        self,
+        client: QdrantClient,
+        collection_name: str,
+        content_hash: str,
+    ) -> int:
+        """Delete all points matching a content_hash (for re-indexing a document).
+
+        Returns the number of points deleted.
+        """
+        from qdrant_client.models import Filter, FieldCondition, MatchValue
+
+        try:
+            result = client.delete(
+                collection_name=collection_name,
+                points_selector=Filter(
+                    must=[
+                        FieldCondition(
+                            key="metadata.content_hash",
+                            match=MatchValue(value=content_hash),
+                        )
+                    ]
+                ),
+            )
+            logger.info("[Dedup] Deleted points with content_hash=%s", content_hash[:16])
+            return 1  # Qdrant delete doesn't return count, so return sentinel
+        except Exception as e:
+            logger.warning("[Dedup] Failed to delete by content_hash: %s", e)
+            return 0
+
+    # ── Incremental Indexing ──────────────────────────────────────────────
+
+    def vectorize_incremental(
+        self,
+        folder_path: str,
+        collection_name: str = "PatientData",
+    ) -> dict:
+        """Index only new or modified documents. Never drops the collection.
+
+        Compares content hashes of documents on disk against those already in
+        Qdrant. Only indexes documents whose content hash is not yet present.
+
+        Args:
+            folder_path: Path to folder containing document files.
+            collection_name: Qdrant collection name.
+
+        Returns:
+            Dict with counts: {"new": int, "skipped": int, "failed": int}
+        """
+        logger.info("=" * 70)
+        logger.info("  INCREMENTAL INDEXING — New/Modified Documents Only")
+        logger.info("=" * 70)
+
+        if not os.path.exists(folder_path):
+            raise FileNotFoundError(f"Folder not found: {folder_path}")
+
+        supported_files = sorted(
+            f for f in os.listdir(folder_path)
+            if os.path.splitext(f)[1].lower() in self.SUPPORTED_EXTENSIONS
+        )
+        if not supported_files:
+            logger.info("No supported files found in %s", folder_path)
+            return {"new": 0, "skipped": 0, "failed": 0}
+
+        logger.info(f"[Documents] Found {len(supported_files)} file(s)")
+
+        client = self._connect()
+
+        # Ensure collection exists (create if first run)
+        if not client.collection_exists(collection_name):
+            logger.info("[Incremental] Collection does not exist — creating...")
+            self.create_collection(client, collection_name)
+
+        # Get existing content hashes for dedup
+        existing_hashes = self._get_existing_hashes(client, collection_name)
+        logger.info(f"[Dedup] {len(existing_hashes)} existing document hashes in collection")
+
+        new_count = 0
+        skip_count = 0
+        fail_count = 0
+
+        vector_store = QdrantVectorStore(
+            client=client,
+            collection_name=collection_name,
+            embedding=self.embeddings,
+        )
+
+        for doc_file in supported_files:
+            file_path = os.path.join(folder_path, doc_file)
+            try:
+                documents = self.process_file(file_path)
+                if not documents:
+                    logger.warning("[Incremental] No chunks from %s (quality gate?)", doc_file)
+                    fail_count += 1
+                    continue
+
+                # Check content hash from the first chunk's metadata
+                content_hash = documents[0].metadata.get("content_hash")
+                if content_hash and content_hash in existing_hashes:
+                    logger.info("[Incremental] SKIP (unchanged): %s", doc_file)
+                    skip_count += 1
+                    continue
+
+                # Index new document
+                for i in range(0, len(documents), self.batch_size):
+                    batch = documents[i : i + self.batch_size]
+                    vector_store.add_documents(batch)
+
+                new_count += 1
+                if content_hash:
+                    existing_hashes.add(content_hash)
+                logger.info("[Incremental] INDEXED: %s (%d chunks)", doc_file, len(documents))
+
+            except Exception as e:
+                logger.error("[Incremental] FAILED: %s — %s", doc_file, e)
+                fail_count += 1
+
+        logger.info(
+            "\n[Incremental] Done: %d new, %d skipped, %d failed",
+            new_count, skip_count, fail_count,
+        )
+        return {"new": new_count, "skipped": skip_count, "failed": fail_count}
 
     def _verify(
         self,
@@ -476,10 +651,17 @@ def main():
         qdrant_api_key=cfg.clinical_notes_rag_qdrant_api_key or None,
     )
 
-    vectorizer.vectorize_folder(
-        folder_path=docs_folder,
-        collection_name=cfg.clinical_notes_rag_collection_name,
-    )
+    # Support incremental mode via CLI flag
+    if "--incremental" in sys.argv:
+        vectorizer.vectorize_incremental(
+            folder_path=docs_folder,
+            collection_name=cfg.clinical_notes_rag_collection_name,
+        )
+    else:
+        vectorizer.vectorize_folder(
+            folder_path=docs_folder,
+            collection_name=cfg.clinical_notes_rag_collection_name,
+        )
 
     # ── Optionally pre-compute summaries so they're cached at runtime ────
     if "--precompute-summaries" in sys.argv:

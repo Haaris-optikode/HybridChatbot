@@ -40,6 +40,13 @@ clinical_notes_rag:
   max_upload_size_mb: 50           # max file size per upload
   supported_formats:               # accepted file extensions
     - .pdf
+    - .docx
+    - .png
+    - .jpg
+    - .jpeg
+    - .tiff
+    - .tif
+    - .bmp
 
 langsmith:
   tracing: "false"  # Set to "true" to enable LangSmith agent tracing. Requires LANGCHAIN_API_KEY in .env.

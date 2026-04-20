@@ -30,5 +30,101 @@
   {
     "question": "What were the discharge instructions?",
     "ground_truth": "Discharge instructions including follow-up appointments, medication changes, and activity restrictions."
+  },
+  {
+    "question": "What is the patient's full name and date of birth?",
+    "ground_truth": "The patient's full legal name and date of birth should be extracted from demographic information in the clinical notes."
+  },
+  {
+    "question": "What is the patient's advance directive status?",
+    "ground_truth": "The advance directive or code status (e.g., Full Code, DNR/DNI) and healthcare proxy information should be documented."
+  },
+  {
+    "question": "What was the BNP level on admission?",
+    "ground_truth": "The BNP (B-type natriuretic peptide) level measured on admission should be reported with units."
+  },
+  {
+    "question": "What is the patient's ejection fraction?",
+    "ground_truth": "The ejection fraction (EF) from echocardiogram should be reported, including any change during the hospital stay."
+  },
+  {
+    "question": "What follow-up appointments were scheduled after discharge?",
+    "ground_truth": "Follow-up appointments including specialty, provider name, and timeline should be documented."
+  },
+  {
+    "question": "What medications were prescribed at discharge?",
+    "ground_truth": "The complete discharge medication list including new medications, dose changes, and discontinued medications."
+  },
+  {
+    "question": "What is the patient's weight change during hospitalization?",
+    "ground_truth": "Admission weight, discharge weight, and net weight change should be documented."
+  },
+  {
+    "question": "What imaging studies were performed?",
+    "ground_truth": "All imaging studies (X-ray, CT, MRI, echocardiogram, etc.) with key findings should be reported."
+  },
+  {
+    "question": "What is the patient's social history?",
+    "ground_truth": "Social history including smoking status, alcohol use, living situation, and occupation should be documented."
+  },
+  {
+    "question": "What were the patient's home medications before admission?",
+    "ground_truth": "The pre-admission medication list (home medications) with drug names, dosages, and frequencies."
+  },
+  {
+    "question": "What is the patient's renal function during the hospital stay?",
+    "ground_truth": "Creatinine levels, BUN, GFR or other renal function markers with trends during hospitalization."
+  },
+  {
+    "question": "What consults were ordered during the hospitalization?",
+    "ground_truth": "Specialty consultations requested, consultant names, and key recommendations from each consult."
+  },
+  {
+    "question": "What was the patient's diet order during hospitalization?",
+    "ground_truth": "Dietary restrictions or special diet orders (e.g., low sodium, diabetic diet, NPO) during the hospital stay."
+  },
+  {
+    "question": "What IV fluids or drips were administered?",
+    "ground_truth": "Intravenous fluids, drips, or continuous infusions given during hospitalization with rates if available."
+  },
+  {
+    "question": "What is the patient's family medical history?",
+    "ground_truth": "Family history of medical conditions, especially cardiac disease, diabetes, cancer, or other hereditary conditions."
+  },
+  {
+    "question": "What were the daily progress note assessments?",
+    "ground_truth": "Day-by-day clinical assessments from progress notes including clinical status changes and treatment adjustments."
+  },
+  {
+    "question": "What patient education was provided before discharge?",
+    "ground_truth": "Education topics covered with the patient including medication instructions, warning signs, dietary guidance, and activity restrictions."
+  },
+  {
+    "question": "What is the patient's hemoglobin A1c level?",
+    "ground_truth": "The HbA1c level if documented, including the date of the test and clinical significance for diabetes management."
+  },
+  {
+    "question": "What are the patient's electrolyte levels?",
+    "ground_truth": "Electrolyte values including sodium, potassium, chloride, bicarbonate, calcium, magnesium, and phosphorus with dates."
+  },
+  {
+    "question": "Were there any medication changes during the hospital stay?",
+    "ground_truth": "Medications that were started, stopped, or dose-adjusted during the hospitalization with the clinical rationale."
+  },
+  {
+    "question": "What is the patient's code status and who is the healthcare proxy?",
+    "ground_truth": "The code status (Full Code, DNR, DNI, comfort care) and the designated healthcare proxy or emergency contact."
+  },
+  {
+    "question": "What was the reason for admission?",
+    "ground_truth": "The chief complaint and primary reason for hospitalization including presenting symptoms and acuity."
+  },
+  {
+    "question": "What are the patient's active problem list diagnoses?",
+    "ground_truth": "The complete active problem list including both the primary diagnosis and all secondary/comorbid conditions."
+  },
+  {
+    "question": "What physical examination findings were documented on admission?",
+    "ground_truth": "Key physical exam findings on admission including general appearance, cardiac, pulmonary, abdominal, and extremity examinations."
   }
 ]

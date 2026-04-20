@@ -1651,10 +1651,10 @@
                 <div class="section-label">Upload Documents</div>
                 <div class="upload-zone" id="uploadZone" onclick="document.getElementById('uploadInput').click()">
                     <div class="upload-icon">&#128196;</div>
-                    <div class="upload-text">Drop PDF or click to browse</div>
-                    <div class="upload-hint">Max 50 MB</div>
+                    <div class="upload-text">Drop file or click to browse</div>
+                    <div class="upload-hint">PDF, DOCX, PNG, JPG, TIFF, BMP &bull; Max 50 MB</div>
                 </div>
-                <input type="file" id="uploadInput" class="upload-input" accept=".pdf" onchange="handleFileSelect(event)">
+                <input type="file" id="uploadInput" class="upload-input" accept=".pdf,.docx,.png,.jpg,.jpeg,.tiff,.tif,.bmp" onchange="handleFileSelect(event)">
                 <div class="uploaded-files" id="uploadedFiles"></div>
             </div>
 
@@ -2943,8 +2943,10 @@
         }
 
         async function uploadFile(file) {
-            if (!file.name.toLowerCase().endsWith('.pdf')) {
-                alert('Only PDF files are supported.');
+            const allowedExts = ['.pdf', '.docx', '.png', '.jpg', '.jpeg', '.tiff', '.tif', '.bmp'];
+            const ext = file.name.substring(file.name.lastIndexOf('.')).toLowerCase();
+            if (!allowedExts.includes(ext)) {
+                alert('Unsupported format. Allowed: ' + allowedExts.join(', '));
                 return;
             }
             if (file.size > 50 * 1024 * 1024) {

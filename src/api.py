@@ -1918,20 +1918,63 @@ def _save_documents_meta(meta: Dict[str, dict]) -> None:
         json.dump(meta, f, indent=2, default=str)
 
 
-def _vectorize_in_background(document_id: str, pdf_path: str, collection_name: str):
+def _vectorize_in_background(document_id: str, file_path: str, collection_name: str):
     """Run vectorization in a background thread and update metadata on completion."""
     try:
         from document_processing import process_document
         from agent_graph.tool_clinical_notes_rag import get_rag_tool_instance
         from langchain_qdrant import QdrantVectorStore
 
-        # Process PDF into chunks (no Qdrant client needed for this step)
+        # Process document into chunks (supports PDF, DOCX, images with OCR)
         documents = process_document(
-            pdf_path=pdf_path,
+            file_path=file_path,
             chunk_size=TOOLS_CFG.clinical_notes_rag_chunk_size,
             chunk_overlap=TOOLS_CFG.clinical_notes_rag_chunk_overlap,
             document_id=document_id,
         )
+
+        if not documents:
+            with _documents_lock:
+                meta = _load_documents_meta()
+                if document_id in meta:
+                    meta[document_id]["status"] = "error"
+                    meta[document_id]["error"] = "Document failed quality validation or produced no content"
+                    _save_documents_meta(meta)
+            return
+
+        # Check for duplicate content before indexing
+        content_hash = documents[0].metadata.get("content_hash") if documents else None
+        if content_hash:
+            rag = get_rag_tool_instance()
+            from qdrant_client.models import Filter, FieldCondition, MatchValue
+            try:
+                existing = rag.client.scroll(
+                    collection_name=collection_name,
+                    scroll_filter=Filter(must=[
+                        FieldCondition(
+                            key="metadata.content_hash",
+                            match=MatchValue(value=content_hash),
+                        )
+                    ]),
+                    limit=1,
+                    with_payload=["metadata.document_id"],
+                    with_vectors=False,
+                )
+                if existing[0]:
+                    existing_doc_id = existing[0][0].payload.get("metadata", {}).get("document_id", "unknown")
+                    with _documents_lock:
+                        meta = _load_documents_meta()
+                        if document_id in meta:
+                            meta[document_id]["status"] = "duplicate"
+                            meta[document_id]["duplicate_of"] = existing_doc_id
+                            _save_documents_meta(meta)
+                    logger.info(
+                        "Document %s is a duplicate of %s — skipped indexing",
+                        document_id, existing_doc_id,
+                    )
+                    return
+            except Exception as e:
+                logger.warning("Dedup check failed (proceeding with indexing): %s", e)
 
         # Reuse the RAG tool's existing Qdrant client and vector store
         # (embedded mode only allows a single client instance per storage path)
@@ -1960,6 +2003,7 @@ def _vectorize_in_background(document_id: str, pdf_path: str, collection_name: s
             if document_id in meta:
                 meta[document_id]["status"] = "ready"
                 meta[document_id]["chunks"] = len(documents)
+                meta[document_id]["content_hash"] = content_hash
                 meta[document_id]["completed_at"] = datetime.utcnow().isoformat() + "Z"
                 _save_documents_meta(meta)
 
@@ -1982,8 +2026,9 @@ async def upload_document(
     file: UploadFile = File(...),
     user: dict = Depends(get_current_user),
 ):
-    """Upload a PDF document for vectorization and RAG querying.
+    """Upload a document for vectorization and RAG querying.
 
+    Supports PDF, DOCX, and image files (PNG, JPG, TIFF, BMP).
     The file is saved to disk and vectorized in the background.
     Returns a document_id that can be used to check status or delete the document.
     """
@@ -1993,7 +2038,7 @@ async def upload_document(
     if ext not in SUPPORTED_FORMATS:
         raise HTTPException(
             status_code=400,
-            detail=f"Unsupported file format '{ext}'. Supported: {', '.join(SUPPORTED_FORMATS)}",
+            detail=f"Unsupported file format '{ext}'. Supported: {', '.join(sorted(SUPPORTED_FORMATS))}",
         )
 
     # Read and validate file size
@@ -2009,9 +2054,9 @@ async def upload_document(
     # Generate document ID and save file
     document_id = str(uuid.uuid4())
     safe_filename = f"{document_id}{ext}"
-    pdf_path = os.path.join(UPLOADS_DIR, safe_filename)
+    file_path = os.path.join(UPLOADS_DIR, safe_filename)
 
-    with open(pdf_path, "wb") as f:
+    with open(file_path, "wb") as f:
         f.write(content)
 
     # Register in metadata
@@ -2034,7 +2079,7 @@ async def upload_document(
     collection_name = TOOLS_CFG.clinical_notes_rag_collection_name
     thread = _threading.Thread(
         target=_vectorize_in_background,
-        args=(document_id, pdf_path, collection_name),
+        args=(document_id, file_path, collection_name),
         daemon=True,
     )
     thread.start()
