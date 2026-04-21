@@ -10,7 +10,7 @@ primary_agent:
   thinking_fallback_llms:
     - gpt-4.1
     - gpt-4.1-mini
-  llm_temperature: 0.3
+  llm_temperature: 0.1          # Low temperature for deterministic clinical fact synthesis
   llm_provider: openai           # "google" for Gemini, "openai" for GPT models
 
 clinical_notes_rag:
@@ -22,7 +22,7 @@ clinical_notes_rag:
   summarization_fallback_llms:
     - gpt-4.1
     - gpt-4.1-mini
-  llm_temperature: 0.2
+  llm_temperature: 0.1          # Low temperature for deterministic clinical data retrieval
   embedding_model: NeuML/pubmedbert-base-embeddings
   embedding_dimensions: 768
   vectordb: data/clinical_notes_vectordb

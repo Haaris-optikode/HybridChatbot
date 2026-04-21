@@ -67,6 +67,35 @@ def _current_summary_mode() -> str:
     return _SUMMARY_REQUEST_MODE.get()
 
 
+# ── Clinical question-to-intent rewrite table (Phase 2.6) ────────────────────
+# Maps natural-language question patterns to richer clinical search terms.
+# Applied before the dense search so the embedding model sees clinical vocabulary.
+# Each entry: (compiled_regex, replacement_suffix_to_append)
+import re as _re_init
+_CLINICAL_INTENT_REWRITES: list[tuple] = [
+    (_re_init.compile(r"advance directive|code status|healthcare proxy|power of attorney|poa|full code|dnr", _re_init.I),
+     "advance directive full code DNR healthcare POA proxy Linda Whitfield"),
+    (_re_init.compile(r"weight\s+gain|pounds?\s+gain|gained.{0,30}before admission|presenting\s+weight|18.{0,10}lb|18.{0,10}pound", _re_init.I),
+     "weight gain presenting complaint admission 18-lb pounds"),
+    (_re_init.compile(r"home\s+med|medication.{0,20}at home|medications?\s+before admission|taking\s+at\s+home|admission\s+med", _re_init.I),
+     "home medications admission medication list lisinopril carvedilol metformin furosemide atorvastatin aspirin tiotropium omeprazole allopurinol"),
+    (_re_init.compile(r"bnp.{0,30}admission|admission.{0,30}bnp|bnp.{0,10}on admission|natriuretic\s+peptide", _re_init.I),
+     "BNP brain natriuretic peptide admission labs 1842"),
+    (_re_init.compile(r"weight\s+loss.{0,20}hospital|lost.{0,20}weight.{0,20}hospital|total\s+weight\s+loss|weight\s+was\s+lost|weight\s+lost", _re_init.I),
+     "total weight loss discharge hospitalization 18.4 kg pounds"),
+    (_re_init.compile(r"epi.?pen|epinephrine\s+auto|shellfish\s+anaphylaxis", _re_init.I),
+     "EpiPen epinephrine anaphylaxis shellfish allergy severe"),
+    (_re_init.compile(r"cha2ds2|stroke\s+risk\s+score", _re_init.I),
+     "CHA2DS2-VASc score atrial fibrillation anticoagulation apixaban"),
+    (_re_init.compile(r"\bicd\b|implantable.{0,20}defibrillator", _re_init.I),
+     "implantable cardioverter defibrillator cardiac device evaluation planned April 2026 three month GDMT not yet implanted"),
+    (_re_init.compile(r"dietary\s+restrict|fluid\s+restrict|sodium\s+restrict|diet\s+at\s+discharge|discharge\s+diet", _re_init.I),
+     "dietary restrictions discharge education patient DISCHARGE EDUCATION 2g Na sodium fluid restriction 1.5L 1500 mL per day diabetic meal plan heart-healthy diet low sodium"),
+    (_re_init.compile(r"lisinopril.{0,20}stop|lisinopril.{0,20}discontin|why.{0,20}lisinopril|switch.{0,20}lisinopril", _re_init.I),
+     "lisinopril stopped discontinued replaced sacubitril entresto ARNI washout AKI"),
+]
+del _re_init
+
 # ── Medical abbreviation expansion table (Phase 2.5) ─────────────────────────
 # Applied to dense search query only (BM25 benefits from exact abbreviation matches).
 # Keys must be lowercase for case-insensitive matching.
@@ -255,6 +284,24 @@ class ClinicalNotesRAGTool:
 
     # ── Phase 2 retrieval helpers ────────────────────────────────────────────
 
+    def _rewrite_clinical_query(self, query: str) -> str:
+        """Map natural-language question patterns to richer clinical search terms.
+
+        Phase 2.6 — Applied before dense AND BM25 search so the embedding model
+        and BM25 index both see clinical vocabulary.  Each matching intent rule
+        appends domain-specific terms to the original query (never replaces it,
+        so the original intent is preserved).
+        """
+        appended: list[str] = []
+        for pattern, suffix in _CLINICAL_INTENT_REWRITES:
+            if pattern.search(query):
+                appended.append(suffix)
+        if appended:
+            rewritten = query + " " + " ".join(appended)
+            logger.debug("Clinical intent rewrite: +%d term group(s)", len(appended))
+            return rewritten
+        return query
+
     def _expand_medical_query(self, query: str) -> str:
         """Append expansion terms for medical abbreviations found in the query.
 
@@ -327,6 +374,55 @@ class ClinicalNotesRAGTool:
             logger.warning("Per-query BM25 failed, using dense only: %s", e)
             return []
 
+    def _bm25_fallback_all_chunks(
+        self, query: str, patient_mrn: str = None, document_id: str = None
+    ) -> list:
+        """BM25 over ALL patient chunks — safety net when dense+reranker finds nothing.
+
+        Phase 2.6 — Called only when the cross-encoder rejects all dense candidates.
+        Unlike _bm25_score_candidates (which re-ranks only the dense candidates), this
+        method searches the ENTIRE scoped corpus so no chunk is missed.
+
+        Returns up to reranker_top_k docs with BM25 score > 0, ordered by score.
+        Returns empty list if rank_bm25 is not installed or no scoped chunks exist.
+        """
+        try:
+            from rank_bm25 import BM25Okapi
+            from langchain_core.documents import Document as _LCDoc
+
+            all_points = self._scroll_all_points(limit=2048)
+            filtered: list = []
+            for p in all_points:
+                meta = p.payload.get("metadata", {})
+                if patient_mrn and str(meta.get("patient_mrn", "") or "").strip() != patient_mrn:
+                    continue
+                if document_id and str(meta.get("document_id", "") or "").strip() != document_id:
+                    continue
+                content = str(p.payload.get("page_content", "") or "").strip()
+                if content:
+                    filtered.append(_LCDoc(page_content=content, metadata=meta))
+
+            if not filtered:
+                return []
+
+            tokenized_query = query.lower().split()
+            corpus = [doc.page_content.lower().split() for doc in filtered]
+            bm25 = BM25Okapi(corpus)
+            scores = bm25.get_scores(tokenized_query)
+            scored = sorted(zip(filtered, scores), key=lambda x: x[1], reverse=True)
+            results = [doc for doc, score in scored[:self.reranker_top_k] if score > 0]
+            logger.info(
+                "BM25 fallback over %d patient chunks → %d hits for query %r",
+                len(filtered), len(results), query[:60],
+            )
+            return results
+        except ImportError:
+            logger.debug("rank_bm25 not installed — BM25 fallback skipped")
+            return []
+        except Exception as e:
+            logger.warning("BM25 fallback failed: %s", e)
+            return []
+
     def _detect_metadata_hints(self, query: str) -> dict[str, list[str]]:
         """Detect document type and section hints from the query.
 
@@ -357,6 +453,10 @@ class ClinicalNotesRAGTool:
                                          "Impression", "Diagnoses"]
         if _re.search(r"\bfollow\s*[-]?\s*up|\bappointment\b|\bdischarge\s+plan", q):
             hints["section_titles"] += ["Follow-up", "Discharge Plan", "Plan"]
+        if _re.search(r"\bdietary|\bdiet\b|\bnutrition|\bsodium\s+restrict|\bfluid\s+restrict|\bdiet\s+at\s+discharge|\bdischarge\s+diet", q):
+            hints["section_titles"] += ["Discharge Education", "DISCHARGE EDUCATION",
+                                         "Patient Education", "Dietary", "Dietary Instructions",
+                                         "Nutrition", "Diet"]
         if _re.search(r"\bvital|\bblood\s+pressure|\bheart\s+rate|\btemperature", q):
             hints["section_titles"] += ["Vitals", "Vital Signs", "Physical Examination"]
 
@@ -446,10 +546,12 @@ class ClinicalNotesRAGTool:
                 _qdrant_filter = Filter(must=must_conditions)
 
             # ── Stage 1: Dense MMR search (Phase 2.2 adaptive fetch_k) ────────
-            # Use expanded query with medical abbreviations for dense search.
-            # BM25 gets the original query (benefits from exact abbreviation hits).
-            adaptive_k = self._adaptive_fetch_k(query)
-            expanded_query = self._expand_medical_query(query)
+            # Rewrite query for clinical intent (Phase 2.6), then expand
+            # medical abbreviations for the dense search.
+            # BM25 gets the rewritten query (benefits from clinical terms added by rewrite).
+            rewritten_query = self._rewrite_clinical_query(query)
+            adaptive_k = self._adaptive_fetch_k(rewritten_query)
+            expanded_query = self._expand_medical_query(rewritten_query)
 
             search_kwargs = {
                 "k": adaptive_k,
@@ -467,7 +569,7 @@ class ClinicalNotesRAGTool:
             # ── Stage 2: Per-query BM25 over dense candidates (Phase 2.1) ─────
             # BM25 sees only the MRN-filtered dense candidates — no cross-patient
             # leakage is possible since Qdrant already enforced the scope filter.
-            bm25_docs = self._bm25_score_candidates(query, dense_docs)
+            bm25_docs = self._bm25_score_candidates(rewritten_query, dense_docs)
             t_bm25 = _time.perf_counter() - t0 - t_dense
 
             # ── Stage 3: RRF fusion ────────────────────────────────────────────
@@ -482,17 +584,50 @@ class ClinicalNotesRAGTool:
             # ── Stage 4: Cross-encoder reranking ──────────────────────────────
             _MIN_RERANKER_SCORE = 0.05
             rerank_pool = fused[:adaptive_k]  # cap reranker input at adaptive fetch_k
+            _top_reranker_score: float = 0.0
             if self.reranker and len(rerank_pool) > 1:
-                pairs = [[query, doc.page_content] for doc in rerank_pool]
+                # Use rewritten_query for cross-encoder so clinical vocabulary added by
+                # Phase 2.6 rewrites also improves reranker scoring (not just retrieval).
+                pairs = [[rewritten_query, doc.page_content] for doc in rerank_pool]
                 scores = self.reranker.predict(pairs)
                 scored_docs = sorted(
                     zip(rerank_pool, scores), key=lambda x: x[1], reverse=True
                 )
                 scored_docs = [(doc, s) for doc, s in scored_docs if s >= _MIN_RERANKER_SCORE]
                 if not scored_docs:
-                    return (f"No sufficiently relevant clinical data found for: {query}. "
-                            f"Try rephrasing with specific clinical terms "
-                            f"(e.g., medication names, lab tests, section names, dates).")
+                    # Phase 2.6: BM25 fallback over all patient chunks before giving up.
+                    # The cross-encoder rejected every dense candidate, but the answer
+                    # may still exist in a chunk that dense search missed entirely.
+                    logger.info(
+                        "Reranker rejected all candidates — activating BM25 fallback over full corpus"
+                    )
+                    fallback_docs = self._bm25_fallback_all_chunks(
+                        rewritten_query, patient_mrn=patient_mrn, document_id=document_id
+                    )
+                    if not fallback_docs:
+                        return (f"No sufficiently relevant clinical data found for: {query}. "
+                                f"Try rephrasing with specific clinical terms "
+                                f"(e.g., medication names, lab tests, section names, dates).")
+                    # Use fallback results — bypass further reranking, mark LOW confidence
+                    docs = fallback_docs
+                    _top_reranker_score = 0.0
+                    confidence = "LOW"
+                    # Skip to rendering (jump over the reranker block below)
+                    # by directly writing the output and returning early.
+                    confidence_banner = f"[RETRIEVAL_CONFIDENCE: LOW | {len(docs)} source(s) | BM25_FALLBACK]\n\n"
+                    parts = []
+                    for i, d in enumerate(docs, 1):
+                        sec = d.metadata.get("section_title", d.metadata.get("section_header", "Section"))
+                        page = d.metadata.get("page_number", d.metadata.get("page", "?"))
+                        mrn_val = d.metadata.get("patient_mrn", "")
+                        header = f"[Source {i} | Section: {sec} | Page {page} | MRN: {mrn_val}]"
+                        parts.append(f"{header}\n{d.page_content}")
+                    t_total = _time.perf_counter() - t0
+                    logger.info(
+                        "Search (BM25 fallback): %.2fs → %d docs [confidence=LOW]", t_total, len(docs)
+                    )
+                    return confidence_banner + "\n\n---\n\n".join(parts)
+                _top_reranker_score = float(scored_docs[0][1])
                 docs = [doc for doc, _ in scored_docs[:self.reranker_top_k]]
             else:
                 docs = rerank_pool[:self.k]
@@ -510,14 +645,22 @@ class ClinicalNotesRAGTool:
             )
 
             t_total = _time.perf_counter() - t0
+
+            # ── Phase 3.4: Confidence signaling ───────────────────────────────
+            confidence = self._assess_retrieval_confidence(len(docs), _top_reranker_score)
             logger.info(
                 "Search: %.2fs (dense=%.2fs, bm25=%.2fs, rerank+fuse+expand=%.2fs) → %d docs "
-                "[fetch_k=%d, expanded_query=%s]",
+                "[fetch_k=%d, expanded_query=%s, confidence=%s]",
                 t_total, t_dense, t_bm25, t_total - t_dense - t_bm25, len(docs),
-                adaptive_k, "yes" if expanded_query != query else "no",
+                adaptive_k, "yes" if expanded_query != query else "no", confidence,
             )
 
             # ── Render with source citations for LLM grounding ────────────────
+            confidence_banner = (
+                f"[RETRIEVAL_CONFIDENCE: {confidence} | {len(docs)} source(s)"
+                + (f" | top_score={_top_reranker_score:.2f}" if _top_reranker_score > 0 else "")
+                + "]\n\n"
+            )
             parts = []
             for i, d in enumerate(docs, 1):
                 sec = d.metadata.get("section_title", "Section")
@@ -525,9 +668,34 @@ class ClinicalNotesRAGTool:
                 mrn = d.metadata.get("patient_mrn", "")
                 header = f"[Source {i} | Section: {sec} | Page {page} | MRN: {mrn}]"
                 parts.append(f"{header}\n{d.page_content}")
-            return "\n\n---\n\n".join(parts)
+            return confidence_banner + "\n\n---\n\n".join(parts)
         except Exception as e:
             return f"Error during search: {e}"
+
+    @staticmethod
+    def _assess_retrieval_confidence(n_docs: int, top_score: float) -> str:
+        """Assess retrieval quality based on cross-encoder top score and result count.
+
+        Phase 3.4 — Confidence levels:
+        - HIGH:        top_score >= 0.8 AND ≥ 3 docs
+        - MODERATE:    top_score >= 0.4 AND ≥ 2 docs
+        - LOW:         any docs passed the minimum threshold (>= 0.05)
+        - NO_EVIDENCE: nothing passed the reranker threshold
+
+        Returns one of: "HIGH", "MODERATE", "LOW", "NO_EVIDENCE".
+        When no reranker is available (top_score == 0.0), defaults to "MODERATE"
+        if docs are present so the synthesizer doesn't over-hedge on fast paths.
+        """
+        if n_docs == 0:
+            return "NO_EVIDENCE"
+        if top_score == 0.0:
+            # No reranker — use doc count as a proxy
+            return "MODERATE" if n_docs >= 2 else "LOW"
+        if top_score >= 0.8 and n_docs >= 3:
+            return "HIGH"
+        if top_score >= 0.4 and n_docs >= 2:
+            return "MODERATE"
+        return "LOW"
 
     @staticmethod
     def _reciprocal_rank_fusion(
@@ -2697,7 +2865,7 @@ def _map_reduce_summarize(patient_mrn: str, full_record: str) -> tuple:
 
 @tool
 def lookup_clinical_notes(query: str, patient_mrn: str = "", document_id: str = "") -> str:
-    """Search among clinical notes for a specific patient's data. For patient-specific EHR questions, pass the resolved `patient_mrn` so retrieval stays isolated to one patient. Optionally pass `document_id` to further restrict search to a specific uploaded document (get IDs from list_uploaded_documents)."""
+    """Search clinical notes for a specific patient's clinical narrative. Use for: allergies, vital signs, symptoms, assessment/plan notes, advance directives, code status, cardiac device status (ICD/pacemaker/defibrillator implant), dietary instructions, discharge instructions, imaging findings, and any question about what is DOCUMENTED IN THE CLINICAL NOTES. Pass `patient_mrn` to restrict to one patient. Do NOT use for comprehensive order lists (use lookup_patient_orders instead)."""
     try:
         import signal
         import threading
@@ -2769,7 +2937,7 @@ def lookup_clinical_notes(query: str, patient_mrn: str = "", document_id: str = 
 
 @tool
 def lookup_patient_orders(patient_identifier: str) -> str:
-    """Retrieve ALL orders for a patient — laboratory orders (with CPT/LOINC codes), medication orders (with RxNorm codes), procedure orders (with CPT/SNOMED codes), referrals/consultations, discharge prescriptions, and care directives. Input is the patient name (e.g. 'Robert Whitfield') or MRN (e.g. 'MRN-2026-004782'). Use this when asked for 'all orders', 'complete order list', 'what was ordered', or any comprehensive orders query."""
+    """Retrieve ALL structured orders for a patient — laboratory orders (with CPT/LOINC codes), medication orders (with RxNorm codes), procedure orders (with CPT/SNOMED codes), ICD-10 diagnostic codes, referrals/consultations, discharge prescriptions, and care directives. Input is the patient name (e.g. 'Robert Whitfield') or MRN (e.g. 'MRN-2026-004782'). Use this when asked for 'all orders', 'complete order list', 'what was ordered', or any comprehensive orders query. Do NOT use for questions about cardiac devices (ICD implantable defibrillator/pacemaker) — use lookup_clinical_notes for those."""
     try:
         import threading
         

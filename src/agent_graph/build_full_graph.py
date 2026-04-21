@@ -251,7 +251,7 @@ def build_graph(thinking_mode: bool = False):
             domains.add("meds")
         if any(k in q_lower for k in ["lab", "labs", "hba1c", "a1c", "cbc", "bmp", "cmp", "creatinine", "glucose", "test", "ordered"]):
             domains.add("labs")
-        if any(k in q_lower for k in ["diagnosis", "diagnoses", "impression", "differential", "icd"]):
+        if any(k in q_lower for k in ["diagnosis", "diagnoses", "impression", "differential"]):
             domains.add("dx")
         if any(k in q_lower for k in ["procedure", "procedures", "surgery", "imaging", "ct", "mri", "x-ray", "ultrasound", "referral", "consult"]):
             domains.add("proc")
@@ -343,10 +343,16 @@ def build_graph(thinking_mode: bool = False):
     # Prepend a lightweight synthesis instruction to guide the synthesizer.
     from langchain_core.messages import SystemMessage as _SysMsg
     _SYNTH_HINT = _SysMsg(content=(
-        "Tool results are now in the conversation above. "
-        "Synthesize a clear, grounded answer to the user's original question "
-        "using those results. Only call additional tools if the existing results "
-        "are truly insufficient to answer. When in doubt, answer from what you have."
+        "Tool results are now in the conversation above. Each source block is labelled [Source N | ...]."
+        " Synthesize a clear, grounded answer to the user's original question using those results."
+        "\n\nCITATION RULES (mandatory for all clinical responses):"
+        "\n1. Cite sources inline using [SN] format (e.g. [S1], [S2]) immediately after each clinical fact."
+        "\n2. Every medication dose, lab value, vital sign, diagnosis, and procedure MUST have a [SN] citation."
+        "\n3. Multiple sources may support one fact: e.g. [S1][S3]."
+        "\n4. If a fact cannot be attributed to any retrieved source, do NOT include it."
+        "\n5. If the sources do not contain the answer, state: \'This information was not found in the available records.\'"
+        "\n\nOnly call additional tools if the existing results are truly insufficient to answer."
+        " When in doubt, answer from what you have."
     ))
 
     _OPENAI_THINKING_HINT = _SysMsg(content=(
@@ -429,6 +435,24 @@ def build_graph(thinking_mode: bool = False):
 
         synth_msg = synth_with_tools.invoke(msgs)
         synth_msg = _scope_lookup_tool_calls(synth_msg, active_mrn)
+
+        # ── Phase 3: Grounding verification (non-blocking, < 10 ms) ──────────
+        response_content = getattr(synth_msg, "content", "") or ""
+        has_tool_calls = bool(getattr(synth_msg, "tool_calls", None))
+        if response_content and not has_tool_calls:
+            from agent_graph.grounding import count_sources_in_tool_messages, verify_grounding as _verify_grounding
+            _source_count = count_sources_in_tool_messages(
+                [m for m in msgs if isinstance(m, _ToolMessage)]
+            )
+            verify_grounding_result = _verify_grounding(response_content, _source_count)
+            if not verify_grounding_result["is_grounded"]:
+                logger.warning(
+                    "[Grounding] %d issue(s) in synthesizer response (coverage=%.0f%%): %s",
+                    len(verify_grounding_result["issues"]),
+                    verify_grounding_result["citation_coverage"] * 100,
+                    "; ".join(verify_grounding_result["issues"][:3]),
+                )
+
         return {
             "messages": [synth_msg],
             "active_patient_mrn": active_mrn,

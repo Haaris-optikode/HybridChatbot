@@ -1,12 +1,14 @@
 {
   "base_url": "http://localhost:7860",
   "total": 13,
-  "passed": 11,
-  "accuracy_pct": 84.6,
+  "passed": 13,
+  "accuracy_pct": 100.0,
   "life_critical_total": 6,
-  "life_critical_passed": 5,
-  "life_critical_accuracy_pct": 83.3,
-  "avg_latency_s": 6.53,
+  "life_critical_passed": 6,
+  "life_critical_accuracy_pct": 100.0,
+  "avg_latency_s": 6.18,
+  "baseline_accuracy_pct": 84.6,
+  "delta_vs_baseline_pct": 15.4,
   "results": [
     {
       "id": 1,
@@ -15,8 +17,8 @@
       "expected": "YES \u2014 urticaria and angioedema. Moderate. Documented since 1985. Avoid all penicillin derivatives.",
       "passed": true,
       "rule": "penicillin + reaction + allergy/avoidance",
-      "latency_s": 4.48,
-      "answer": "Patient Robert Whitfield (MRN-2026-004782) has a documented allergy to penicillin, with a moderate reaction described as urticaria and angioedema. This indicates he should avoid penicillin due to this moderate hypersensitivity reaction (Source: Allergies section, Page 5)."
+      "latency_s": 5.01,
+      "answer": "Patient Robert James Whitfield (MRN: MRN-2026-004782) has a documented allergy to penicillin. The reaction is described as moderate, with urticaria and angioedema. This allergy has been documented since childhood, and the patient avoids all penicillin derivatives. \n\nAdditional allergies include sulfonamides (mild rash), shellfish (severe anaphylaxis, carries EpiPen), and iodinated contrast (moderate flushing and bronchospasm, requires premedication) [S2][S3]."
     },
     {
       "id": 2,
@@ -25,8 +27,8 @@
       "expected": "NOT without premedication \u2014 flushing, nausea, mild bronchospasm (2021 cath). Premedicate with steroids and diphenhydramine.",
       "passed": true,
       "rule": "contrast + premedication caution",
-      "latency_s": 5.3,
-      "answer": "Patient Robert Whitfield (MRN-2026-004782) has a documented allergy to iodinated contrast characterized by flushing and bronchospasm, which is considered a moderate reaction. This allergy requires premedication before administration of iodinated contrast. Therefore, he can receive iodinated contrast only with appropriate premedication and caution. (Source: Allergies section, Page 5)"
+      "latency_s": 4.22,
+      "answer": "Patient Robert James Whitfield (MRN: MRN-2026-004782) has a documented moderate allergy to iodinated contrast. His reactions include flushing and mild bronchospasm that occurred during a cardiac catheterization in 2021. Due to this allergy, iodinated contrast administration requires premedication with steroids and diphenhydramine to mitigate the risk of adverse reactions [S2][S3].\n\nTherefore, he can receive iodinated contrast only with appropriate premedication and caution."
     },
     {
       "id": 3,
@@ -35,8 +37,8 @@
       "expected": "Yes \u2014 shellfish anaphylaxis (throat swelling, hypotension). Last reaction 2018, required ED visit.",
       "passed": true,
       "rule": "epipen + shellfish/anaphylaxis context",
-      "latency_s": 4.69,
-      "answer": "Patient Robert Whitfield (MRN-2026-004782) has a documented severe shellfish allergy with anaphylaxis and is noted to carry an EpiPen for this allergy. This indicates he does carry an EpiPen for emergency use related to his shellfish allergy (Source: Allergies section, Page 5)."
+      "latency_s": 5.85,
+      "answer": "Patient Robert James Whitfield (MRN: MRN-2026-004782) carries an EpiPen due to a severe shellfish allergy with a history of anaphylaxis. This allergy and the presence of the EpiPen are documented in his allergy section, noting the last reaction was in 2018 requiring an emergency department visit [S2][S3]."
     },
     {
       "id": 4,
@@ -45,18 +47,18 @@
       "expected": "Penicillin (moderate), Sulfonamides (mild \u2014 maculopapular rash 2010), Iodinated contrast (moderate)",
       "passed": true,
       "rule": "all three drug-allergy categories present",
-      "latency_s": 5.64,
-      "answer": "Robert Whitfield (MRN-2026-004782) has the following drug allergies documented:\n\n- Penicillin: urticaria/angioedema (moderate severity)\n- Sulfonamides: rash (mild severity)\n- Shellfish: anaphylaxis (severe; carries EpiPen)\n- Iodinated contrast: flushing/bronchospasm (moderate; requires premedication)\n\nThese allergies include both drug and shellfish, with varying severity and specific precautions noted (e.g., EpiPen for shellfish allergy, premedication for iodinated contrast) (Source: Allergies, Page 5)."
+      "latency_s": 7.54,
+      "answer": "For patient Robert James Whitfield (MRN: MRN-2026-004782), the documented drug allergies are:\n\n- Penicillin: Moderate reaction with urticaria and angioedema; documented since childhood; avoids all penicillin derivatives.\n- Sulfonamides: Mild reaction with maculopapular rash; developed rash with TMP-SMX in 2010.\n- Iodinated contrast: Moderate reaction with flushing, nausea, and mild bronchospasm; occurred during cardiac catheterization in 2021; requires premedication with steroids and diphenhydramine.\n\nAdditionally, he has a severe allergy to shellfish causing anaphylaxis (throat swelling, hypotension), for which he carries an EpiPen.\n\nThese allergies are well documented with severity and reaction details [S2][S3]."
     },
     {
       "id": 5,
       "question": "What is the patient's code status?",
       "life_critical": true,
       "expected": "Full Code. Healthcare POA: Linda Whitfield (wife). Advance directive on file.",
-      "passed": false,
+      "passed": true,
       "rule": "full code + Linda + POA/directive",
-      "latency_s": 8.23,
-      "answer": "The code status for Robert Whitfield (MRN-2026-004782) is Full Code. Additionally, there is an advance directive and a healthcare power of attorney/proxy documented. (Source: PCP section, Page 1)"
+      "latency_s": 4.3,
+      "answer": "For patient Robert James Whitfield (MRN: MRN-2026-004782), the documented code status is Full Code. The patient also has an advance directive and a healthcare power of attorney designated as Linda Whitfield (wife) [Source 2]."
     },
     {
       "id": 6,
@@ -64,9 +66,9 @@
       "life_critical": true,
       "expected": "Chest pain, worsening SOB, weight gain >2 lbs/day or >5 lbs/week, syncope, palpitations >15 min, blood sugar >300 or <70 with symptoms, new leg swelling.",
       "passed": true,
-      "rule": "return precaution markers >=4 (got 5)",
-      "latency_s": 7.13,
-      "answer": "Patient Robert Whitfield should call 911 or go to the emergency department if he experiences any of the following:\n\n- Progressive shortness of breath at rest or with minimal exertion worsening over about 10 days\n- Significant weight gain, such as 18 pounds over 14 days despite medication adherence\n- Symptoms like dizziness upon standing or worsening dyspnea (shortness of breath)\n- Orthopnea (difficulty breathing when lying flat)\n\nThese signs indicate worsening heart failure or fluid overload that requires urgent evaluation. The patient has already presented to the ED with these symptoms, underscoring their severity (Source: History of Present Illness, Subjective sections)."
+      "rule": "return precaution markers >=4",
+      "latency_s": 5.74,
+      "answer": "For patient Robert James Whitfield (MRN: MRN-2026-004782), the instructions for when to call 911 or go to the emergency department (ED) are as follows:\n\nHe should go to the ED or call 911 if he experiences any of these warning signs:\n- Chest pain or pressure\n- Increasing shortness of breath or worsening breathing difficulty\n- Sudden weight gain of more than 2 pounds overnight\n- Fainting or feeling like he might faint\n- Heart racing (palpitations) lasting more than 15 minutes\n- Blood sugar levels over 300 or under 70 accompanied by shakiness or sweating\n- New leg swelling\n\nThese instructions are emphasized in his discharge and important reminders sections, along with daily weight monitoring and other self-care measures [S2][S4][S7]."
     },
     {
       "id": 7,
@@ -75,8 +77,8 @@
       "expected": "4 \u2014 documented in Day 2 SOAP note and discharge prescriptions. Indication for apixaban anticoagulation.",
       "passed": true,
       "rule": "CHA2DS2-VASc 4 + apixaban",
-      "latency_s": 7.45,
-      "answer": "The clinical notes mention CHA2DS2-VASc in the context of atrial fibrillation and anticoagulation, with Robert Whitfield being prescribed Apixaban (Eliquis) 5 mg twice daily at discharge. However, the exact numerical CHA2DS2-VASc score for Robert Whitfield is not explicitly documented in the available records.\n\nIf you would like, I can help estimate the score based on his documented clinical risk factors, or assist with any other related information. Let me know how you would like to proceed. (Source: Discharge Prescriptions, Page 14)"
+      "latency_s": 4.01,
+      "answer": "For patient Robert James Whitfield (MRN: MRN-2026-004782), the documented CHA2DS2-VASc score is 4, as noted in the plan section where anticoagulation with apixaban 5 mg BID is planned based on this score [S2]."
     },
     {
       "id": 8,
@@ -85,18 +87,18 @@
       "expected": "No. ICD evaluation planned for April 2026 \u2014 3 months post-GDMT optimization per ACC/AHA guidelines.",
       "passed": true,
       "rule": "no current ICD + future evaluation",
-      "latency_s": 6.29,
-      "answer": "Patient Robert Whitfield (MRN-2026-004782) does not currently have an implanted cardioverter defibrillator (ICD). The cardiology team is recommending consideration of ICD placement once guideline-directed medical therapy (GDMT) for his advanced heart failure with reduced ejection fraction (HFrEF) is optimized for 3 months. So, ICD is planned but not yet implanted at this time. (Source: Assessment and Plan sections, pages 10 and 17)"
+      "latency_s": 5.58,
+      "answer": "Patient Robert James Whitfield (MRN: MRN-2026-004782) does not currently have an implanted ICD (implantable cardioverter defibrillator). The clinical notes indicate that an ICD evaluation is planned for approximately 3 months after guideline-directed medical therapy (GDMT) optimization, per current ACC/AHA guidelines. This evaluation is scheduled for April 2026, about 3 months post-discharge. The patient is undergoing optimization of heart failure therapy and will be reassessed for ICD candidacy at that time. There is no documentation of an existing ICD implant in the records reviewed [S1][S2][S3][S4][S6][S8]."
     },
     {
       "id": 9,
       "question": "What dietary restrictions apply at discharge?",
       "life_critical": false,
       "expected": "Sodium <2g/day, fluid restriction 1.5L/day, diabetic meal plan, heart-healthy diet. Avoid processed foods, canned soups, fast food.",
-      "passed": false,
+      "passed": true,
       "rule": "sodium + fluid + diabetic/heart-healthy",
-      "latency_s": 6.61,
-      "answer": "At discharge, patient Robert Whitfield is advised to follow dietary restrictions that include a low-sodium diet. He has a history of dietary indiscretion with high sodium intake (>4g/day) over the holiday season, which should be corrected. Additionally, his diet has been carbohydrate-heavy, and he is undergoing dietary counseling, likely related to his diabetes management (HbA1c 8.2%, on metformin) and obesity (BMI 33.8). The emphasis at discharge is on maintaining a low-sodium diet and likely controlling carbohydrate intake to support his overall health and chronic conditions. \n\nNo other specific dietary restrictions were documented at discharge. (Source: Discharge summary and Social History sections)"
+      "latency_s": 7.1,
+      "answer": "For Robert James Whitfield (MRN: MRN-2026-004782), the dietary restrictions at discharge include:\n\n- A strict low-sodium diet with sodium intake less than 2 grams per day.\n- Fluid restriction limited to 1.5 liters per day.\n- The diet should also be heart-healthy and diabetic-appropriate.\n\nThese instructions are part of his discharge plan to manage his heart failure and diabetes effectively. He was extensively educated on these restrictions before discharge [S2][S4][S5][S6]."
     },
     {
       "id": 10,
@@ -104,9 +106,9 @@
       "life_critical": false,
       "expected": "Lisinopril 20mg, Carvedilol 12.5mg BID, Furosemide 40mg, Metformin 1000mg BID, Atorvastatin 40mg, Aspirin 81mg, Tiotropium 2.5mcg, Omeprazole 20mg, Allopurinol 100mg, KCl 20mEq",
       "passed": true,
-      "rule": "home meds hits >=7 (got 8)",
-      "latency_s": 5.36,
-      "answer": "Patient Robert Whitfield was on the following home medications at admission:\n\n- Omeprazole 20 mg daily\n- Lisinopril 20 mg daily\n- Carvedilol 12.5 mg twice daily\n- Furosemide 40 mg daily\n- Metformin 1000 mg twice daily\n- Atorvastatin 40 mg daily\n- Tiotropium inhaler\n- Allopurinol as needed (PRN) for gout flare\n\nThese medications reflect management for conditions including hypertension, diabetes, hyperlipidemia, COPD, and gout (Source: Admission History and Medication Sections)."
+      "rule": "home meds hits >=7",
+      "latency_s": 7.0,
+      "answer": "For Robert James Whitfield (MRN: MRN-2026-004782), the home (admission) medications documented are:\n\n- Lisinopril 20 mg once daily orally (ACE inhibitor for hypertension/CHF)\n- Carvedilol 12.5 mg twice daily orally (beta-blocker for CHF)\n- Furosemide 40 mg once daily orally (loop diuretic for CHF)\n- Metformin 1000 mg twice daily orally (for type 2 diabetes)\n- Atorvastatin 40 mg once daily at bedtime orally (statin for hyperlipidemia/ASCVD prevention)\n- Aspirin 81 mg once daily orally (antiplatelet post-PCI)\n- Tiotropium bromide inhalation spray 2 puffs once daily (COPD maintenance)\n- Omeprazole 20 mg once daily orally before breakfast (for stomach acid)\n\nThese represent the patient's active medications prior to admission as per the medication list and history sections [S1][S3]."
     },
     {
       "id": 11,
@@ -114,9 +116,9 @@
       "life_critical": false,
       "expected": "Sacubitril/Valsartan (ARNI), Spironolactone 25mg, Apixaban 5mg BID, Insulin Glargine, Empagliflozin 10mg, Metolazone, IV Furosemide, Heparin drip, Magnesium Oxide 400mg",
       "passed": true,
-      "rule": "new inpatient meds hits >=5 (got 8)",
-      "latency_s": 7.4,
-      "answer": "During Robert Whitfield's hospitalization, several new medications were started as part of his management for acute on chronic systolic heart failure, atrial fibrillation, and diabetes optimization. The new medications initiated include:\n\n- Sacubitril/Valsartan (Entresto) 24/26 mg twice daily, replacing lisinopril after appropriate washout.\n- Spironolactone 25 mg once daily, added for heart failure management.\n- Empagliflozin (Jardiance) 10 mg once daily in the morning, for dual benefit in heart failure and type 2 diabetes.\n- Apixaban (Eliquis) 5 mg twice daily, started for atrial fibrillation anticoagulation.\n- Insulin Glargine (Lantus) started and titrated up to 18 units subcutaneously at bedtime for improved glycemic control.\n- Magnesium oxide 400 mg once daily, added to prevent arrhythmias related to hypomagnesemia.\n- Hydralazine 25 mg three times daily as needed for blood pressure control.\n\nThese additions reflect guideline-directed medical therapy optimization during the hospital stay. Home medications such as carvedilol, furosemide, metformin, atorvastatin, aspirin, tiotropium, omeprazole, allopurinol, and potassium chloride were continued with some dose adjustments. The patient was discharged on this optimized regimen with detailed education and follow-up plans (Source: Medication Orders sections, Discharge Prescriptions, and Treatment Plan)."
+      "rule": "new inpatient meds hits >=5",
+      "latency_s": 7.34,
+      "answer": "During hospitalization for acute on chronic systolic heart failure, Robert James Whitfield (MRN: MRN-2026-004782) was started on several new medications as part of guideline-directed medical therapy (GDMT) optimization and management of his conditions. The new medications initiated during the hospital stay include:\n\n- Sacubitril/Valsartan (Entresto) 24/26 mg twice daily, replacing lisinopril after a 36-hour washout period.\n- Spironolactone 25 mg once daily.\n- Empagliflozin (Jardiance) 10 mg once daily in the morning for heart failure and type 2 diabetes benefit.\n- Apixaban (Eliquis) 5 mg twice daily for atrial fibrillation anticoagulation.\n- Insulin Glargine (Lantus) started and titrated up to 18 units subcutaneously at bedtime for improved glycemic control.\n- Magnesium oxide 400 mg once daily to prevent irregular heartbeat.\n- Potassium chloride 20 mEq once daily to replace potassium lost from diuretics.\n- Hydralazine 25 mg three times daily as needed for systolic blood pressure >160 mmHg.\n\nThese additions were alongside uptitration of carvedilol to 25 mg twice daily and increased furosemide dosing from home 40 mg to 80 mg daily orally. The patient was also continued on metformin, atorvastatin, aspirin, tiotropium, omeprazole, and allopurinol, which were part of his home regimen.\n\nIn summary, the new medications started during hospitalization were sacubitril/valsartan, spironolactone, empagliflozin, apixaban, insulin glargine, magnesium oxide, potassium chloride, and hydralazine (as needed) [S18b, S19, S21]."
     },
     {
       "id": 12,
@@ -124,9 +126,9 @@
       "life_critical": false,
       "expected": "15 total: Entresto 24/26mg BID (new), Carvedilol 25mg BID (uptitrated), Furosemide 80mg (increased from 40mg), Spironolactone 25mg (new), Empagliflozin 10mg (new), Apixaban 5mg BID (new), Metformin 1000mg BID, Insulin Glargine 18u (new), Atorvastatin 40mg, Aspirin 81mg, Tiotropium, Omeprazole 20mg, Allopurinol 100mg, KCl 20mEq, Magnesium Oxide 400mg (new), Hydralazine 25mg PRN SBP>160",
       "passed": true,
-      "rule": "discharge meds hits >=8 + Entresto/Sacubitril + apixaban (got 16)",
-      "latency_s": 9.9,
-      "answer": "At discharge, Robert James Whitfield (MRN-2026-004782) was prescribed the following medications:\n\n1. Sacubitril/Valsartan (Entresto) 24-26 mg, 1 tablet orally twice daily with food (replacing lisinopril, with a 36-hour ACE inhibitor washout).\n2. Carvedilol 25 mg, 1 tablet orally twice daily with food (uptitrated during hospitalization).\n3. Furosemide 80 mg, 1 tablet orally once daily in the morning (increased from home dose).\n4. Spironolactone 25 mg, 1 tablet orally once daily.\n5. Empagliflozin (Jardiance) 10 mg, 1 tablet orally once daily in the morning (new for heart failure and diabetes benefit).\n6. Apixaban (Eliquis) 5 mg, 1 tablet orally twice daily (new for atrial fibrillation anticoagulation).\n7. Metformin 1000 mg, 1 tablet orally twice daily with meals.\n8. Insulin Glargine (Lantus) 18 units, subcutaneous injection once daily at bedtime (new for improved glycemic control).\n9. Atorvastatin 40 mg, 1 tablet orally once daily at bedtime.\n10. Aspirin 81 mg EC, 1 tablet orally once daily.\n11. Tiotropium (Spiriva Respimat) 2.5 mcg/actuation, 2 puffs inhaled once daily.\n12. Omeprazole 20 mg, 1 capsule orally once daily before breakfast.\n13. Allopurinol 100 mg, 1 tablet orally once daily.\n14. Potassium Chloride 20 mEq ER, 1 tablet orally once daily (to replace potassium lost from diuretics).\n15. Magnesium Oxide 400 mg, 1 tablet orally once daily (new to prevent arrhythmia).\n16. Hydralazine 25 mg, 1 tablet orally three times daily as needed for systolic blood pressure >160 mmHg.\n\nThis comprehensive regimen reflects optimization of heart failure guideline-directed medical therapy, atrial fibrillation anticoagulation, diabetes management, COPD maintenance, and gastroprotection. The patient was discharged stable with home health services and scheduled follow-ups. (Source: Discharge Prescriptions, Treatment Plan, and Discharge Summary sections)"
+      "rule": "discharge meds hits >=8 + Entresto/Sacubitril + apixaban",
+      "latency_s": 10.99,
+      "answer": "For Robert James Whitfield (MRN: MRN-2026-004782), the discharge medication regimen includes the following 15 medications:\n\n1. Sacubitril/Valsartan (Entresto) 24-26 mg, 1 tablet orally twice daily with food (replacing lisinopril; allow 36-hour washout from ACE inhibitor)\n2. Carvedilol 25 mg, 1 tablet orally twice daily with food (uptitrated during hospitalization)\n3. Furosemide 80 mg, 1 tablet orally once daily in the morning (increased from home dose)\n4. Spironolactone 25 mg, 1 tablet orally once daily\n5. Empagliflozin (Jardiance) 10 mg, 1 tablet orally once daily in the morning (new for HFrEF and type 2 diabetes benefit)\n6. Apixaban (Eliquis) 5 mg, 1 tablet orally twice daily (new for atrial fibrillation anticoagulation)\n7. Metformin 1000 mg, 1 tablet orally twice daily with meals\n8. Insulin Glargine (Lantus) 18 units, subcutaneous injection once daily at bedtime (new for improved glycemic control)\n9. Atorvastatin 40 mg, 1 tablet orally once daily at bedtime\n10. Aspirin 81 mg EC, 1 tablet orally once daily\n11. Tiotropium (Spiriva Respimat) 2.5 mcg/actuation, 2 puffs inhaled once daily\n12. Omeprazole 20 mg, 1 capsule orally once daily before breakfast\n13. Allopurinol 100 mg, 1 tablet orally once daily (for gout prophylaxis)\n14. Potassium Chloride 20 mEq ER, 1 tablet orally once daily (to replace potassium lost from diuretics; monitor potassium levels)\n15. Magnesium Oxide 400 mg, 1 tablet orally once daily (new to prevent irregular heartbeat)\n16. Hydralazine 25 mg, 1 tablet orally three times daily as needed for systolic blood pressure >160 mmHg\n\nThis comprehensive regimen reflects optimization of guideline-directed medical therapy for heart failure with reduced ejection fraction, atrial fibrillation anticoagulation, diabetes management, COPD maintenance, and gastroprotection. The patient was discharged stable with home health services and detailed follow-up plans [S19][S22][S18]."
     },
     {
       "id": 13,
@@ -135,8 +137,8 @@
       "expected": "Replaced by Sacubitril/Valsartan (Entresto). Require 36-hour washout from ACE inhibitor before starting ARNI. Lisinopril was also held on admission due to AKI.",
       "passed": true,
       "rule": "lisinopril stop reason + ARNI + 36-hour washout",
-      "latency_s": 6.44,
-      "answer": "Lisinopril was stopped at discharge because it was replaced by Sacubitril/Valsartan (Entresto). The discharge prescription notes specify a 36-hour washout period from the ACE inhibitor (lisinopril) before starting Sacubitril/Valsartan. This switch is commonly done in heart failure management to improve outcomes, as Sacubitril/Valsartan has been shown to be superior to ACE inhibitors alone in certain patients.\n\nAdditionally, during admission, the home ACE inhibitor (lisinopril) was held per nephrology until the patient's creatinine improved, indicating renal function concerns may have contributed to the decision to stop lisinopril initially.\n\nIn summary, lisinopril was stopped to allow safe initiation of Sacubitril/Valsartan with an appropriate washout period and due to renal considerations during hospitalization (Source: Discharge Prescriptions and Admission Orders)."
+      "latency_s": 5.72,
+      "answer": "For patient Robert James Whitfield (MRN: MRN-2026-004782), lisinopril was stopped at discharge to allow a 36-hour washout period before starting sacubitril/valsartan (Entresto). This is a standard precaution to avoid angioedema and other adverse effects when switching from an ACE inhibitor like lisinopril to an ARNI such as sacubitril/valsartan. The discharge prescriptions include sacubitril/valsartan 24-26 mg twice daily replacing lisinopril, with the explicit note to allow this washout period [S2][S3].\n\nAdditionally, the admission orders noted holding the home ACE inhibitor (lisinopril) per nephrology until creatinine improved, indicating renal function concerns may have also contributed to stopping lisinopril during hospitalization [S1]."
     }
   ]
 }

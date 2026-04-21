@@ -1760,3 +1760,190 @@ class TestNeighborExpansionQdrant:
         rag._expand_with_neighbors(docs, patient_mrn="MRN-A")
         # No document_id → no Qdrant call
         assert rag.client.scroll.call_count == 0
+
+
+# ── Phase 3: Grounding, Citation & Accuracy System ───────────────────────────
+
+class TestGroundingVerification:
+    """Phase 3.2 — verify_grounding and extract_citations logic."""
+
+    def test_extract_citations_basic(self):
+        """Parses [SN] inline citations from response text."""
+        from agent_graph.grounding import extract_citations
+        text = "Patient HbA1c is 8.2% [S1]. BNP was 1842 pg/mL [S3][S1]."
+        assert extract_citations(text) == [1, 3]
+
+    def test_extract_citations_empty_response(self):
+        from agent_graph.grounding import extract_citations
+        assert extract_citations("No citations here.") == []
+
+    def test_extract_citations_deduplicates(self):
+        from agent_graph.grounding import extract_citations
+        text = "[S2] lab values [S2] confirmed [S2]"
+        assert extract_citations(text) == [2]
+
+    def test_verify_grounding_valid_citations(self):
+        """All citations within source_count → is_grounded True (no uncited claims)."""
+        from agent_graph.grounding import verify_grounding
+        text = "Metformin 1000 mg daily [S1]. HbA1c 8.2% [S2]."
+        result = verify_grounding(text, source_count=3)
+        assert result["citation_count"] == 2
+        assert result["source_count"] == 3
+        assert result["is_grounded"] is True
+
+    def test_verify_grounding_invalid_citation_ref(self):
+        """Citation [S99] when only 2 sources available → issue reported."""
+        from agent_graph.grounding import verify_grounding
+        text = "HbA1c 8.2% [S99]."
+        result = verify_grounding(text, source_count=2)
+        assert result["is_grounded"] is False
+        assert any("Invalid citation" in iss for iss in result["issues"])
+
+    def test_verify_grounding_uncited_lab_value(self):
+        """A lab value without [SN] in same sentence is flagged."""
+        from agent_graph.grounding import verify_grounding
+        text = "The patient's HbA1c was 8.2%."
+        result = verify_grounding(text, source_count=3)
+        assert result["is_grounded"] is False
+        assert any("Uncited" in iss for iss in result["issues"])
+
+    def test_verify_grounding_uncited_medication_dose(self):
+        """Medication dose without citation is flagged."""
+        from agent_graph.grounding import verify_grounding
+        text = "Lisinopril 10 mg once daily was prescribed."
+        result = verify_grounding(text, source_count=2)
+        assert result["is_grounded"] is False
+        assert len(result["issues"]) >= 1
+
+    def test_verify_grounding_uncited_bp(self):
+        """Blood pressure value without citation is flagged."""
+        from agent_graph.grounding import verify_grounding
+        text = "Vitals showed BP 130/85."
+        result = verify_grounding(text, source_count=2)
+        assert result["is_grounded"] is False
+
+    def test_verify_grounding_no_sources_skips_uncited_check(self):
+        """When source_count=0 (e.g. general question), no uncited issues raised."""
+        from agent_graph.grounding import verify_grounding
+        text = "Metformin 500 mg is a common diabetes medication."
+        result = verify_grounding(text, source_count=0)
+        # No sources → no uncited claim check applies
+        assert result["issues"] == []
+        assert result["is_grounded"] is True
+
+    def test_verify_grounding_elapsed_ms_under_10(self):
+        """Grounding check must complete in < 10 ms."""
+        from agent_graph.grounding import verify_grounding
+        text = "HbA1c 8.2% [S1]. BNP 1842 pg/mL [S2]. BP 130/85 [S3]. Weight 95 kg [S4]."
+        result = verify_grounding(text, source_count=4)
+        assert result["elapsed_ms"] < 10.0
+
+    def test_verify_grounding_coverage_calculation(self):
+        """citation_coverage = unique cited sources / total sources."""
+        from agent_graph.grounding import verify_grounding
+        text = "HbA1c 8.2% [S1]. BNP 1842 pg/mL [S1]."
+        result = verify_grounding(text, source_count=4)
+        # [S1] cited, sources 2-4 not cited → coverage = 1/4
+        assert result["citation_coverage"] == 0.25
+
+    def test_count_sources_in_tool_messages(self):
+        """count_sources_in_tool_messages extracts max [Source N] number."""
+        from agent_graph.grounding import count_sources_in_tool_messages
+        from unittest.mock import MagicMock
+        m1 = MagicMock()
+        m1.content = "[Source 1 | Section: Meds | Page 1 | MRN: A]\nMetformin\n\n---\n\n[Source 2 | Section: Labs | Page 2 | MRN: A]\nHbA1c"
+        m2 = MagicMock()
+        m2.content = "[Source 3 | Section: Vitals | Page 3 | MRN: A]\nBP"
+        assert count_sources_in_tool_messages([m1, m2]) == 3
+
+    def test_count_sources_empty_messages(self):
+        from agent_graph.grounding import count_sources_in_tool_messages
+        assert count_sources_in_tool_messages([]) == 0
+
+
+class TestConfidenceSignaling:
+    """Phase 3.4 — _assess_retrieval_confidence thresholds."""
+
+    def _get_fn(self):
+        from agent_graph.tool_clinical_notes_rag import ClinicalNotesRAGTool
+        return ClinicalNotesRAGTool._assess_retrieval_confidence
+
+    def test_high_confidence(self):
+        fn = self._get_fn()
+        assert fn(5, 0.9) == "HIGH"
+
+    def test_high_boundary_exact(self):
+        fn = self._get_fn()
+        assert fn(3, 0.8) == "HIGH"
+
+    def test_moderate_confidence(self):
+        fn = self._get_fn()
+        assert fn(2, 0.6) == "MODERATE"
+
+    def test_moderate_boundary_exact(self):
+        fn = self._get_fn()
+        assert fn(2, 0.4) == "MODERATE"
+
+    def test_low_confidence_score_below_moderate(self):
+        fn = self._get_fn()
+        assert fn(1, 0.2) == "LOW"
+
+    def test_low_confidence_single_doc_high_score(self):
+        """High score but only 1 doc → not HIGH/MODERATE, falls to LOW."""
+        fn = self._get_fn()
+        assert fn(1, 0.95) == "LOW"
+
+    def test_low_confidence_two_docs_score_below_moderate(self):
+        fn = self._get_fn()
+        assert fn(2, 0.3) == "LOW"
+
+    def test_no_evidence_zero_docs(self):
+        fn = self._get_fn()
+        assert fn(0, 0.0) == "NO_EVIDENCE"
+
+    def test_no_evidence_zero_docs_with_score(self):
+        fn = self._get_fn()
+        assert fn(0, 0.9) == "NO_EVIDENCE"
+
+    def test_no_reranker_fallback_two_or_more_docs(self):
+        """When top_score=0.0 (no reranker), ≥2 docs → MODERATE."""
+        fn = self._get_fn()
+        assert fn(5, 0.0) == "MODERATE"
+
+    def test_no_reranker_fallback_one_doc(self):
+        """When top_score=0.0 (no reranker), 1 doc → LOW."""
+        fn = self._get_fn()
+        assert fn(1, 0.0) == "LOW"
+
+
+class TestCitationFormatSynthesizerPrompt:
+    """Phase 3.1 — Synthesizer hint must enforce [SN] citation format."""
+
+    def test_synth_hint_contains_citation_rules(self):
+        """_SYNTH_HINT must instruct the LLM to use [SN] format."""
+        import inspect
+        from agent_graph import build_full_graph
+        source = inspect.getsource(build_full_graph)
+        assert "[SN]" in source, "_SYNTH_HINT must mention [SN] citation format"
+        assert "citation" in source.lower(), "_SYNTH_HINT must mention citations"
+
+    def test_synth_hint_enforces_every_clinical_fact(self):
+        """The hint must instruct that every clinical fact requires a citation."""
+        import inspect
+        from agent_graph import build_full_graph
+        source = inspect.getsource(build_full_graph)
+        assert "MUST" in source, "_SYNTH_HINT should use MUST for mandatory citation rule"
+
+    def test_confidence_banner_in_search_output(self):
+        """search() output must contain RETRIEVAL_CONFIDENCE banner."""
+        import inspect
+        from agent_graph.tool_clinical_notes_rag import ClinicalNotesRAGTool
+        source = inspect.getsource(ClinicalNotesRAGTool.search)
+        assert "RETRIEVAL_CONFIDENCE" in source
+
+    def test_grounding_module_importable(self):
+        """grounding.py module is importable and exports required symbols."""
+        from agent_graph.grounding import extract_citations, verify_grounding, count_sources_in_tool_messages
+        assert callable(extract_citations)
+        assert callable(verify_grounding)
+        assert callable(count_sources_in_tool_messages)
