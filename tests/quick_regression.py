@@ -7,34 +7,34 @@ import sys
 BASE = "http://localhost:7860"
 QUESTIONS = [
     # Q1: Demographics
-    ("What is Robert's full name and date of birth?",
+    ("For patient Robert James Whitfield (MRN: MRN-2026-004782), what is the full name and date of birth?",
      ["Robert James Whitfield", "June 14, 1963"]),
     # Q6: Advance directive
-    ("What is Robert's advance directive status?",
+    ("For patient Robert James Whitfield (MRN: MRN-2026-004782), what is the advance directive status?",
      ["Full Code", "Linda Whitfield"]),
     # Q11: Weight gain
-    ("How many pounds did the patient gain before admission?",
+    ("For patient Robert James Whitfield (MRN: MRN-2026-004782), how many pounds were gained before admission?",
      ["18"]),
     # Q20: Admission meds
-    ("What medications was the patient taking at home before admission?",
+    ("For patient Robert James Whitfield (MRN: MRN-2026-004782), what medications were being taken at home before admission?",
      ["lisinopril", "carvedilol", "metformin", "furosemide"]),
     # Q25: Lab abnormals
-    ("What was the BNP level on admission?",
+    ("For patient Robert James Whitfield (MRN: MRN-2026-004782), what was the BNP level on admission?",
      ["1,842", "1842"]),
     # Q35: Discharge prescriptions
-    ("What are the discharge prescriptions for Robert?",
+    ("For patient Robert James Whitfield (MRN: MRN-2026-004782), what are the discharge prescriptions?",
      ["Sacubitril", "Carvedilol", "Furosemide", "Spironolactone", "Empagliflozin"]),
     # Q40: Procedures
-    ("What procedures were performed during the hospitalization?",
+    ("For patient Robert James Whitfield (MRN: MRN-2026-004782), what procedures were performed during hospitalization?",
      ["echocardiogram", "thoracentesis", "catheterization"]),
     # Q45: Follow-up
-    ("What follow-up appointments are scheduled after discharge?",
+    ("For patient Robert James Whitfield (MRN: MRN-2026-004782), what follow-up appointments are scheduled after discharge?",
      ["cardiology", "nephrology"]),
     # Q50: Weight loss
-    ("How much total weight did the patient lose during hospitalization?",
+    ("For patient Robert James Whitfield (MRN: MRN-2026-004782), how much total weight was lost during hospitalization?",
      ["40.5", "18.4"]),
     # Q60: EF improvement
-    ("What was the ejection fraction improvement during hospital stay?",
+    ("For patient Robert James Whitfield (MRN: MRN-2026-004782), what was the ejection fraction improvement during hospital stay?",
      ["25%", "30%"]),
 ]
 

@@ -67,6 +67,67 @@ def _current_summary_mode() -> str:
     return _SUMMARY_REQUEST_MODE.get()
 
 
+# ── Medical abbreviation expansion table (Phase 2.5) ─────────────────────────
+# Applied to dense search query only (BM25 benefits from exact abbreviation matches).
+# Keys must be lowercase for case-insensitive matching.
+_MEDICAL_EXPANSIONS: dict[str, str] = {
+    "hba1c":   "hemoglobin a1c glycated hemoglobin",
+    "bnp":     "brain natriuretic peptide b-type natriuretic peptide",
+    "bmp":     "basic metabolic panel electrolytes sodium potassium",
+    "cmp":     "comprehensive metabolic panel liver function renal function",
+    "ef":      "ejection fraction cardiac function systolic",
+    "echo":    "echocardiogram cardiac ultrasound",
+    "chf":     "congestive heart failure",
+    "hf":      "heart failure",
+    "dm":      "diabetes mellitus",
+    "htn":     "hypertension blood pressure",
+    "cad":     "coronary artery disease",
+    "afib":    "atrial fibrillation",
+    "ckd":     "chronic kidney disease renal insufficiency",
+    "copd":    "chronic obstructive pulmonary disease",
+    "dvt":     "deep vein thrombosis",
+    "pe":      "pulmonary embolism",
+    "mi":      "myocardial infarction heart attack",
+    "sob":     "shortness of breath dyspnea",
+    "cp":      "chest pain",
+    "nkda":    "no known drug allergies",
+    "dnr":     "do not resuscitate code status",
+    "dni":     "do not intubate",
+    "cpr":     "cardiopulmonary resuscitation",
+    "icu":     "intensive care unit critical care",
+    "ed":      "emergency department emergency room",
+    "iv":      "intravenous",
+    "po":      "oral by mouth",
+    "prn":     "as needed",
+    "wbc":     "white blood cell count leukocytes",
+    "rbc":     "red blood cell count erythrocytes",
+    "hgb":     "hemoglobin",
+    "plt":     "platelet count thrombocytes",
+    "bun":     "blood urea nitrogen",
+    "cr":      "creatinine",
+    "bp":      "blood pressure",
+    "hr":      "heart rate pulse",
+    "rr":      "respiratory rate",
+    "spo2":    "oxygen saturation pulse oximetry",
+    "o2":      "oxygen",
+    "egfr":    "estimated glomerular filtration rate renal function",
+    "lv":      "left ventricle left ventricular",
+    "rv":      "right ventricle right ventricular",
+    "pef":     "peak expiratory flow",
+    "fev1":    "forced expiratory volume",
+    "inr":     "international normalized ratio coagulation",
+    "pt":      "prothrombin time coagulation",
+    "ptt":     "partial thromboplastin time coagulation",
+    "alt":     "alanine aminotransferase liver enzyme",
+    "ast":     "aspartate aminotransferase liver enzyme",
+    "alp":     "alkaline phosphatase liver enzyme",
+    "ldl":     "low density lipoprotein cholesterol",
+    "hdl":     "high density lipoprotein cholesterol",
+    "tsh":     "thyroid stimulating hormone thyroid function",
+    "a1c":     "hemoglobin a1c glycated hemoglobin diabetes",
+}
+
+
 def _record_cache_event(event: str, layer: str = ""):
     """Record cache hit/miss to Prometheus (best-effort, non-critical)."""
     try:
@@ -186,50 +247,151 @@ class ClinicalNotesRAGTool:
         if reranker_model:
             self.reranker = _load_reranker(reranker_model)
 
-        # Build BM25 index for hybrid search (P2.24)
-        self._bm25_docs = []   # parallel list of LangChain Documents
-        self._bm25_index = None
-        self._build_bm25_index()
-
         try:
             info = self.client.get_collection(collection_name)
             logger.info("Connected to '%s': %d vectors | Status: %s", collection_name, info.points_count, info.status)
         except Exception as e:
             logger.warning("Could not get collection info: %s", e)
 
-    def _build_bm25_index(self):
-        """Build a BM25 index over all documents in the collection for sparse retrieval."""
+    # ── Phase 2 retrieval helpers ────────────────────────────────────────────
+
+    def _expand_medical_query(self, query: str) -> str:
+        """Append expansion terms for medical abbreviations found in the query.
+
+        Applied to the dense (vector) search only — BM25 benefits from exact
+        abbreviation hits, so we leave the BM25 query unexpanded.
+        """
+        q_lower = query.lower()
+        expansions: list[str] = []
+        for abbr, expansion in _MEDICAL_EXPANSIONS.items():
+            if _re.search(r"\b" + _re.escape(abbr) + r"\b", q_lower):
+                expansions.append(expansion)
+        if expansions:
+            expanded = query + " " + " ".join(expansions)
+            logger.debug("Query expanded with medical abbreviations: %d terms added", len(expansions))
+            return expanded
+        return query
+
+    def _adaptive_fetch_k(self, query: str) -> int:
+        """Increase the dense-search candidate pool for complex multi-domain queries.
+
+        Signals of complexity: multiple clinical domains named in a single query
+        (medications AND labs AND procedures), summary/complete requests, or
+        conjunctive structure.  The upper cap (30) keeps latency bounded.
+        """
+        q = query.lower()
+        # Count how many domain signals appear
+        domain_signals = [
+            bool(_re.search(r"\bmedication|\bdrug|\brx\b|\bprescri", q)),
+            bool(_re.search(r"\blab|\btest|\bblood|\bculture|\bpanel", q)),
+            bool(_re.search(r"\bprocedure|\bsurgery|\bimaging|\bscan|\becho", q)),
+            bool(_re.search(r"\ball\b|\bcomplete|\bfull\b|\bsummary|\btotal", q)),
+            bool(_re.search(r"\band\b.{1,50}\band\b", q)),
+        ]
+        complexity = sum(domain_signals)
+        if complexity >= 2:
+            boosted = min(self.fetch_k * 2, 30)
+            logger.debug("Adaptive fetch_k: %d→%d (complexity=%d)", self.fetch_k, boosted, complexity)
+            return boosted
+        return self.fetch_k
+
+    def _bm25_score_candidates(self, query: str, candidates: list) -> list:
+        """Build a per-query BM25 index over the supplied candidates and return
+        them re-ranked by BM25 score (descending).
+
+        This replaces the global startup BM25 index (Phase 2.1):
+        - No startup delay — index is built lazily per query.
+        - Always reflects latest documents (no staleness after uploads).
+        - Memory usage is proportional to the candidate pool (k=15–30 docs),
+          not the entire collection.
+        - MRN/scope filtering already applied by Qdrant before this stage, so
+          cross-patient leakage is impossible.
+
+        Returns documents with BM25 score > 0, ordered highest-first.
+        Returns empty list if rank_bm25 is not installed or candidates < 2.
+        """
+        if len(candidates) < 2:
+            return []
         try:
             from rank_bm25 import BM25Okapi
-            from langchain_core.documents import Document
-
-            results = self.client.scroll(
-                collection_name=self.collection_name,
-                limit=5000,
-                with_payload=True,
-                with_vectors=False,
-            )
-            points = results[0]
-            if not points:
-                logger.warning("BM25: No documents found — sparse retrieval disabled")
-                return
-
-            corpus = []
-            docs = []
-            for p in points:
-                content = p.payload.get("page_content", "")
-                meta = p.payload.get("metadata", {})
-                if content.strip():
-                    corpus.append(content.lower().split())
-                    docs.append(Document(page_content=content, metadata=meta))
-
-            self._bm25_index = BM25Okapi(corpus)
-            self._bm25_docs = docs
-            logger.info("BM25 index built: %d documents", len(docs))
+            tokenized_query = query.lower().split()
+            corpus = [doc.page_content.lower().split() for doc in candidates]
+            bm25 = BM25Okapi(corpus)
+            scores = bm25.get_scores(tokenized_query)
+            scored = sorted(zip(candidates, scores), key=lambda x: x[1], reverse=True)
+            return [doc for doc, score in scored if score > 0]
         except ImportError:
-            logger.warning("rank_bm25 not installed — BM25 hybrid search disabled")
+            logger.debug("rank_bm25 not installed — per-query BM25 skipped")
+            return []
         except Exception as e:
-            logger.warning("BM25 index build failed: %s", e)
+            logger.warning("Per-query BM25 failed, using dense only: %s", e)
+            return []
+
+    def _detect_metadata_hints(self, query: str) -> dict[str, list[str]]:
+        """Detect document type and section hints from the query.
+
+        Returns a dict with optional 'doc_types' and 'section_titles' lists.
+        Used for soft metadata re-ranking after retrieval (Phase 2.4).
+        """
+        q = query.lower()
+        hints: dict[str, list[str]] = {"doc_types": [], "section_titles": []}
+
+        # Document type hints
+        if _re.search(r"\bdischarge\b", q):
+            hints["doc_types"].append("discharge_summary")
+        if _re.search(r"\blab\b|\blaboratory\b|\bblood\s+(?:test|result)", q):
+            hints["doc_types"].append("lab_report")
+        if _re.search(r"\bradiol|\bimaging\b|\bct\s+scan\b|\bmri\b|\bx[-\s]?ray\b", q):
+            hints["doc_types"].append("radiology")
+        if _re.search(r"\boperat|\bsurgical|\bprocedure\b", q):
+            hints["doc_types"].append("operative_note")
+
+        # Section title hints
+        if _re.search(r"\ballerg", q):
+            hints["section_titles"] += ["Allergies", "Allergy", "ALLERGIES"]
+        if _re.search(r"\bmedication|\bcurrent\s+med|\bhome\s+med|\bdischarge\s+med", q):
+            hints["section_titles"] += ["Medications", "Current Medications", "Discharge Medications",
+                                         "Medication Reconciliation"]
+        if _re.search(r"\bdiagno|\bimpression\b|\bassessment\b", q):
+            hints["section_titles"] += ["Assessment", "Assessment & Plan", "Assessment and Plan",
+                                         "Impression", "Diagnoses"]
+        if _re.search(r"\bfollow\s*[-]?\s*up|\bappointment\b|\bdischarge\s+plan", q):
+            hints["section_titles"] += ["Follow-up", "Discharge Plan", "Plan"]
+        if _re.search(r"\bvital|\bblood\s+pressure|\bheart\s+rate|\btemperature", q):
+            hints["section_titles"] += ["Vitals", "Vital Signs", "Physical Examination"]
+
+        return hints
+
+    def _apply_metadata_boost(self, query: str, docs: list) -> list:
+        """Soft re-rank: move documents matching query-inferred metadata hints to
+        the front of the list WITHOUT discarding any document.
+
+        This is a boost (re-ordering), not a filter — every retrieved document
+        is returned.  Documents matching either doc_type or section_title hints
+        are promoted ahead of non-matching ones, preserving intra-group order.
+        """
+        hints = self._detect_metadata_hints(query)
+        preferred_types = set(hints.get("doc_types", []))
+        preferred_sections = set(hints.get("section_titles", []))
+
+        if not preferred_types and not preferred_sections:
+            return docs  # No hint — no reordering
+
+        boosted: list = []
+        others: list = []
+        for doc in docs:
+            meta = doc.metadata or {}
+            doc_type = meta.get("document_type", "")
+            section = meta.get("section_title", "")
+            if doc_type in preferred_types or section in preferred_sections:
+                boosted.append(doc)
+            else:
+                others.append(doc)
+
+        if boosted:
+            logger.debug("Metadata boost: %d/%d docs promoted by type/section affinity",
+                         len(boosted), len(docs))
+        return boosted + others
 
     @staticmethod
     def _doc_scope_key(doc) -> tuple[str, str, str, int]:
@@ -249,17 +411,20 @@ class ClinicalNotesRAGTool:
 
     def search(self, query: str, document_id: str = None, patient_mrn: str = None) -> str:
         """
-        Hybrid retrieval: dense MMR + BM25 sparse + RRF fusion + cross-encoder reranking.
-        Optimized for latency: reduced candidate pool, efficient reranking.
+        Hybrid retrieval: dense MMR + per-query BM25 + RRF fusion + cross-encoder
+        reranking + metadata soft-boost + neighbor chunk expansion.
 
-        Args:
-            query: The search query.
-            document_id: Optional. If provided, restricts search to chunks from this document only.
+        Phase 2 improvements over Phase 1:
+        - BM25 is built lazily per query over dense candidates (no startup index).
+        - Adaptive fetch_k for complex multi-domain queries.
+        - Medical abbreviation expansion on the dense search query.
+        - Metadata soft-boost re-ranks type/section-matching docs to front.
+        - Neighbor expansion uses Qdrant directly (no in-memory corpus needed).
         """
         try:
             t0 = _time.perf_counter()
 
-            # Build optional Qdrant filter for patient/document scoping.
+            # ── Build Qdrant filter for patient/document scoping ───────────────
             _qdrant_filter = None
             must_conditions = []
             if patient_mrn or document_id:
@@ -280,42 +445,32 @@ class ClinicalNotesRAGTool:
                     )
                 _qdrant_filter = Filter(must=must_conditions)
 
-            # Stage 1: Dense MMR search (original query — no augmentation)
+            # ── Stage 1: Dense MMR search (Phase 2.2 adaptive fetch_k) ────────
+            # Use expanded query with medical abbreviations for dense search.
+            # BM25 gets the original query (benefits from exact abbreviation hits).
+            adaptive_k = self._adaptive_fetch_k(query)
+            expanded_query = self._expand_medical_query(query)
+
             search_kwargs = {
-                "k": self.fetch_k,
-                "fetch_k": self.fetch_k * 2,
+                "k": adaptive_k,
+                "fetch_k": adaptive_k * 2,
                 "lambda_mult": 0.5,
             }
             if _qdrant_filter:
                 search_kwargs["filter"] = _qdrant_filter
             dense_docs = self.vectordb.max_marginal_relevance_search(
-                query=query,
+                query=expanded_query,
                 **search_kwargs,
             )
             t_dense = _time.perf_counter() - t0
 
-            # Stage 2: BM25 sparse search (keyword-level)
-            bm25_docs = []
-            if self._bm25_index and self._bm25_docs:
-                try:
-                    import numpy as np
-                    tokenized_query = query.lower().split()
-                    scores = self._bm25_index.get_scores(tokenized_query)
-                    top_indices = np.argsort(scores)[::-1][:self.fetch_k]
-                    bm25_docs = [self._bm25_docs[i] for i in top_indices if scores[i] > 0]
-                    if patient_mrn:
-                        bm25_docs = [
-                            d for d in bm25_docs if d.metadata.get("patient_mrn") == patient_mrn
-                        ]
-                    # Filter by document_id if scoped
-                    if document_id:
-                        bm25_docs = [d for d in bm25_docs
-                                     if d.metadata.get("document_id") == document_id]
-                except Exception as e:
-                    logger.warning("BM25 search failed, using dense only: %s", e)
+            # ── Stage 2: Per-query BM25 over dense candidates (Phase 2.1) ─────
+            # BM25 sees only the MRN-filtered dense candidates — no cross-patient
+            # leakage is possible since Qdrant already enforced the scope filter.
+            bm25_docs = self._bm25_score_candidates(query, dense_docs)
             t_bm25 = _time.perf_counter() - t0 - t_dense
 
-            # Stage 3: Reciprocal Rank Fusion (RRF) to merge rankings
+            # ── Stage 3: RRF fusion ────────────────────────────────────────────
             if bm25_docs:
                 fused = self._reciprocal_rank_fusion(dense_docs, bm25_docs, k=60)
             else:
@@ -324,18 +479,15 @@ class ClinicalNotesRAGTool:
             if not fused:
                 return f"No relevant documents found for: {query}"
 
-            # Stage 4: Cross-encoder reranking with relevance filtering
-            # NotebookLM-inspired: reject irrelevant chunks BEFORE they reach the LLM
-            # to prevent hallucination from noisy context.
-            _MIN_RERANKER_SCORE = 0.05  # cross-encoder threshold
-            rerank_pool = fused[:self.fetch_k]  # cap reranker input
+            # ── Stage 4: Cross-encoder reranking ──────────────────────────────
+            _MIN_RERANKER_SCORE = 0.05
+            rerank_pool = fused[:adaptive_k]  # cap reranker input at adaptive fetch_k
             if self.reranker and len(rerank_pool) > 1:
                 pairs = [[query, doc.page_content] for doc in rerank_pool]
                 scores = self.reranker.predict(pairs)
                 scored_docs = sorted(
                     zip(rerank_pool, scores), key=lambda x: x[1], reverse=True
                 )
-                # Filter out chunks below relevance threshold
                 scored_docs = [(doc, s) for doc, s in scored_docs if s >= _MIN_RERANKER_SCORE]
                 if not scored_docs:
                     return (f"No sufficiently relevant clinical data found for: {query}. "
@@ -345,11 +497,12 @@ class ClinicalNotesRAGTool:
             else:
                 docs = rerank_pool[:self.k]
 
-            # Stage 5: Adjacent-chunk expansion
-            # SOAP notes and long sections often split across chunks.
-            # For each retrieved doc, also pull its chunk_index ± 1 neighbor
-            # from the same source file so the LLM gets complete context
-            # (e.g., full Day 7 SOAP with Assessment & Plan).
+            # ── Stage 4b: Metadata soft-boost (Phase 2.4) ─────────────────────
+            # Re-order (never discard) docs that match query-inferred type/section
+            # hints so the most contextually relevant chunks appear first.
+            docs = self._apply_metadata_boost(query, docs)
+
+            # ── Stage 5: Adjacent-chunk expansion (Qdrant-based, Phase 2.1) ───
             docs = self._expand_with_neighbors(
                 docs,
                 patient_mrn=patient_mrn,
@@ -357,19 +510,20 @@ class ClinicalNotesRAGTool:
             )
 
             t_total = _time.perf_counter() - t0
-            logger.info("Search: %.2fs (dense=%.2fs, bm25=%.2fs, rerank+fuse+expand=%.2fs) → %d docs",
-                        t_total, t_dense, t_bm25, t_total - t_dense - t_bm25, len(docs))
+            logger.info(
+                "Search: %.2fs (dense=%.2fs, bm25=%.2fs, rerank+fuse+expand=%.2fs) → %d docs "
+                "[fetch_k=%d, expanded_query=%s]",
+                t_total, t_dense, t_bm25, t_total - t_dense - t_bm25, len(docs),
+                adaptive_k, "yes" if expanded_query != query else "no",
+            )
 
-            # Render with source citations for LLM grounding (NotebookLM-style)
-            # Each chunk is tagged with section, page, and MRN so the LLM
-            # can cite exact sources — preventing hallucination.
+            # ── Render with source citations for LLM grounding ────────────────
             parts = []
             for i, d in enumerate(docs, 1):
                 sec = d.metadata.get("section_title", "Section")
                 page = d.metadata.get("page_number", "?")
                 mrn = d.metadata.get("patient_mrn", "")
-                header = f"[Source {i} | Section: {sec} | Page {page} | MRN: {mrn}"
-                header += "]"
+                header = f"[Source {i} | Section: {sec} | Page {page} | MRN: {mrn}]"
                 parts.append(f"{header}\n{d.page_content}")
             return "\n\n---\n\n".join(parts)
         except Exception as e:
@@ -405,92 +559,156 @@ class ClinicalNotesRAGTool:
     def _expand_with_neighbors(self, docs: list, patient_mrn: str = None, document_id: str = None) -> list:
         """Expand each retrieved document with its ±1 chunk-index neighbors.
 
-        Clinical SOAP notes and long sections often split across consecutive
-        chunks. A Day-specific query may retrieve the chunk that starts the
-        day entry but miss the chunk that contains the Assessment & Plan.
+        Phase 2.1 change: uses Qdrant queries instead of the old global BM25
+        corpus.  This means neighbor lookup is always up-to-date (no staleness
+        after uploads) and requires no startup memory overhead.
 
-        This method looks up neighbors from the BM25 docs cache (already in
-        memory), merges overlapping text between consecutive chunks, and
-        deduplicates by chunk_index to avoid sending duplicates to the LLM.
+        Strategy:
+        - Group retrieved docs by document_id (one Qdrant scroll per unique doc).
+        - Fetch the ±1 chunks around each retrieved chunk_index.
+        - Merge overlapping text between consecutive chunks.
+        - Deduplicate across the expanded set before returning.
 
-        Returns a new list of Documents, ordered by (filename, chunk_index).
+        Patient-isolation guarantee: scroll filters are scoped by patient_mrn
+        and/or document_id so neighbors from other patients are never fetched.
         """
         from langchain_core.documents import Document
+        from qdrant_client.models import Filter, FieldCondition, MatchValue
 
-        if not self._bm25_docs:
+        if not docs:
             return docs
 
-        # Build a lookup: (patient_mrn, document_id, filename, chunk_index) → Document
-        idx_lookup: dict[tuple[str, str, str, int], object] = {}
-        for d in self._bm25_docs:
-            if patient_mrn and d.metadata.get("patient_mrn") != patient_mrn:
-                continue
-            if document_id and d.metadata.get("document_id") != document_id:
-                continue
-            key = self._doc_scope_key(d)
-            idx_lookup[key] = d
-
-        # Collect original + neighbor chunk keys (deduplicated, preserving order)
-        seen_keys: set[tuple[str, str, str, int]] = set()
-        expanded_keys: list[tuple[str, str, str, int]] = []
+        # ── Step 1: Determine which (document_id, chunk_indices) we need ──────
+        # Map document_id → set of chunk indices wanted (current ± 1).
+        doc_needed: dict[str, set[int]] = {}
+        no_index_docs: list = []
 
         for d in docs:
-            if patient_mrn and d.metadata.get("patient_mrn") != patient_mrn:
-                continue
-            if document_id and d.metadata.get("document_id") != document_id:
-                continue
-            patient_key, doc_key, fname, cidx = self._doc_scope_key(d)
-            if cidx < 0:
-                # No chunk_index metadata — keep original doc as-is
-                key = (patient_key, doc_key, fname, cidx)
-                if key not in seen_keys:
-                    seen_keys.add(key)
-                    expanded_keys.append(key)
-                    idx_lookup[key] = d
+            meta = d.metadata or {}
+            did = str(meta.get("document_id") or "").strip()
+            cidx = meta.get("chunk_index", -1)
+            try:
+                cidx = int(cidx)
+            except Exception:
+                cidx = -1
+
+            if not did or cidx < 0:
+                no_index_docs.append(d)
                 continue
 
-            # Add prev, current, next chunk (if they exist in the corpus)
+            if did not in doc_needed:
+                doc_needed[did] = set()
+            doc_needed[did].update([cidx - 1, cidx, cidx + 1])
+
+        if not doc_needed:
+            # No chunk-indexed docs to expand
+            return docs
+
+        # ── Step 2: Fetch neighbor chunks from Qdrant (one scroll per doc_id) ─
+        # neighbor_map: (doc_id, chunk_index) → Document
+        neighbor_map: dict[tuple[str, int], object] = {}
+
+        for did, needed_idxs in doc_needed.items():
+            needed_idxs = {i for i in needed_idxs if i >= 0}
+            try:
+                must_conds = []
+                if patient_mrn:
+                    must_conds.append(
+                        FieldCondition(key="metadata.patient_mrn",
+                                       match=MatchValue(value=patient_mrn))
+                    )
+                # Always filter by document_id so we only fetch the right doc.
+                must_conds.append(
+                    FieldCondition(key="metadata.document_id",
+                                   match=MatchValue(value=document_id or did))
+                )
+                scroll_filter = Filter(must=must_conds)
+
+                # A limit of 512 comfortably covers ±1 neighbors for any realistic doc.
+                results = self.client.scroll(
+                    collection_name=self.collection_name,
+                    scroll_filter=scroll_filter,
+                    limit=512,
+                    with_payload=True,
+                    with_vectors=False,
+                )
+                for point in results[0]:
+                    pmeta = point.payload.get("metadata", {}) or {}
+                    pcidx = pmeta.get("chunk_index", -1)
+                    try:
+                        pcidx = int(pcidx)
+                    except Exception:
+                        pcidx = -1
+                    if pcidx in needed_idxs:
+                        content = point.payload.get("page_content", "") or ""
+                        neighbor_map[(did, pcidx)] = Document(
+                            page_content=content, metadata=pmeta
+                        )
+            except Exception as e:
+                logger.warning("Neighbor expansion Qdrant query failed for doc %s: %s", did, e)
+
+        # ── Step 3: Collect expanded + deduplicated set ────────────────────────
+        seen_keys: set[tuple[str, int]] = set()
+        ordered_keys: list[tuple[str, str, int]] = []  # (fname, did, cidx)
+        key_to_doc: dict[tuple[str, int], object] = {}
+
+        # Seed from original docs (they define ordering anchor)
+        for d in docs:
+            meta = d.metadata or {}
+            did = str(meta.get("document_id") or "").strip()
+            cidx = meta.get("chunk_index", -1)
+            try:
+                cidx = int(cidx)
+            except Exception:
+                cidx = -1
+            fname = meta.get("filename", "")
+            if not did or cidx < 0:
+                continue
             for offset in (-1, 0, 1):
-                nkey = (patient_key, doc_key, fname, cidx + offset)
-                if nkey not in seen_keys and nkey in idx_lookup:
+                ncidx = cidx + offset
+                if ncidx < 0:
+                    continue
+                nkey = (did, ncidx)
+                if nkey not in seen_keys and nkey in neighbor_map:
                     seen_keys.add(nkey)
-                    expanded_keys.append(nkey)
+                    ordered_keys.append((fname, did, ncidx))
+                    key_to_doc[nkey] = neighbor_map[nkey]
 
-        # Sort by scope + chunk index for coherent reading order
-        expanded_keys.sort(key=lambda k: (k[0], k[1], k[2], k[3]))
+        # Sort for coherent reading order: (filename, chunk_index)
+        ordered_keys.sort(key=lambda t: (t[0], t[1], t[2]))
 
-        # Build expanded doc list, merging overlap between consecutive chunks
+        # ── Step 4: Build expanded doc list with overlap stripping ─────────────
         expanded: list[object] = []
         prev_content: str | None = None
-        prev_key: tuple[str, str, str, int] | None = None
+        prev_fname: str | None = None
+        prev_cidx: int = -999
 
-        for key in expanded_keys:
-            d = idx_lookup[key]
+        for fname, did, cidx in ordered_keys:
+            d = key_to_doc[(did, cidx)]
             content = d.page_content
-            _, _, fname, cidx = key
 
-            # If consecutive chunks from same file, strip overlap
-            if (prev_key and prev_key[2] == fname
-                    and prev_key[3] == cidx - 1 and prev_content):
+            # Strip leading overlap when consecutive chunks from the same file
+            if (prev_fname == fname and cidx == prev_cidx + 1 and prev_content):
                 overlap = self._find_overlap(prev_content, content)
                 if overlap > 0:
                     content = content[overlap:]
 
             if content.strip():
-                expanded.append(Document(
-                    page_content=content,
-                    metadata=d.metadata,
-                ))
+                expanded.append(Document(page_content=content, metadata=d.metadata))
 
             prev_content = d.page_content  # original for overlap detection
-            prev_key = key
+            prev_fname = fname
+            prev_cidx = cidx
+
+        # Append original no-index docs that couldn't be expanded
+        expanded.extend(no_index_docs)
 
         added = len(expanded) - len(docs)
         if added > 0:
             logger.info("Neighbor expansion: %d → %d chunks (+%d neighbors)",
                         len(docs), len(expanded), added)
 
-        return expanded
+        return expanded if expanded else docs
 
     def get_all_chunks_for_patient(self, patient_mrn: str) -> str:
         """Retrieve ALL chunks for a specific patient by MRN, merge overlapping
