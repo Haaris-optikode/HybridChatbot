@@ -1961,12 +1961,72 @@ def clear_summary_caches() -> dict:
     }
 
 
+def invalidate_document_summary_cache(document_id: str) -> dict:
+    """Invalidate the cached summary for a specific document_id (memory + disk).
+
+    Called after a document is re-indexed so the next summary request generates fresh.
+    Returns a dict with 'memory_cleared' and 'disk_cleared' flags.
+    """
+    memory_cleared = False
+    disk_cleared = False
+
+    with _DOC_SUMMARY_CACHE_LOCK:
+        if document_id in _DOC_SUMMARY_CACHE:
+            del _DOC_SUMMARY_CACHE[document_id]
+            memory_cleared = True
+
+    cache_file = _document_summary_cache_file(document_id)
+    if cache_file.exists():
+        try:
+            cache_file.unlink()
+            disk_cleared = True
+        except Exception as e:
+            logger.warning("Could not delete document cache file %s: %s", cache_file, e)
+
+    logger.info(
+        "Invalidated summary cache for document_id=%s (memory=%s, disk=%s)",
+        document_id, memory_cleared, disk_cleared,
+    )
+    return {"document_id": document_id, "memory_cleared": memory_cleared, "disk_cleared": disk_cleared}
+
+
+def invalidate_patient_summary_cache(patient_mrn: str) -> dict:
+    """Invalidate the cached summary for a patient MRN (memory + disk).
+
+    Called after a patient's documents are re-indexed to force fresh summarization.
+    """
+    memory_cleared = False
+    disk_cleared = False
+
+    with _memory_cache_lock:
+        if patient_mrn in _memory_cache:
+            del _memory_cache[patient_mrn]
+            memory_cleared = True
+
+    cache_dir = _Path(here("data")) / "summary_cache"
+    cache_key = hashlib.sha256(patient_mrn.encode()).hexdigest()[:16]
+    cache_file = cache_dir / f"{cache_key}.json"
+    if cache_file.exists():
+        try:
+            cache_file.unlink()
+            disk_cleared = True
+        except Exception as e:
+            logger.warning("Could not delete patient cache file %s: %s", cache_file, e)
+
+    logger.info(
+        "Invalidated summary cache for patient_mrn=%s (memory=%s, disk=%s)",
+        patient_mrn, memory_cleared, disk_cleared,
+    )
+    return {"patient_mrn": patient_mrn, "memory_cleared": memory_cleared, "disk_cleared": disk_cleared}
+
+
 def _document_summary_cache_file(document_id: str) -> _Path:
     """Return a stable disk-cache path for uploaded-document summaries."""
     cache_dir = _Path(here("data")) / "summary_cache"
     cache_dir.mkdir(parents=True, exist_ok=True)
     cache_key = hashlib.sha256(f"doc::{document_id}".encode("utf-8")).hexdigest()[:16]
     return cache_dir / f"doc_{cache_key}.json"
+
 
 
 def _get_doc_reduce_llm(model_override: str = None):
@@ -2276,22 +2336,47 @@ def _doc_needs_keyword_retry(raw_text: str, merged: dict, note_type: str | None 
     """Heuristic: detect missing can't-miss domains when source contains signals."""
     raw = (raw_text or "").lower()
     missing = []
-    if ("allerg" in raw or "nka" in raw or "no known allergy" in raw) and not (merged.get("allergies") or []):
+    if ("allerg" in raw or "nka" in raw or "no known allergy" in raw or "nkda" in raw or "contrast allergy" in raw) and not (merged.get("allergies") or []):
         missing.append("allergies")
-    if ("medication" in raw or "rx" in raw or "sig" in raw or "discharge medications" in raw) and not (merged.get("medications") or []):
+    if ("medication" in raw or "rx" in raw or "sig" in raw or "discharge medications" in raw or "home medications" in raw or "med list" in raw) and not (merged.get("medications") or []):
         missing.append("medications")
-    if ("lab" in raw or "cbc" in raw or "bmp" in raw or "cmp" in raw) and not (merged.get("labs") or []):
+    if ("lab" in raw or "cbc" in raw or "bmp" in raw or "cmp" in raw or "hgb" in raw or "wbc" in raw or "creatinine" in raw or "troponin" in raw or "bnp" in raw) and not (merged.get("labs") or []):
         missing.append("labs")
-    if ("impression" in raw or "ct" in raw or "mri" in raw or "x-ray" in raw or "ultrasound" in raw) and not (merged.get("imaging") or []):
+    if ("impression" in raw or "ct " in raw or "mri" in raw or "x-ray" in raw or "ultrasound" in raw or "radiograph" in raw or "chest x" in raw) and not (merged.get("imaging") or []):
         missing.append("imaging")
-    if ("ecg" in raw or "ekg" in raw or "echo" in raw or "ejection fraction" in raw or "rvsp" in raw) and not (merged.get("imaging") or []):
+    if ("ecg" in raw or "ekg" in raw or "echo" in raw or "ejection fraction" in raw or "rvsp" in raw or "echocardiogram" in raw) and not (merged.get("imaging") or []):
         missing.append("imaging")
-    if ("procedure" in raw or "operative" in raw or "surgery" in raw) and not (merged.get("procedures") or []):
+    if ("procedure" in raw or "operative" in raw or "surgery" in raw or "biopsy" in raw or "endoscopy" in raw or "intubat" in raw) and not (merged.get("procedures") or []):
         missing.append("procedures")
-    if ("catheter" in raw or "thoracentesis" in raw or "pcwp" in raw or "cardiac index" in raw or "pvr" in raw) and not (merged.get("procedures") or []):
+    if ("catheter" in raw or "thoracentesis" in raw or "pcwp" in raw or "cardiac index" in raw or "pvr" in raw or "bronchoscopy" in raw or "paracentesis" in raw) and not (merged.get("procedures") or []):
         missing.append("procedures")
-    if ("discharge" in raw or "follow-up" in raw or "appointment" in raw) and not (merged.get("disposition_followup") or []):
+    if ("discharge" in raw or "follow-up" in raw or "appointment" in raw or "follow up" in raw or "outpatient" in raw) and not (merged.get("disposition_followup") or []):
         missing.append("disposition_followup")
+
+    # Vitals: present but not extracted
+    if (
+        any(k in raw for k in ["blood pressure", "bp:", "hr:", "heart rate", "temp:", "temperature", "spo2", "o2 sat", "respiratory rate", "rr:", "weight:", "pulse:"])
+        and not (merged.get("vitals") or [])
+    ):
+        missing.append("vitals")
+
+    # Code status / advance directives: high-risk safety domain
+    if (
+        any(k in raw for k in ["code status", "dnr", "dni", "full code", "comfort care", "advance directive", "healthcare proxy", "power of attorney", "dnar"])
+        and not any(
+            any(k in str(item).lower() for k in ["code", "dnr", "dni", "comfort", "directive", "proxy", "attorney"])
+            for item in (merged.get("other_key_findings") or []) + (merged.get("problems") or []) + (merged.get("missing_or_unclear") or [])
+        )
+    ):
+        missing.append("code_status")
+
+    # Hospital course: present in text but not extracted for applicable note types
+    if note_type in ("Inpatient", "Discharge_Summary") or any(k in raw for k in ["hospital course", "hd#", "hospital day"]):
+        if (
+            any(k in raw for k in ["hospital course", "hospital day", "inpatient", "during admission", "day ", "hd#", "hd "])
+            and not (merged.get("hospital_course") or [])
+        ):
+            missing.append("hospital_course")
 
     # Note-type-specific priorities.
     if note_type in ("SOAP", "HPI", "AP"):
@@ -2302,13 +2387,60 @@ def _doc_needs_keyword_retry(raw_text: str, merged: dict, note_type: str | None 
         ):
             missing.append("problems")
 
-    if note_type in ("Inpatient", "Discharge_Summary"):
-        if (
-            any(k in raw for k in ["hospital course", "hospital day", "inpatient", "during admission", "day "])
-            and not (merged.get("hospital_course") or [])
-        ):
-            missing.append("hospital_course")
-    return missing
+    return list(dict.fromkeys(missing))  # deduplicate while preserving order
+
+
+def _score_summary_quality(summary: str, merged: dict, indexed_chunks: list[tuple[int, str, dict]]) -> dict:
+    """Score summary completeness against source document indicators.
+
+    Returns a dict with a numeric score (0.0-1.0) and per-domain flags for monitoring.
+    """
+    raw_text = "\n".join((txt[:600] if txt else "") for _, txt, _ in indexed_chunks).lower()
+    summary_lower = (summary or "").lower()
+
+    _DOMAIN_CHECKS = [
+        # (domain_name, source_signal_keywords, summary_expected_keywords)
+        ("allergies",      ["allerg", "nka", "nkda", "no known allergy"],          ["allerg", "nka", "no known"]),
+        ("medications",    ["medication", "rx ", "sig:", "discharge medications"],  ["medication", "prescribed", "drug", "dose"]),
+        ("labs",           ["cbc", "bmp", "cmp", "creatinine", "troponin", "bnp"], ["lab", "result", "mg/dl", "mmol", "creatinine"]),
+        ("imaging",        ["ecg", "ekg", "echo", "ct ", "mri", "x-ray"],          ["ecg", "ekg", "echo", "ct ", "mri", "x-ray", "imaging"]),
+        ("procedures",     ["procedure", "surgery", "catheter", "thoracentesis"],   ["procedure", "surgery", "catheter", "performed"]),
+        ("vitals",         ["blood pressure", "bp:", "hr:", "spo2", "temp:"],       ["bp", "blood pressure", "hr", "heart rate", "vitals"]),
+        ("code_status",    ["code status", "dnr", "full code", "dni"],              ["code", "dnr", "dni", "full code", "comfort"]),
+        ("disposition",    ["discharge", "follow-up", "appointment"],               ["discharge", "follow-up", "follow up", "appointment"]),
+    ]
+
+    domain_results: dict[str, str] = {}
+    present_in_source = 0
+    captured_in_summary = 0
+
+    for domain_name, source_signals, summary_signals in _DOMAIN_CHECKS:
+        in_source = any(k in raw_text for k in source_signals)
+        if not in_source:
+            domain_results[domain_name] = "not_present"
+            continue
+        present_in_source += 1
+        in_summary = any(k in summary_lower for k in summary_signals)
+        if in_summary:
+            domain_results[domain_name] = "captured"
+            captured_in_summary += 1
+        else:
+            domain_results[domain_name] = "missing"
+
+    score = (captured_in_summary / present_in_source) if present_in_source > 0 else 1.0
+
+    # Check merged payload completeness (JSON extraction quality)
+    payload_domains = ["allergies", "medications", "labs", "imaging", "procedures", "vitals", "problems"]
+    payload_score = sum(1 for d in payload_domains if merged.get(d)) / len(payload_domains)
+
+    return {
+        "score": round((score * 0.6 + payload_score * 0.4), 3),
+        "text_coverage_score": round(score, 3),
+        "payload_completeness_score": round(payload_score, 3),
+        "domains_present_in_source": present_in_source,
+        "domains_captured_in_summary": captured_in_summary,
+        "domain_results": domain_results,
+    }
 
 
 def _build_sources_for_groups(chunks: list[tuple[int, str, dict]], max_group_chars: int = 22_000) -> list[str]:
@@ -2345,6 +2477,57 @@ def _build_sources_for_groups(chunks: list[tuple[int, str, dict]], max_group_cha
     return rendered
 
 
+_MAX_SUMMARY_CHUNKS = int(os.environ.get("MEDGRAPH_MAX_SUMMARY_CHUNKS", "2000"))
+
+_HIGH_SIGNAL_KEYWORDS = frozenset([
+    "allerg", "medication", "discharge", "history", "assessment", "plan",
+    "echo", "ecg", "ekg", "procedure", "catheter", "lab", "vital", "diagnos",
+    "troponin", "creatinine", "bnp", "dnr", "code status", "follow-up",
+])
+
+
+def _cap_indexed_chunks(
+    indexed_chunks: list[tuple[int, str, dict]],
+    max_chunks: int = _MAX_SUMMARY_CHUNKS,
+) -> list[tuple[int, str, dict]]:
+    """Cap `indexed_chunks` to `max_chunks` to prevent OOM on very large patient records.
+
+    Prioritisation strategy when cap is needed:
+    1. Keep all high-signal chunks (contain clinical keywords).
+    2. Fill remaining slots with evenly-sampled remaining chunks.
+    Preserves original source IDs so citations remain correct.
+    """
+    if len(indexed_chunks) <= max_chunks:
+        return indexed_chunks
+
+    logger.warning(
+        "OOM guard: patient/document has %d chunks, capping to %d "
+        "(set MEDGRAPH_MAX_SUMMARY_CHUNKS env var to override)",
+        len(indexed_chunks), max_chunks,
+    )
+
+    high_signal = [
+        c for c in indexed_chunks
+        if any(k in (c[1] or "").lower() for k in _HIGH_SIGNAL_KEYWORDS)
+    ]
+    remaining = [c for c in indexed_chunks if c not in high_signal]
+
+    if len(high_signal) >= max_chunks:
+        # Even high-signal alone exceeds cap — sample evenly from it
+        step = len(high_signal) / max_chunks
+        return [high_signal[int(i * step)] for i in range(max_chunks)]
+
+    slots_left = max_chunks - len(high_signal)
+    if remaining:
+        step = max(1, len(remaining) / slots_left)
+        sampled = [remaining[int(i * step)] for i in range(min(slots_left, len(remaining)))]
+    else:
+        sampled = []
+
+    combined = sorted(high_signal + sampled, key=lambda c: c[0])
+    return combined
+
+
 def _run_structured_summary_pipeline(
     entity_id: str,
     indexed_chunks: list[tuple[int, str, dict]],
@@ -2357,6 +2540,8 @@ def _run_structured_summary_pipeline(
     """
     if not indexed_chunks:
         return "No indexed chunks available for summarization.", "none"
+
+    indexed_chunks = _cap_indexed_chunks(indexed_chunks)
 
     mode = _current_summary_mode()
     provider = get_active_llm_provider(getattr(TOOLS_CFG, "llm_provider", "openai"))
@@ -2522,14 +2707,16 @@ SOURCES:
 
     if missing_domains:
         keyword_map = {
-            "allergies": ["allerg", "nka", "reaction", "anaphyl", "urticaria", "angioedema", "contrast"],
-            "medications": ["med", "medication", "rx", "sig", "dose", "tablet", "capsule", "discharge rx"],
-            "labs": ["lab", "cbc", "bmp", "cmp", "mg/dl", "mmol", "wbc", "hgb", "plt", "bnp", "creatinine"],
-            "imaging": ["impression", "ct", "mri", "x-ray", "ultrasound", "echo", "ecg", "ekg", "rvsp", "ef"],
-            "procedures": ["procedure", "operative", "surgery", "biopsy", "endoscopy", "thoracentesis", "catheter", "pcwp", "pvr", "cardiac index"],
-                "problems": ["assessment", "impression", "diagnos", "differential", "problem", "plan"],
-                "hospital_course": ["hospital course", "hospital day", "inpatient", "during admission", "day "],
-            "disposition_followup": ["discharge", "follow-up", "appointment", "return to", "home health", "pt", "ot", "icd"],
+            "allergies": ["allerg", "nka", "nkda", "reaction", "anaphyl", "urticaria", "angioedema", "contrast allergy", "no known allergy"],
+            "medications": ["med", "medication", "rx", "sig", "dose", "tablet", "capsule", "discharge rx", "home medications", "med list"],
+            "labs": ["lab", "cbc", "bmp", "cmp", "mg/dl", "mmol", "wbc", "hgb", "plt", "bnp", "creatinine", "troponin", "a1c", "hba1c"],
+            "imaging": ["impression", "ct", "mri", "x-ray", "ultrasound", "echo", "ecg", "ekg", "rvsp", "ef", "radiograph", "chest x", "echocardiogram"],
+            "procedures": ["procedure", "operative", "surgery", "biopsy", "endoscopy", "thoracentesis", "catheter", "pcwp", "pvr", "cardiac index", "intubat", "bronchoscopy", "paracentesis"],
+            "problems": ["assessment", "impression", "diagnos", "differential", "problem", "plan"],
+            "hospital_course": ["hospital course", "hospital day", "inpatient", "during admission", "day ", "hd#", "hd "],
+            "disposition_followup": ["discharge", "follow-up", "follow up", "appointment", "return to", "home health", "pt", "ot", "icd", "outpatient"],
+            "vitals": ["blood pressure", "bp:", "hr:", "heart rate", "temp:", "temperature", "spo2", "o2 sat", "respiratory rate", "rr:", "weight:", "pulse:"],
+            "code_status": ["code status", "dnr", "dni", "full code", "comfort care", "advance directive", "dnar", "healthcare proxy"],
         }
         want = set(missing_domains)
         filtered = []
@@ -2554,6 +2741,8 @@ SOURCES:
             "afib", "atrial fibrillation", "rvr", "magnesium", "diltiazem",
             "proteinuria", "nephrology", "creatinine", "discharge delayed", "arni",
             "home health", "follow-up", "repeat echo", "icd", "final discharge", "discharge vitals", "discharge labs",
+            "code status", "dnr", "dni", "full code", "comfort care", "advance directive", "dnar", "healthcare proxy",
+            "blood pressure", "heart rate", "spo2", "o2 sat", "respiratory rate", "weight:",
         ]
         augment_chunks = []
         for global_idx, txt, meta in indexed_chunks:
@@ -2630,6 +2819,24 @@ SOURCES:
         max_retries=2,
         model_chain=reduce_chain,
     )
+
+    # Phase 4.2 — quality scoring for observability (no latency impact)
+    try:
+        quality = _score_summary_quality(summary, merged, indexed_chunks)
+        logger.info(
+            "[SummaryQuality] entity=%s score=%.3f text_cov=%.3f payload=%.3f "
+            "domains_present=%d domains_captured=%d missing=%s",
+            entity_id,
+            quality["score"],
+            quality["text_coverage_score"],
+            quality["payload_completeness_score"],
+            quality["domains_present_in_source"],
+            quality["domains_captured_in_summary"],
+            [k for k, v in quality["domain_results"].items() if v == "missing"],
+        )
+    except Exception as _qe:
+        logger.debug("Quality scoring error (non-critical): %s", _qe)
+
     return summary, model_name
 
 

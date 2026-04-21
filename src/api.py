@@ -68,11 +68,14 @@ logger = logging.getLogger("medgraph.api")
 audit_logger = logging.getLogger("medgraph.audit")
 audit_logger.setLevel(logging.INFO)
 
-# ── HIPAA Audit Log File Handler ─────────────────────────────────────
+# ── HIPAA Audit Log File Handler (rotating, 50 MB × 20 files ≈ 1 GB history) ──
 _AUDIT_LOG_DIR = str(here("logs"))
 os.makedirs(_AUDIT_LOG_DIR, exist_ok=True)
-_audit_file_handler = logging.FileHandler(
+from logging.handlers import RotatingFileHandler as _RotatingFileHandler
+_audit_file_handler = _RotatingFileHandler(
     os.path.join(_AUDIT_LOG_DIR, "hipaa_audit.log"),
+    maxBytes=50 * 1024 * 1024,   # 50 MB per file
+    backupCount=20,               # keep 20 files → up to 1 GB audit history
     encoding="utf-8",
 )
 _audit_file_handler.setFormatter(logging.Formatter(
@@ -93,6 +96,8 @@ from agent_graph.tool_clinical_notes_rag import (
     set_summary_request_mode,
     reset_summary_request_mode,
     clear_summary_caches,
+    invalidate_document_summary_cache,
+    invalidate_patient_summary_cache,
 )
 
 PROJECT_CFG = LoadProjectConfig()
@@ -259,7 +264,13 @@ JWT_SECRET = os.getenv("MEDGRAPH_JWT_SECRET", "dev-secret-change-me-in-productio
 JWT_ALGORITHM = "HS256"
 JWT_EXPIRATION_HOURS = int(os.getenv("MEDGRAPH_JWT_EXPIRATION_HOURS", "24"))
 
+_MEDGRAPH_ENV = os.getenv("MEDGRAPH_ENV", "development").strip().lower()
 if JWT_SECRET == "dev-secret-change-me-in-production":
+    if _MEDGRAPH_ENV == "production":
+        raise RuntimeError(
+            "MEDGRAPH_JWT_SECRET must be set to a strong random value in production. "
+            "Set MEDGRAPH_JWT_SECRET env var before starting the server."
+        )
     logger.warning("Using default JWT secret — set MEDGRAPH_JWT_SECRET env var for production!")
 
 security_scheme = HTTPBearer(auto_error=False)
@@ -1998,6 +2009,17 @@ def _vectorize_in_background(document_id: str, file_path: str, collection_name: 
         except Exception as e:
             logger.warning("Could not refresh BM25 index: %s", e)
 
+        # Phase 4.3 — invalidate cached summaries for this document so the
+        # next summarize_uploaded_document call generates a fresh result.
+        try:
+            invalidate_document_summary_cache(document_id)
+            # Also invalidate the patient-level summary if we can identify the MRN.
+            patient_mrn = documents[0].metadata.get("patient_mrn") if documents else None
+            if patient_mrn:
+                invalidate_patient_summary_cache(patient_mrn)
+        except Exception as e:
+            logger.warning("Cache invalidation failed (non-critical): %s", e)
+
         with _documents_lock:
             meta = _load_documents_meta()
             if document_id in meta:
@@ -2008,6 +2030,9 @@ def _vectorize_in_background(document_id: str, file_path: str, collection_name: 
                 _save_documents_meta(meta)
 
         logger.info("Document vectorized successfully: %s (%d chunks)", document_id, len(documents))
+
+    except Exception as e:
+        logger.error("Vectorization failed for %s: %s", document_id, str(e))
 
     except Exception as e:
         logger.error("Vectorization failed for %s: %s", document_id, str(e))
