@@ -20,7 +20,7 @@ if (-not (Test-Path $QdrantExe)) {
 
 # Check if Qdrant is already running
 try {
-    $response = Invoke-WebRequest -Uri "http://localhost:6333/" -UseBasicParsing -TimeoutSec 2
+    $null = Invoke-WebRequest -Uri "http://localhost:6333/" -UseBasicParsing -TimeoutSec 2
     Write-Host "[INFO] Qdrant server is already running on port 6333." -ForegroundColor Yellow
     exit 0
 } catch { }
@@ -33,7 +33,7 @@ Write-Host ""
 
 Push-Location (Join-Path $ScriptDir "qdrant")
 try {
-    & $QdrantExe --config-path config.yaml
+    & $QdrantExe --config-path $QdrantCfg
 } finally {
     Pop-Location
 }

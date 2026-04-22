@@ -18,7 +18,7 @@ $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 # ── 1. Ensure Qdrant is up ────────────────────────────────────────────────────
 $qdrantRunning = $false
 try {
-    $r = Invoke-WebRequest -Uri "http://localhost:6333/" -UseBasicParsing -TimeoutSec 2
+    $null = Invoke-WebRequest -Uri "http://localhost:6333/" -UseBasicParsing -TimeoutSec 2
     $qdrantRunning = $true
     Write-Host "[OK] Qdrant already running." -ForegroundColor Green
 } catch { }
