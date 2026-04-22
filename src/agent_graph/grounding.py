@@ -26,7 +26,7 @@ _UNCITED_CLINICAL_PATTERNS: list[tuple[str, str]] = [
 
 # Pre-compile for speed
 _COMPILED_UNCITED = [(re.compile(p, re.IGNORECASE), lbl) for p, lbl in _UNCITED_CLINICAL_PATTERNS]
-_CITATION_RE = re.compile(r"\[S(\d+)\]")
+_CITATION_RE = re.compile(r"\[S(\d+)(?:[,\s][^\]]+)?\]")  # matches [S1] and [S22, description]
 _SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?])\s+|\n+")
 
 

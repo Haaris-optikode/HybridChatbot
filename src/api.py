@@ -72,8 +72,9 @@ audit_logger.setLevel(logging.INFO)
 _AUDIT_LOG_DIR = str(here("logs"))
 os.makedirs(_AUDIT_LOG_DIR, exist_ok=True)
 from logging.handlers import RotatingFileHandler as _RotatingFileHandler
+_AUDIT_LOG_PATH = os.path.join(_AUDIT_LOG_DIR, "hipaa_audit.log")
 _audit_file_handler = _RotatingFileHandler(
-    os.path.join(_AUDIT_LOG_DIR, "hipaa_audit.log"),
+    _AUDIT_LOG_PATH,
     maxBytes=50 * 1024 * 1024,   # 50 MB per file
     backupCount=20,               # keep 20 files → up to 1 GB audit history
     encoding="utf-8",
@@ -83,6 +84,17 @@ _audit_file_handler.setFormatter(logging.Formatter(
     datefmt="%Y-%m-%dT%H:%M:%S",
 ))
 audit_logger.addHandler(_audit_file_handler)
+
+# Phase 11 — Harden audit log file permissions at startup (owner read/write only)
+# On POSIX systems this restricts access to the process owner (0o600).
+# On Windows, use icacls as a post-deployment ops step:
+#   icacls logs\hipaa_audit.log /inheritance:r /grant:r "%USERNAME%:(R,W)"
+try:
+    import stat as _stat
+    if os.path.exists(_AUDIT_LOG_PATH):
+        os.chmod(_AUDIT_LOG_PATH, _stat.S_IRUSR | _stat.S_IWUSR)  # 0o600
+except (OSError, NotImplementedError):
+    pass  # Windows: chmod is a no-op for NTFS ACLs; ops team applies icacls
 
 # ── LangGraph agent imports ──────────────────────────────────────────
 from chatbot.load_config import LoadProjectConfig
@@ -584,6 +596,87 @@ def _audit_log(event: str, user: dict, **extra):
     }
     audit_logger.info(json.dumps(entry))
 
+
+# ── Phase 11: HIPAA audit enrichment helpers ─────────────────────────────────
+
+# Tools that query the Qdrant vector store (patient clinical data)
+_QDRANT_TOOLS: frozenset = frozenset({
+    "lookup_clinical_notes",
+    "lookup_patient_orders",
+    "cohort_patient_search",
+    "list_available_patients",
+    "list_uploaded_documents",
+    "summarize_patient_record",
+    "summarize_uploaded_document",
+})
+
+# Tools that hit the open web (Tavily)
+_WEB_TOOLS: frozenset = frozenset({
+    "tavily_search_results_json",
+})
+
+
+def _classify_data_sources(tools_invoked: list) -> str:
+    """Classify which data sources were accessed based on tool names.
+
+    Returns one of: "qdrant", "web", "qdrant+web", "tool", "none".
+    """
+    invoked_set = set(tools_invoked)
+    has_qdrant = bool(invoked_set & _QDRANT_TOOLS)
+    has_web = bool(invoked_set & _WEB_TOOLS)
+    if has_qdrant and has_web:
+        return "qdrant+web"
+    if has_qdrant:
+        return "qdrant"
+    if has_web:
+        return "web"
+    if invoked_set:
+        return "tool"
+    return "none"
+
+
+def _extract_audit_metadata(events: list) -> dict:
+    """Extract patient MRN, tools invoked, data sources, and grounding score
+    from a completed LangGraph event list (stream_mode="values").
+
+    Returns a dict with zero or more of:
+      patient_mrn   — the active patient MRN resolved by the graph
+      tools_invoked — ordered, deduplicated list of tool names called
+      data_sources  — classification string (qdrant / web / qdrant+web / none)
+      grounding_score — citation_coverage float from grounding verification
+    """
+    if not events:
+        return {"data_sources": "none"}
+
+    final_state = events[-1]
+
+    # MRN — propagated through state by every node that calls a patient tool
+    patient_mrn = (final_state.get("active_patient_mrn") or "").strip() or None
+
+    # Tools invoked — ToolMessage objects carry the tool function name
+    all_messages = final_state.get("messages", [])
+    tools_invoked: list = list(dict.fromkeys(  # preserve insertion order, dedup
+        getattr(m, "name", "")
+        for m in all_messages
+        if m.__class__.__name__ == "ToolMessage" and getattr(m, "name", "")
+    ))
+
+    data_sources = _classify_data_sources(tools_invoked)
+
+    # Grounding — synthesizer node stores result in state (Phase 11 addition)
+    grounding = final_state.get("grounding_result") or {}
+    grounding_score = grounding.get("citation_coverage")  # float or None
+
+    result: dict = {"data_sources": data_sources}
+    if patient_mrn:
+        result["patient_mrn"] = patient_mrn
+    if tools_invoked:
+        result["tools_invoked"] = tools_invoked
+    if grounding_score is not None:
+        result["grounding_score"] = grounding_score
+    return result
+
+
 # ── System prompt ────────────────────────────────────────────────────
 SYSTEM_PROMPT = """You are MedGraph AI, a clinical intelligence assistant for EHR systems.
 
@@ -650,7 +743,7 @@ RESPONSE STYLE:
 - Target 80–150 words for simple queries, 200–500 words for complex multi-part questions. For comprehensive analytical questions (readmission risk, treatment analysis), use as many words as needed to be thorough.
 
 SOURCE GROUNDING (Critical — prevents hallucination):
-- Every factual claim MUST come from the retrieved sources. Cite as "(Source: [Section], Page X)" at the end of relevant paragraphs or sections, not after every single sentence.
+- Every factual claim MUST come from the retrieved sources. Cite inline using [SN] format (e.g. [S1], [S2]) immediately after each clinical fact, where N matches the [Source N] label in the retrieved data.
 - If the sources do NOT contain the answer, say: "The available clinical records do not contain information about [topic]." Do NOT guess or fill gaps.
 - NEVER extrapolate beyond what is explicitly stated. If a value is not documented, do not estimate it.
 - When sources contain contradictory information, report both values and note the discrepancy.
@@ -1064,11 +1157,12 @@ async def chat(req: ChatRequest, request: Request, user: dict = Depends(get_curr
         gradio_format = [(h.content, full_history[i + 1].content)
                          for i, h in enumerate(full_history)
                          if h.role == "user" and i + 1 < len(full_history)]
-        Memory.write_chat_history_to_file(
-            gradio_chatbot=gradio_format,
-            folder_path=PROJECT_CFG.memory_dir,
-            thread_id=sid
-        )
+        with _get_session_write_lock(sid):
+            Memory.write_chat_history_to_file(
+                gradio_chatbot=gradio_format,
+                folder_path=PROJECT_CFG.memory_dir,
+                thread_id=sid
+            )
 
         elapsed_ms = int((time.perf_counter() - t0) * 1000)
         request_usage = {
@@ -1105,11 +1199,12 @@ async def chat(req: ChatRequest, request: Request, user: dict = Depends(get_curr
         gradio_format = [(h.content, full_history[i + 1].content)
                          for i, h in enumerate(full_history)
                          if h.role == "user" and i + 1 < len(full_history)]
-        Memory.write_chat_history_to_file(
-            gradio_chatbot=gradio_format,
-            folder_path=PROJECT_CFG.memory_dir,
-            thread_id=sid
-        )
+        with _get_session_write_lock(sid):
+            Memory.write_chat_history_to_file(
+                gradio_chatbot=gradio_format,
+                folder_path=PROJECT_CFG.memory_dir,
+                thread_id=sid
+            )
 
         elapsed_ms = int((time.perf_counter() - t0) * 1000)
         request_usage = {
@@ -1227,11 +1322,12 @@ async def chat(req: ChatRequest, request: Request, user: dict = Depends(get_curr
     gradio_format = [(h.content, full_history[i + 1].content)
                      for i, h in enumerate(full_history)
                      if h.role == "user" and i + 1 < len(full_history)]
-    Memory.write_chat_history_to_file(
-        gradio_chatbot=gradio_format,
-        folder_path=PROJECT_CFG.memory_dir,
-        thread_id=sid
-    )
+    with _get_session_write_lock(sid):
+        Memory.write_chat_history_to_file(
+            gradio_chatbot=gradio_format,
+            folder_path=PROJECT_CFG.memory_dir,
+            thread_id=sid
+        )
 
     elapsed_ms = int((time.perf_counter() - t0) * 1000)
     request_usage = summarize_request(usage_cb.records)
@@ -1240,6 +1336,8 @@ async def chat(req: ChatRequest, request: Request, user: dict = Depends(get_curr
     PROM_LLM_OUTPUT_TOKENS.labels(endpoint="/api/chat").inc(request_usage["output_tokens"])
     PROM_LLM_COST_USD.labels(endpoint="/api/chat").inc(request_usage["cost_usd"])
     PROM_REQUEST_LATENCY.labels(endpoint="/api/chat", method="POST").observe(elapsed_ms / 1000)
+    # Phase 11 — enrich audit with MRN, tools, data sources, and grounding score
+    _audit_meta = _extract_audit_metadata(events)
     _audit_log(
         "chat_response",
         user,
@@ -1247,6 +1345,7 @@ async def chat(req: ChatRequest, request: Request, user: dict = Depends(get_curr
         latency_ms=elapsed_ms,
         tokens_total=request_usage["total_tokens"],
         cost_usd=request_usage["cost_usd"],
+        **_audit_meta,
     )
     return ChatResponse(reply=reply, session_id=sid, latency_ms=elapsed_ms, usage=request_usage)
 
@@ -1304,11 +1403,12 @@ async def chat_stream(req: ChatRequest, request: Request, user: dict = Depends(g
             gradio_format = [(h.content, full_history[i + 1].content)
                              for i, h in enumerate(full_history)
                              if h.role == "user" and i + 1 < len(full_history)]
-            Memory.write_chat_history_to_file(
-                gradio_chatbot=gradio_format,
-                folder_path=PROJECT_CFG.memory_dir,
-                thread_id=sid
-            )
+            with _get_session_write_lock(sid):
+                Memory.write_chat_history_to_file(
+                    gradio_chatbot=gradio_format,
+                    folder_path=PROJECT_CFG.memory_dir,
+                    thread_id=sid
+                )
 
             elapsed_ms = int((time.perf_counter() - t0) * 1000)
             usage = {
@@ -1358,11 +1458,12 @@ async def chat_stream(req: ChatRequest, request: Request, user: dict = Depends(g
             gradio_format = [(h.content, full_history[i + 1].content)
                              for i, h in enumerate(full_history)
                              if h.role == "user" and i + 1 < len(full_history)]
-            Memory.write_chat_history_to_file(
-                gradio_chatbot=gradio_format,
-                folder_path=PROJECT_CFG.memory_dir,
-                thread_id=sid
-            )
+            with _get_session_write_lock(sid):
+                Memory.write_chat_history_to_file(
+                    gradio_chatbot=gradio_format,
+                    folder_path=PROJECT_CFG.memory_dir,
+                    thread_id=sid
+                )
 
             elapsed_ms = int((time.perf_counter() - t0) * 1000)
             usage = {
@@ -1516,6 +1617,13 @@ async def chat_stream(req: ChatRequest, request: Request, user: dict = Depends(g
         _STREAM_CHUNK_CHARS = 220
         _STREAM_CHUNK_DELAY_S = 0.05 if is_full_record_summary_request else 0.0
 
+        # Phase 11 — audit metadata accumulated across streaming updates
+        _audit_mrn: str = ""
+        _audit_tools: list = []          # ordered, deduped tool names
+        _audit_tools_seen: set = set()   # fast dedup helper
+        _audit_tool_content: list = []   # tool message content for source counting
+        _audit_grounding: dict = {}      # grounding result from synthesizer update
+
         async def _emit_token_stream(text: str):
             """Emit response as incremental SSE token chunks for smoother UX."""
             if not text:
@@ -1566,6 +1674,25 @@ async def chat_stream(req: ChatRequest, request: Request, user: dict = Depends(g
             # Process graph node update
             for node_name, node_output in data.items():
                 msgs = node_output.get("messages", [])
+
+                # Phase 11 — capture MRN from any node that propagates it
+                if not _audit_mrn:
+                    _audit_mrn = (node_output.get("active_patient_mrn") or "").strip()
+
+                # Phase 11 — capture grounding result from synthesizer update
+                if node_name == "synthesizer" and node_output.get("grounding_result"):
+                    _audit_grounding = node_output["grounding_result"]
+
+                # Phase 11 — capture tool names and content from tool node updates
+                if node_name == "tools":
+                    for m in msgs:
+                        t_name = getattr(m, "name", "")
+                        if t_name and t_name not in _audit_tools_seen:
+                            _audit_tools.append(t_name)
+                            _audit_tools_seen.add(t_name)
+                        t_content = str(getattr(m, "content", "") or "")
+                        if t_content:
+                            _audit_tool_content.append(t_content)
 
                 # Emit responses from router, synthesizer, chatbot nodes
                 if node_name in ("router", "synthesizer", "chatbot"):
@@ -1640,11 +1767,12 @@ async def chat_stream(req: ChatRequest, request: Request, user: dict = Depends(g
         gradio_format = [(h.content, full_history[i + 1].content)
                          for i, h in enumerate(full_history)
                          if h.role == "user" and i + 1 < len(full_history)]
-        Memory.write_chat_history_to_file(
-            gradio_chatbot=gradio_format,
-            folder_path=PROJECT_CFG.memory_dir,
-            thread_id=sid
-        )
+        with _get_session_write_lock(sid):
+            Memory.write_chat_history_to_file(
+                gradio_chatbot=gradio_format,
+                folder_path=PROJECT_CFG.memory_dir,
+                thread_id=sid
+            )
 
         request_usage = summarize_request(usage_cb.records)
         LEDGER.record_request(sid, request_usage)
@@ -1653,6 +1781,34 @@ async def chat_stream(req: ChatRequest, request: Request, user: dict = Depends(g
         PROM_LLM_COST_USD.labels(endpoint="/api/chat/stream").inc(request_usage["cost_usd"])
         yield f"data: {json.dumps({'type': 'done', 'session_id': sid, 'latency_ms': elapsed_ms, 'usage': request_usage})}\n\n"
         PROM_REQUEST_LATENCY.labels(endpoint="/api/chat/stream", method="POST").observe(elapsed_ms / 1000)
+
+        # Phase 11 — build streaming audit metadata from accumulated tracking vars
+        _stream_audit_meta: dict = {
+            "data_sources": _classify_data_sources(_audit_tools),
+        }
+        if _audit_mrn:
+            _stream_audit_meta["patient_mrn"] = _audit_mrn
+        if _audit_tools:
+            _stream_audit_meta["tools_invoked"] = _audit_tools
+        if _audit_grounding:
+            _gs = _audit_grounding.get("citation_coverage")
+            if _gs is not None:
+                _stream_audit_meta["grounding_score"] = _gs
+        elif _audit_tool_content and full_response:
+            # Fallback: compute grounding from accumulated content if state-level
+            # grounding_result was not captured (e.g., fast-path router response)
+            try:
+                import re as _re
+                from agent_graph.grounding import verify_grounding as _vg
+                _combined = "\n".join(_audit_tool_content)
+                _src_nums = {int(n) for n in _re.findall(r"\[Source (\d+)", _combined)}
+                _src_count = max(_src_nums) if _src_nums else 0
+                _fallback_gs = _vg(full_response, _src_count).get("citation_coverage")
+                if _fallback_gs is not None:
+                    _stream_audit_meta["grounding_score"] = _fallback_gs
+            except Exception:
+                pass
+
         _audit_log(
             "chat_stream_response",
             user,
@@ -1660,6 +1816,7 @@ async def chat_stream(req: ChatRequest, request: Request, user: dict = Depends(g
             latency_ms=elapsed_ms,
             tokens_total=request_usage["total_tokens"],
             cost_usd=request_usage["cost_usd"],
+            **_stream_audit_meta,
         )
 
     return StreamingResponse(
@@ -1910,6 +2067,16 @@ UPLOADS_DIR = TOOLS_CFG.clinical_notes_rag_uploads_directory
 os.makedirs(UPLOADS_DIR, exist_ok=True)
 _DOCUMENTS_META_PATH = os.path.join(UPLOADS_DIR, "documents.json")
 _documents_lock = _threading.Lock()
+_session_write_locks: dict = {}
+_session_write_locks_meta = _threading.Lock()
+
+
+def _get_session_write_lock(session_id: str) -> _threading.Lock:
+    """Return the per-session write lock, creating it lazily if needed."""
+    with _session_write_locks_meta:
+        if session_id not in _session_write_locks:
+            _session_write_locks[session_id] = _threading.Lock()
+        return _session_write_locks[session_id]
 
 MAX_UPLOAD_SIZE = TOOLS_CFG.clinical_notes_rag_max_upload_size_mb * 1024 * 1024
 SUPPORTED_FORMATS = set(TOOLS_CFG.clinical_notes_rag_supported_formats)
@@ -2033,9 +2200,6 @@ def _vectorize_in_background(document_id: str, file_path: str, collection_name: 
 
     except Exception as e:
         logger.error("Vectorization failed for %s: %s", document_id, str(e))
-
-    except Exception as e:
-        logger.error("Vectorization failed for %s: %s", document_id, str(e))
         with _documents_lock:
             meta = _load_documents_meta()
             if document_id in meta:
@@ -2140,13 +2304,14 @@ async def get_document_status(document_id: str, user: dict = Depends(get_current
 @app.delete("/api/documents/{document_id}")
 async def delete_document(document_id: str, user: dict = Depends(get_current_user)):
     """Delete an uploaded document and its vectors from the collection."""
-    _audit_log("document_delete", user, document_id=document_id)
-
     with _documents_lock:
         meta = _load_documents_meta()
         doc = meta.get(document_id)
         if not doc:
             raise HTTPException(status_code=404, detail="Document not found.")
+
+        # Phase 11 — capture patient MRN from metadata before deletion for audit log
+        _doc_patient_mrn = (doc.get("patient_mrn") or "").strip() or None
 
         # Remove file from disk
         file_path = os.path.join(UPLOADS_DIR, doc.get("file_path", ""))
@@ -2156,6 +2321,11 @@ async def delete_document(document_id: str, user: dict = Depends(get_current_use
         # Remove from metadata
         del meta[document_id]
         _save_documents_meta(meta)
+
+    _delete_audit: dict = {"document_id": document_id}
+    if _doc_patient_mrn:
+        _delete_audit["patient_mrn"] = _doc_patient_mrn
+    _audit_log("document_delete", user, **_delete_audit)
 
     # Remove vectors from Qdrant (reuse RAG tool's client for embedded mode)
     try:
@@ -2191,6 +2361,9 @@ async def delete_document(document_id: str, user: dict = Depends(get_current_use
 
 # ── Feedback API ─────────────────────────────────────────────────────
 
+_feedback_lock = _threading.Lock()
+
+
 @app.post("/api/feedback")
 async def submit_feedback(req: FeedbackRequest, user: dict = Depends(get_current_user)):
     """
@@ -2199,26 +2372,42 @@ async def submit_feedback(req: FeedbackRequest, user: dict = Depends(get_current
     _audit_log("feedback", user, vote=req.vote, session_id=req.session_id)
     today_str = date.today().strftime('%Y-%m-%d')
     file_path = os.path.join(FEEDBACK_DIR, f"feedback_{today_str}.csv")
-    file_exists = os.path.exists(file_path)
 
-    with open(file_path, "a", newline="", encoding="utf-8") as f:
-        writer = csv.writer(f)
-        if not file_exists:
-            writer.writerow(["timestamp", "session_id", "message_index",
-                             "vote", "user_query", "bot_response", "comment"])
-        writer.writerow([
-            datetime.now().isoformat(),
-            req.session_id,
-            req.message_index,
-            req.vote,
-            req.user_query[:500],       # truncate for safety
-            req.bot_response[:500],
-            req.comment or "",
-        ])
+    with _feedback_lock:
+        file_exists = os.path.exists(file_path)
+        with open(file_path, "a", newline="", encoding="utf-8") as f:
+            writer = csv.writer(f)
+            if not file_exists:
+                writer.writerow(["timestamp", "session_id", "message_index",
+                                 "vote", "user_query", "bot_response", "comment"])
+            writer.writerow([
+                datetime.now().isoformat(),
+                req.session_id,
+                req.message_index,
+                req.vote,
+                req.user_query[:500],       # truncate for safety
+                req.bot_response[:500],
+                req.comment or "",
+            ])
 
     return {"status": "ok", "vote": req.vote}
 
 
 # ── Entry point ──────────────────────────────────────────────────────
 if __name__ == "__main__":
-    uvicorn.run(app, host="0.0.0.0", port=7860, log_level="info")
+    import socket as _socket
+    _port = int(os.environ.get("MEDGRAPH_PORT", "7860"))
+    _test_sock = _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM)
+    try:
+        _test_sock.bind(("0.0.0.0", _port))
+        _test_sock.close()
+    except OSError:
+        import sys as _sys
+        print(
+            f"[MedGraph] ERROR: Port {_port} is already in use by another process.\n"
+            f"  Stop all other 'api.py' processes before starting a new one.\n"
+            f"  (Tip: use 'netstat -ano | findstr :{_port}' to find the PID)",
+            file=_sys.stderr,
+        )
+        _sys.exit(1)
+    uvicorn.run(app, host="0.0.0.0", port=_port, log_level="info")

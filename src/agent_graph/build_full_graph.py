@@ -286,7 +286,7 @@ def build_graph(thinking_mode: bool = False):
                 t = str(raw or "").strip()
                 t = t.replace("```json", "```").replace("```", "")
                 if not t.startswith("{"):
-                    m = _json.search(r"\{[\s\S]*\}", t) if hasattr(_json, "search") else None
+                    m = _re.search(r"\{[\s\S]*\}", t)
                     # Fallback to no match.
                 try:
                     obj = _json.loads(t)
@@ -412,7 +412,11 @@ def build_graph(thinking_mode: bool = False):
             if isinstance(m, _ToolMessage):
                 tool_name = getattr(m, "name", "") or ""
                 if tool_name in ("summarize_patient_record", "summarize_uploaded_document"):
-                    return {"messages": [_AIMessage(content=str(getattr(m, "content", "") or ""))]}
+                    return {
+                        "messages": [_AIMessage(content=str(getattr(m, "content", "") or ""))],
+                        "active_patient_mrn": active_mrn,
+                        "grounding_result": {},  # pass-through: grounding N/A for dedicated summarizers
+                    }
                 # Stop at the first tool message seen in reverse order
                 break
 
@@ -439,23 +443,25 @@ def build_graph(thinking_mode: bool = False):
         # ── Phase 3: Grounding verification (non-blocking, < 10 ms) ──────────
         response_content = getattr(synth_msg, "content", "") or ""
         has_tool_calls = bool(getattr(synth_msg, "tool_calls", None))
+        _grounding_result: dict = {}
         if response_content and not has_tool_calls:
             from agent_graph.grounding import count_sources_in_tool_messages, verify_grounding as _verify_grounding
             _source_count = count_sources_in_tool_messages(
                 [m for m in msgs if isinstance(m, _ToolMessage)]
             )
-            verify_grounding_result = _verify_grounding(response_content, _source_count)
-            if not verify_grounding_result["is_grounded"]:
+            _grounding_result = _verify_grounding(response_content, _source_count)
+            if not _grounding_result["is_grounded"]:
                 logger.warning(
                     "[Grounding] %d issue(s) in synthesizer response (coverage=%.0f%%): %s",
-                    len(verify_grounding_result["issues"]),
-                    verify_grounding_result["citation_coverage"] * 100,
-                    "; ".join(verify_grounding_result["issues"][:3]),
+                    len(_grounding_result["issues"]),
+                    _grounding_result["citation_coverage"] * 100,
+                    "; ".join(_grounding_result["issues"][:3]),
                 )
 
         return {
             "messages": [synth_msg],
             "active_patient_mrn": active_mrn,
+            "grounding_result": _grounding_result,  # Phase 11 — surfaced to api.py
         }
 
 

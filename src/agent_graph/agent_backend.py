@@ -17,6 +17,7 @@ class State(TypedDict):
     """
     messages: Annotated[list, add_messages]
     active_patient_mrn: str
+    grounding_result: dict  # Phase 11 — populated by synthesizer; {} when not applicable
 
 
 class BasicToolNode:
