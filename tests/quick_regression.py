@@ -39,11 +39,29 @@ QUESTIONS = [
 ]
 
 
+def warmup(headers: dict) -> None:
+    """Send one throwaway request to force lazy RAG singleton init (loads PubMedBERT + reranker)."""
+    print("  [warmup] Initialising RAG singleton … ", end="", flush=True)
+    t0 = time.time()
+    try:
+        requests.post(
+            f"{BASE}/api/chat",
+            json={"message": "warmup", "session_id": "warmup-0"},
+            headers=headers,
+            timeout=120,
+        )
+        print(f"done ({time.time()-t0:.1f}s)")
+    except Exception as e:
+        print(f"warning: {e}")
+
+
 def main():
     # Auth
     r = requests.post(f"{BASE}/api/auth/token", json={"user_id": "admin", "password": "admin123"})
     token = r.json()["token"]
     headers = {"Authorization": f"Bearer {token}"}
+
+    warmup(headers)
 
     passed = 0
     failed = 0

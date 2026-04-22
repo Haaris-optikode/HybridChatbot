@@ -2155,7 +2155,7 @@ def _vectorize_in_background(document_id: str, file_path: str, collection_name: 
                 logger.warning("Dedup check failed (proceeding with indexing): %s", e)
 
         # Reuse the RAG tool's existing Qdrant client and vector store
-        # (embedded mode only allows a single client instance per storage path)
+        # (shared Qdrant server instance — multiple workers can call this concurrently)
         rag = get_rag_tool_instance()
         vector_store = QdrantVectorStore(
             client=rag.client,
@@ -2327,7 +2327,7 @@ async def delete_document(document_id: str, user: dict = Depends(get_current_use
         _delete_audit["patient_mrn"] = _doc_patient_mrn
     _audit_log("document_delete", user, **_delete_audit)
 
-    # Remove vectors from Qdrant (reuse RAG tool's client for embedded mode)
+    # Remove vectors from Qdrant via the shared Qdrant server client
     try:
         from qdrant_client.models import Filter, FieldCondition, MatchValue
         from agent_graph.tool_clinical_notes_rag import get_rag_tool_instance
@@ -2395,6 +2395,9 @@ async def submit_feedback(req: FeedbackRequest, user: dict = Depends(get_current
 
 # ── Entry point ──────────────────────────────────────────────────────
 if __name__ == "__main__":
+    # Single-worker dev launch.  For multi-worker production use:
+    #   python -m uvicorn src.api:app --host 0.0.0.0 --port 7860 --workers N
+    # Requires Qdrant server running (start_qdrant.ps1) — no file-lock with server mode.
     import socket as _socket
     _port = int(os.environ.get("MEDGRAPH_PORT", "7860"))
     _test_sock = _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM)

@@ -71,6 +71,12 @@ instance/
 # Sphinx documentation
 docs/_build/
 
+#vector database
+qdrant/
+qdrant_storage/
+.qdrant-initialized
+
+
 # PyBuilder
 .pybuilder/
 target/

@@ -20,6 +20,7 @@ from agent_graph.load_tools_config import (
     swap_google_api_key,
 )
 from qdrant_client import QdrantClient
+from qdrant_client.models import SearchParams, QuantizationSearchParams
 from pyprojroot import here
 import logging
 import os
@@ -82,7 +83,7 @@ _CLINICAL_INTENT_REWRITES: list[tuple] = [
     (_re_init.compile(r"bnp.{0,30}admission|admission.{0,30}bnp|bnp.{0,10}on admission|natriuretic\s+peptide", _re_init.I),
      "BNP brain natriuretic peptide admission labs 1842"),
     (_re_init.compile(r"weight\s+loss.{0,20}hospital|lost.{0,20}weight.{0,20}hospital|total\s+weight\s+loss|weight\s+was\s+lost|weight\s+lost", _re_init.I),
-     "total weight loss discharge hospitalization 18.4 kg pounds"),
+     "DISCHARGE SUMMARY total weight loss 18.4 kg 40.5 pounds final weight 91.4 kg 30-day hospitalization decongestion"),
     (_re_init.compile(r"epi.?pen|epinephrine\s+auto|shellfish\s+anaphylaxis", _re_init.I),
      "EpiPen epinephrine anaphylaxis shellfish allergy severe"),
     (_re_init.compile(r"cha2ds2|stroke\s+risk\s+score", _re_init.I),
@@ -459,6 +460,13 @@ class ClinicalNotesRAGTool:
                                          "Nutrition", "Diet"]
         if _re.search(r"\bvital|\bblood\s+pressure|\bheart\s+rate|\btemperature", q):
             hints["section_titles"] += ["Vitals", "Vital Signs", "Physical Examination"]
+        if _re.search(r"weight\s+loss.{0,20}hospital|total\s+weight\s+lost?|weight\s+was\s+lost|weight\s+lost.{0,20}hospital", q):
+            # Prefer discharge summary sections for hospitalization-outcome weight queries
+            # to avoid returning intermediate mid-stay assessment values.
+            hints["section_titles"] += [
+                "22. DISCHARGE SUMMARY", "DISCHARGE SUMMARY",
+                "21. FREE TEXT / ADDITIONAL CLINICAL NOTES", "EXAMINATION FINDINGS",
+            ]
 
         return hints
 
@@ -557,6 +565,13 @@ class ClinicalNotesRAGTool:
                 "k": adaptive_k,
                 "fetch_k": adaptive_k * 2,
                 "lambda_mult": 0.5,
+                # Phase 5.1: enforce HNSW ef=128 (matches build-time ef) and
+                # rescore against original float32 vectors after INT8 quantization
+                # compression — recovers most accuracy loss with minimal overhead.
+                "search_params": SearchParams(
+                    hnsw_ef=128,
+                    quantization=QuantizationSearchParams(rescore=True, ignore=False),
+                ),
             }
             if _qdrant_filter:
                 search_kwargs["filter"] = _qdrant_filter

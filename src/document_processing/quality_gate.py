@@ -98,9 +98,10 @@ def validate_extracted_text(
             return False, f"low_density ({chars_per_page:.0f} chars/page)"
 
     # Check 5: Repetition detection — OCR artifacts sometimes produce repeated
-    # characters or words (e.g., "aaaaaaa" or "the the the the")
-    # Look for any single character repeated 20+ times consecutively
-    if re.search(r'(.)\1{19,}', stripped):
+    # characters or words (e.g., "aaaaaaa" or "the the the the").
+    # Exclude structural separator characters (_-=*.|~ and space) that appear
+    # legitimately in clinical documents as signature lines or table borders.
+    if re.search(r'(?![_\-=*.|~ \t])(.)\1{19,}', stripped):
         logger.warning(
             "[QualityGate] REJECTED %s: excessive character repetition detected",
             source_path,
