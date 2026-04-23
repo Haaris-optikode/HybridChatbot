@@ -18,6 +18,22 @@ if (-not (Test-Path $QdrantExe)) {
     exit 1
 }
 
+# Download dashboard UI if missing (one-time setup)
+$StaticDir = Join-Path $ScriptDir "qdrant\static"
+if (-not (Test-Path $StaticDir)) {
+    Write-Host "[INFO] Qdrant dashboard UI not found - downloading..." -ForegroundColor Cyan
+    $ZipPath = Join-Path $env:TEMP "qdrant-web-ui.zip"
+    try {
+        Invoke-WebRequest -Uri "https://github.com/qdrant/qdrant-web-ui/releases/latest/download/dist-qdrant.zip" `
+            -OutFile $ZipPath -UseBasicParsing
+        Expand-Archive -Path $ZipPath -DestinationPath $StaticDir -Force
+        Remove-Item $ZipPath -Force
+        Write-Host "[INFO] Dashboard UI installed at $StaticDir" -ForegroundColor Green
+    } catch {
+        Write-Warning "Could not download dashboard UI (no internet?). Dashboard will be unavailable."
+    }
+}
+
 # Check if Qdrant is already running
 try {
     $null = Invoke-WebRequest -Uri "http://localhost:6333/" -UseBasicParsing -TimeoutSec 2

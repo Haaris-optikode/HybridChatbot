@@ -30,7 +30,7 @@ clinical_notes_rag:
   k: 8
   fetch_k: 15
   chunk_size: 1000
-  chunk_overlap: 200
+  chunk_overlap: 80
   collection_name: PatientData
   reranker_model: cross-encoder/ms-marco-MiniLM-L-6-v2
   reranker_top_k: 8
