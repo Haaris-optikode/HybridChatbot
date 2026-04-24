@@ -44,7 +44,7 @@ from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel
-from typing import List, Optional, Dict, Tuple, Literal
+from typing import List, Optional, Dict, Tuple, Literal, Iterator
 from dotenv import load_dotenv
 from pyprojroot import here
 from slowapi import Limiter
@@ -103,7 +103,13 @@ from agent_graph.build_full_graph import build_graph
 from utils.app_utils import create_directory
 from chatbot.memory import Memory
 from langchain_core.messages import SystemMessage, HumanMessage, AIMessage
-from observability.token_cost import RequestUsageCallback, summarize_request, LEDGER, PRICING_TABLE
+from observability.token_cost import (
+    RequestUsageCallback,
+    summarize_request,
+    LEDGER,
+    PRICING_TABLE,
+    _compute_cost_usd,
+)
 from agent_graph.tool_clinical_notes_rag import (
     set_summary_request_mode,
     reset_summary_request_mode,
@@ -130,8 +136,8 @@ _PROVIDER_MODEL_CHAINS = {
             [os.getenv("MEDGRAPH_OPENAI_SYNTH_FALLBACK", "gpt-4.1-nano")],
         ),
         "thinking": build_model_chain(
-            os.getenv("MEDGRAPH_OPENAI_THINKING_MODEL", "gpt-4.1"),
-            [os.getenv("MEDGRAPH_OPENAI_THINKING_FALLBACK", "gpt-4.1-mini")],
+            os.getenv("MEDGRAPH_OPENAI_THINKING_MODEL", "gpt-5.4-mini"),
+            [os.getenv("MEDGRAPH_OPENAI_THINKING_FALLBACK", "gpt-4.1")],
         ),
     },
     "google": {
@@ -678,95 +684,47 @@ def _extract_audit_metadata(events: list) -> dict:
 
 
 # ── System prompt ────────────────────────────────────────────────────
-SYSTEM_PROMPT = """You are MedGraph AI, a clinical intelligence assistant for EHR systems.
+SYSTEM_PROMPT = """You are MedGraph AI — a clinical data retrieval assistant for EHR systems.
 
-IMPORTANT DISCLAIMER: You are NOT a licensed physician. Never provide diagnoses, prescribe treatments, or advise patients to change medications. Always recommend consulting a qualified healthcare provider for clinical decisions. Your role is to retrieve and organize clinical data — not to practice medicine.
+ROLE: Retrieve and organize documented clinical data only. You are NOT a licensed physician. Never diagnose, prescribe, or advise medication changes. Recommend consulting a provider for clinical decisions.
 
-CONVERSATION RULES:
-- For greetings and general conversation (hello, hi, how are you, what are you, etc.), respond naturally and warmly. Introduce yourself as MedGraph AI. Do NOT call any tools for these — answer directly.
-- For general medical knowledge questions that are NOT about a specific patient in the database, use `tavily_search_results_json`.
-- For all patient-specific clinical questions, use the appropriate tool below.
+DOMAIN: Medical/clinical queries and brief social greetings only. For non-medical requests, reply exactly: "I can only answer medical and clinical queries."
 
-DOMAIN BOUNDARY (LLM GUARDRAIL):
-- Handle only medical/clinical requests and brief social niceties.
-- Social niceties such as greetings, thanks, compliments, and short acknowledgements are allowed and should receive warm conversational replies.
-- For any substantive non-medical request (for example: coding, finance, sports, weather, travel, entertainment, homework), reply EXACTLY with:
-    "I can only answer medical and clinical queries. Please ask a medical question about patient records, symptoms, medications, labs, diagnoses, or treatment context."
-- Do NOT call tools for blocked non-medical requests.
+TOOL SELECTION — strict, no exceptions:
+- Specific patient fact (labs, meds, vitals, allergies, diagnoses, imaging, history, DOB) → lookup_clinical_notes(query, patient_mrn)
+- "All orders" / complete order list / comprehensive meds+labs+procedures → lookup_patient_orders(patient_identifier)
+- Explicit full record summary or overview only → summarize_patient_record(patient_identifier)
+- Population/cohort query across multiple patients → cohort_patient_search(query)
+- General medical knowledge (not patient-specific) → tavily_search_results_json(query)
+- Newly uploaded document query → list_uploaded_documents() FIRST to get document_id + verify "ready", then lookup_clinical_notes(query, document_id)
+- Uploaded document summary → list_uploaded_documents() FIRST, then summarize_uploaded_document(document_id)
+- Do NOT use summarize_patient_record for specific facts. Do NOT use lookup_clinical_notes for all-orders requests.
 
-Tools:
+CLINICAL REASONING (comparisons, trends, medication changes, risk, critical findings):
+Call lookup_clinical_notes at minimum 3 times with different targeted queries:
+1. The specific clinical domain (e.g., "cardiac events atrial fibrillation EF")
+2. "hospital course interventions complications [topic]"
+3. "discharge summary plan follow-up warning signs [topic]"
+Then synthesize results with clinical severity prioritization:
+- Lead with the clinical story — what happened and what was most dangerous. Never lead with raw lab values.
+- Prioritize: (1) immediately life-threatening events, (2) major complications requiring intervention, (3) notable trends, (4) monitoring needs.
+- Labs are supporting evidence, not the headline. Frame them clinically: "BNP of 1,842 pg/mL confirmed severe decompensation" not "BNP 1,842 [ABNORMAL]."
+- Always include discharge warning signs and return-to-ER criteria if documented.
+- Include medication changes that occurred during hospitalization — they represent the clinical team's response to what mattered most.
 
-1. **lookup_clinical_notes(query, patient_mrn="", document_id="")** — Search patient records for ANY specific detail: DOB, age, allergies, medications, labs, vitals, diagnoses, procedures, imaging, history. For patient-specific EHR questions, include the resolved `patient_mrn`. Pass optional `document_id` to restrict search to a specific uploaded document.
-2. **lookup_patient_orders(patient_identifier)** — Retrieve ALL orders for a patient: lab orders (CPT/LOINC), medication orders (RxNorm), procedure orders (CPT/SNOMED), referrals/consultations, discharge prescriptions, and care directives. Accepts patient NAME or MRN.
-3. **summarize_patient_record(patient_identifier)** — ONLY for full clinical summaries/overviews. Accepts patient NAME or MRN.
-4. **list_available_patients()** — List all patients in the database.
-5. **tavily_search_results_json(query)** — Web search for general medical knowledge.
-6. **list_uploaded_documents()** — List all uploaded documents with their IDs, filenames, and processing status.
-7. **summarize_uploaded_document(document_id)** — Generate a clinically grounded summary of ONE uploaded document by ID, with source citations.
-8. **cohort_patient_search(query)** — Population/cohort queries across many patients using diagnosis tags + numeric lab filters + time windows. Returns matched patients as a table.
+MULTI-HOP RULES:
+- "First time" / "when started" questions: search early days first, verify before answering — never answer without confirming earliest occurrence.
+- Trend questions (creatinine, BNP, weight): MUST search twice — baseline/admission AND later/discharge values.
+- Temporal precision: home/admission medications ≠ discharge medications. State which list explicitly.
 
-TOOL SELECTION (strict):
-- ANY specific question about a patient (DOB, allergies, meds, labs, vitals, diagnoses, procedures, imaging, history) → `lookup_clinical_notes`
-- Cohort/population queries asking for ALL matching patients (e.g., “show all diabetic patients with HbA1c > 9 in the last 3 months”) → `cohort_patient_search`
-- Queries asking for "all orders", "complete order list", "what was ordered", "list all medications/labs/procedures/referrals", or any COMPREHENSIVE orders request → `lookup_patient_orders`
-- ONLY when the user explicitly asks to "summarize the record", "give me an overview", or "review the full record" with NO specific analytical question → `summarize_patient_record`
-- ANALYTICAL questions that mention a patient (readmission risk, differential diagnosis, treatment effectiveness, drug interactions, risk factors, prognosis, clinical reasoning) → `lookup_clinical_notes` (use MULTIPLE targeted searches to gather all relevant data, then synthesize)
-- General medical knowledge → `tavily_search_results_json`
-- Do NOT use `summarize_patient_record` for specific factual lookups like DOB, allergies, or medication lists.
-- Do NOT use `summarize_patient_record` when the user asks an analytical or reasoning question — even if they say "synthesize" or "analyze". Use `lookup_clinical_notes` with multiple targeted queries instead.
-- Do NOT use `lookup_clinical_notes` when the user wants ALL orders — use `lookup_patient_orders` instead.
-
-UPLOADED DOCUMENTS:
-- When the user says they "just uploaded" a document, "I uploaded a file", "I added a new doc", or asks about a "recently uploaded" or "new" document, you MUST FIRST call `list_uploaded_documents()` to get its document_id and confirm it is in "ready" status.
-- Then use `lookup_clinical_notes(query, document_id="<the_id>")` to search WITHIN that specific document. Never skip the document_id filter when the user is asking about a specific uploaded file.
-- If the user asks to "summarize this uploaded document / this file / this PDF" (document-scoped summary), call `list_uploaded_documents()` to get the document_id, verify "ready", then call `summarize_uploaded_document(document_id)`.
-- If the user asks for "the updated patient list" or "new patients" after uploading, call `list_uploaded_documents()` to get the document_id, then call `lookup_clinical_notes("patient name MRN demographics", document_id="<the_id>")` to extract patient info from the new document. Do NOT rely on `list_available_patients()` alone — that only shows previously indexed records and may lag behind a fresh upload.
-- If a document status is "processing", tell the user it is still being indexed and to try again in a moment.
-- This workflow ensures newly uploaded documents are always correctly queried even when they would be outranked by existing records in a general search.
+PATIENT CONTEXT: When user says "the patient" without a name, use the most recently discussed patient. If none discussed, ask for name or MRN. NEVER fabricate. If a name doesn't match exactly, report the mismatch explicitly.
 
 ANSWER RULES:
-- ONLY state facts from retrieved sources. If data is missing, say so.
-- Use exact values (lab numbers, doses, dates). Never fabricate.
-- When presenting orders, include ALL available details: CPT codes, LOINC codes, RxNorm codes, SNOMED codes, dosages, frequencies, dates, and descriptions. Present them in organized sections.
-- Include patient name and MRN when discussing patient data.
-- Pay careful attention to TEMPORAL context: distinguish between admission/home medications vs discharge/new medications. If the question asks about admission or home meds, report what the patient was taking BEFORE hospitalization, not what was started or changed during the stay.
-- When `summarize_patient_record` output is returned, use it as context to answer the user's original question. If the user asked an analytical question, DO NOT just pass through the raw summary — synthesize a targeted answer.
-- When `lookup_patient_orders` output is returned, organize the response by order category (Lab Orders, Medication Orders, Procedure Orders, Referrals, Discharge Prescriptions, Care Directives) and include ALL codes and details from the data.
-
-RESPONSE STYLE:
-- Write like a clinician briefing a colleague — clear, professional, concise.
-- Synthesize retrieved data into a coherent answer. Do NOT just repeat raw chunks or bullet-dump metadata.
-- Include reference ranges for abnormal lab values and flag severity (e.g., "BNP 1,842 pg/mL [Critical High, ref <100]").
-- Use bullet points and bold for key values. Use headers only when the answer has 3+ distinct categories.
-- For medication lists, include dose, route, frequency. Add indication only when the question asks about it.
-- Keep answers focused: answer what was asked, include essential clinical context, then stop. Do NOT exhaustively list every related finding unless specifically asked for a comprehensive review.
-- Target 80–150 words for simple queries, 200–500 words for complex multi-part questions. For comprehensive analytical questions (readmission risk, treatment analysis), use as many words as needed to be thorough.
-
-SOURCE GROUNDING (Critical — prevents hallucination):
-- Every factual claim MUST come from the retrieved sources. Cite inline using [SN] format (e.g. [S1], [S2]) immediately after each clinical fact, where N matches the [Source N] label in the retrieved data.
-- If the sources do NOT contain the answer, say: "The available clinical records do not contain information about [topic]." Do NOT guess or fill gaps.
-- NEVER extrapolate beyond what is explicitly stated. If a value is not documented, do not estimate it.
-- When sources contain contradictory information, report both values and note the discrepancy.
-
-SEARCH QUERY TIPS (for `lookup_clinical_notes`):
-- Include specific clinical terms, day numbers, and section names in the query.
-- For 'first time' or 'when was X started' questions, mention early hospital days and the specific clinical event.
-- For discharge or follow-up questions, include terms like 'discharge summary', 'after-visit summary', 'follow-up appointments'.
-- For medication questions, include the medication name AND the section (e.g., 'admission medications', 'discharge prescriptions').
-
-MULTI-HOP (important):
-- If after your first search the retrieved notes only mention LATER days but the question asks about the 'first' or 'earliest' occurrence, you MUST call lookup_clinical_notes AGAIN with a query that specifically targets early hospital days (e.g., 'Day 5 through Day 10 [event]').
-- Similarly, if the question asks 'when was [medication] started' and the results only show later dose changes, search again for '[medication] initiated first started early days'.
-- Always verify you have found the EARLIEST event before answering a 'first time' question.
-- For TREND questions (e.g., 'how did creatinine change', 'weight trend', 'BNP over time'), you MUST search at least TWICE: once for admission/baseline values and once for later/discharge values. A trend answer is incomplete without both endpoints.
-- When a user asks for demographics like full name + DOB + MRN, always call lookup_clinical_notes with a query like 'patient demographics date of birth age MRN' to retrieve the full details. Do NOT stop at listing a name from list_available_patients — that tool only returns names and MRNs, not clinical details.
-
-PATIENT DISAMBIGUATION:
-- When the user says "the patient" without specifying a name or MRN, do NOT ask for clarification. Instead, proceed with the query using the most recently discussed patient in the conversation history.
-- If no patient has been discussed yet in the conversation and no patient can be resolved from the current query, do NOT run an unscoped patient search. Ask the user to specify the patient name or MRN first.
-- If the conversation has only one patient being discussed, always assume subsequent "the patient" references mean that same patient.
-- NEVER fabricate or guess patient data. If a user mentions a name that does NOT exactly match any patient in the database (e.g., "Richard" when the record says "Robert"), clearly state the mismatch: "I found Robert James Whitfield but no patient named [queried name]." Do NOT answer as if the wrong name is correct.
-"""
+- Facts only from retrieved sources. If not documented, say so. Never estimate or extrapolate.
+- Cite inline: [S1], [S2] after major clinical facts. Not required after every word — use for key claims only.
+- Exact values: lab with units + reference range + flag if abnormal. Medications with dose/route/frequency.
+- 80–150 words for simple factual queries. 200–500 words for multi-part questions. Analytical synthesis: as thorough as needed.
+- Use bullet points and bold for key values. Headers only when answer has 3+ distinct categories."""
 
 # ── Thread-safe session store (P1.8 + P1.14) ───────────────────────
 # Abstraction that makes it trivial to swap in Redis later.
@@ -992,64 +950,81 @@ def _predefined_identity_reply(message: str) -> Optional[str]:
 
 
 def _auto_tool_override(message: str) -> Optional[str]:
-    """Force tool usage for explicit summary requests.
-
-    Prevents stale conversational reuse when user repeats "summarize full record"
-    queries in the same chat session.
-    """
     m = (message or "").strip().lower()
     if not m:
         return None
-    asks_summary = (
-        ("summar" in m or "overview" in m or "complete record" in m or "full record" in m)
-        and ("patient" in m or "mrn" in m or "record" in m)
-    )
-    if asks_summary:
+
+    # Full record summary
+    if (("summar" in m or "overview" in m or "complete record" in m or "full record" in m)
+            and ("patient" in m or "mrn" in m or "record" in m)):
         return "summarize"
 
-    # Patient-specific factual questions should deterministically use the
-    # vector-db lookup path, especially when the name is embedded in natural
-    # language (e.g., "what disease is ayesha malik suffering from").
+    # All-orders (deterministic — never let model decide this)
+    _ORDERS_TRIGGERS = [
+        "all orders", "complete order", "order list", "what was ordered",
+        "all medications", "all labs", "all procedures", "all referrals",
+        "list all meds", "list all drugs", "full med list", "complete medication",
+        "discharge prescriptions", "all prescriptions",
+    ]
+    if any(trigger in m for trigger in _ORDERS_TRIGGERS):
+        return "orders"
+
+    # Cohort / population queries
+    if re.search(
+        r"\b(all|show|find|list|which).{0,30}(patients?|diabetic|hba1c|a1c)"
+        r".{0,40}(with|having|where|above|below|greater|less)\b",
+        m,
+    ):
+        return "cohort"
+
+    # Patient-specific factual queries (existing logic, unchanged)
     patient_fact_terms = (
         "disease", "diagnosis", "diagnosed", "condition", "suffering", "symptom", "allergy",
-        "medication", "medicine", "lab", "vital", "history", "record", "chart", "orders",
+        "medication", "medicine", "lab", "vital", "history", "record", "chart",
     )
     has_patient_fact_intent = any(t in m for t in patient_fact_terms)
-
-    # Name-like pattern heuristic: two or more alphabetic words that are not
-    # common helper verbs/articles.
     name_like_phrases = re.findall(r"\b([a-z]{2,}(?:\s+[a-z]{2,}){1,2})\b", m)
     name_like_stop = {
         "what", "which", "who", "when", "where", "why", "how", "the", "a", "an", "is", "are",
-        "do", "does", "did", "can", "could", "would", "should", "for", "of", "about", "from", "with",
-        "give", "tell", "show", "find", "check", "patient", "record", "summary", "uploaded", "documents",
-        "there", "someone", "somebody", "anyone", "anybody", "person", "people", "guy", "girl",
-        "male", "female", "man", "woman", "if", "then", "that", "this", "these", "those",
+        "do", "does", "did", "can", "could", "would", "should", "for", "of", "about", "from",
+        "with", "give", "tell", "show", "find", "check", "patient", "record", "summary",
+        "uploaded", "documents", "there", "someone", "anybody", "person", "people",
         "suffering", "disease", "diagnosis", "condition",
     }
     medical_term_tokens = {
         "disease", "diagnosis", "diagnosed", "condition", "suffering", "symptom", "allergy",
         "medication", "medications", "medicine", "medicines", "lab", "labs", "vital", "vitals",
-        "history", "record", "records", "chart", "orders", "treatment", "treatments", "therapy",
+        "history", "record", "records", "chart", "orders", "treatment", "therapy",
         "anxiety", "depression", "diabetes", "hypertension", "asthma", "cancer",
     }
-    has_name_like_phrase = False
-    for phrase in name_like_phrases:
-        toks = [
-            t for t in phrase.split()
-            if t not in name_like_stop and t not in medical_term_tokens and len(t) >= 3
-        ]
-        if len(toks) >= 2:
-            has_name_like_phrase = True
-            break
-
-    if has_patient_fact_intent and (
-        has_name_like_phrase
-        or "patient" in m
-        or "mrn" in m
-    ):
+    has_name_like_phrase = any(
+        len([t for t in phrase.split()
+             if t not in name_like_stop and t not in medical_term_tokens and len(t) >= 3]) >= 2
+        for phrase in name_like_phrases
+    )
+    if has_patient_fact_intent and (has_name_like_phrase or "patient" in m or "mrn" in m):
         return "vector_db"
+
     return None
+
+
+_ANALYTICAL_PATTERNS = [
+    re.compile(r"\b(compar|differ|chang|increas|decreas|titrat|uptitrat)\b", re.I),
+    re.compile(r"\b(trend|over time|throughout|during admission|progression|trajectory)\b", re.I),
+    re.compile(r"\b(why|what caused|reason for|explain|how did)\b", re.I),
+    re.compile(r"\b(prioriti[sz](e|ed|ing)?|priority|trigger(ed|s|ing)?|rationale|driver(s)?)\b", re.I),
+    re.compile(r"\b(critical|most important|key finding|major concern|significant|urgent)\b", re.I),
+    re.compile(r"\b(which (med|drug|treatment|intervention))\b", re.I),
+    re.compile(r"\bmedication.{0,30}(start|stop|chang|increas|decreas|added|removed|new)\b", re.I),
+    re.compile(r"\b(risk|readmission|prognosis|deteriorat|worsening)\b", re.I),
+    re.compile(r"\b(when (was|did|were).{0,20}(first|start|initiat|begin))\b", re.I),
+    re.compile(r"\b(what happened|hospital course|what changed|clinical events)\b", re.I),
+]
+
+
+def _is_analytical_query(message: str) -> bool:
+    """Auto-upgrade to GPT-5.4-mini for multi-step clinical reasoning queries."""
+    return any(p.search(message) for p in _ANALYTICAL_PATTERNS)
 
 
 # ── Tool override prompts ────────────────────────────────────────────
@@ -1069,6 +1044,16 @@ TOOL_PROMPTS = {
         "Call `summarize_patient_record` directly with the patient name or MRN from the user's query. "
         "Do NOT call list_available_patients first — the tool resolves names automatically. "
         "Do NOT choose a different tool."
+    ),
+    "orders": (
+        "The user is requesting order data. "
+        "Call `lookup_patient_orders` with the patient name or MRN from the query. "
+        "Do NOT use lookup_clinical_notes or any other tool."
+    ),
+    "cohort": (
+        "The user is asking about a patient population or cohort. "
+        "Call `cohort_patient_search` with the full query text exactly as written. "
+        "Do NOT use lookup_clinical_notes or any other tool."
     ),
 }
 
@@ -1112,7 +1097,14 @@ _REPLY_MODE_INSTRUCTIONS = {
 # ── Routes ───────────────────────────────────────────────────────────
 @app.get("/")
 async def serve_frontend():
-    return FileResponse(str(STATIC_DIR / "index.html"))
+    return FileResponse(
+        str(STATIC_DIR / "index.html"),
+        headers={
+            "Cache-Control": "no-store, no-cache, must-revalidate",
+            "Pragma": "no-cache",
+            "Expires": "0",
+        },
+    )
 
 
 # ── Token generation endpoint (dev/test convenience) ─────────────────
@@ -1140,6 +1132,9 @@ async def chat(req: ChatRequest, request: Request, user: dict = Depends(get_curr
     effective_tool_override = req.tool_override or _auto_tool_override(validated_msg)
     effective_reply_mode = req.reply_mode
     effective_thinking = bool(req.thinking)
+    if not effective_thinking and _is_analytical_query(validated_msg):
+        effective_thinking = True
+        logger.info("Auto-upgraded to gpt-5.4-mini for analytical query: %s", validated_msg[:80])
     _audit_log("chat_request", user, tool_override=effective_tool_override or "auto", llm_provider=req_provider)
 
     # Session management
@@ -1353,24 +1348,94 @@ async def chat(req: ChatRequest, request: Request, user: dict = Depends(get_curr
 # ── Streaming SSE endpoint ───────────────────────────────────────────
 
 _TOOL_STATUS = {
-    "summarize_patient_record": "Generating clinical summary...",
-    "summarize_uploaded_document": "Summarizing uploaded document...",
-    "lookup_clinical_notes": "Searching clinical notes...",
-    "lookup_patient_orders": "Retrieving patient orders...",
-    "cohort_patient_search": "Running cohort search...",
-    "list_available_patients": "Listing patients...",
-    "list_uploaded_documents": "Checking uploaded documents...",
-    "tavily_search_results_json": "Searching the web...",
+    "summarize_patient_record": "I am reading the full chart and building a clear timeline.",
+    "summarize_uploaded_document": "I am reading the uploaded file and extracting key medical points.",
+    "lookup_clinical_notes": "I am searching the patient record for the exact details you asked for.",
+    "lookup_patient_orders": "I am gathering all orders (labs, meds, and procedures) for this patient.",
+    "cohort_patient_search": "I am scanning records to find all patients matching your criteria.",
+    "list_available_patients": "I am checking which patients are currently available in the system.",
+    "list_uploaded_documents": "I am checking recently uploaded documents and their status.",
+    "tavily_search_results_json": "I am checking trusted web sources for medical background information.",
 }
 
 _SUMMARY_PROGRESS_STAGES = [
-    (0.0, "Collecting patient data..."),
-    (2.0, "Analyzing full clinical record..."),
-    (5.0, "Fetching high-priority clinical details..."),
-    (8.0, "Curating summary structure..."),
-    (12.0, "Pondering complex clinical relationships..."),
-    (16.0, "Finalizing clinician-ready summary..."),
+    (0.0, "I am collecting the full patient timeline from the chart."),
+    (2.0, "I am identifying the most important clinical events first."),
+    (5.0, "I am connecting labs, treatments, and outcomes into one story."),
+    (8.0, "I am drafting a clear summary in plain language."),
+    (12.0, "I am double-checking that key safety details are included."),
+    (16.0, "I am preparing the final clinician-ready summary."),
 ]
+
+_GENERAL_PROGRESS_STAGES = [
+    (0.0, "I am reading your question and planning the best way to answer it."),
+    (1.0, "I am checking the most relevant medical sources now."),
+    (3.0, "I am extracting the exact details needed for your question."),
+    (6.0, "I am turning the findings into a clear response."),
+]
+
+_THINKING_PROGRESS_STAGES = [
+    (0.0, "I am breaking this into steps so no critical detail is missed."),
+    (1.5, "I am checking timeline context and important clinical changes."),
+    (4.0, "I am comparing evidence across notes to avoid contradictions."),
+    (8.0, "I am preparing a careful, evidence-grounded explanation."),
+]
+
+
+def _select_progress_stages(is_summary: bool, is_thinking: bool) -> List[Tuple[float, str]]:
+    if is_summary:
+        return _SUMMARY_PROGRESS_STAGES
+    if is_thinking:
+        return _THINKING_PROGRESS_STAGES
+    return _GENERAL_PROGRESS_STAGES
+
+
+def _stream_model_hint(provider: str, is_thinking: bool) -> str:
+    if provider != "openai":
+        return ""
+    if is_thinking:
+        return (
+            os.environ.get("MEDGRAPH_THINKING_MODEL_OVERRIDE", "").strip()
+            or getattr(TOOLS_CFG, "primary_agent_thinking_llm", "gpt-5.4-mini")
+        )
+    return (
+        os.environ.get("MEDGRAPH_SYNTH_MODEL_OVERRIDE", "").strip()
+        or getattr(TOOLS_CFG, "primary_agent_llm", "gpt-4.1-mini")
+    )
+
+
+def _iter_stream_tokens(text: str, model_hint: str = "") -> Iterator[str]:
+    """Yield token-sized pieces for SSE emission.
+
+    Uses tiktoken when available (OpenAI-compatible tokenization), then falls
+    back to a whitespace-preserving lexical split.
+    """
+    if not text:
+        return
+
+    try:
+        import tiktoken  # optional dependency
+
+        encoding = None
+        if model_hint:
+            try:
+                encoding = tiktoken.encoding_for_model(model_hint)
+            except Exception:
+                encoding = None
+        if encoding is None:
+            encoding = tiktoken.get_encoding("cl100k_base")
+
+        for token_id in encoding.encode(text):
+            piece = encoding.decode([token_id])
+            if piece:
+                yield piece
+        return
+    except Exception:
+        pass
+
+    # Fallback path keeps spacing intact for incremental rendering.
+    for piece in re.findall(r"\s+|[^\s]+", text):
+        yield piece
 
 
 @app.post("/api/chat/stream")
@@ -1384,6 +1449,9 @@ async def chat_stream(req: ChatRequest, request: Request, user: dict = Depends(g
     effective_tool_override = req.tool_override or _auto_tool_override(validated_msg)
     effective_reply_mode = req.reply_mode
     effective_thinking = bool(req.thinking)
+    if not effective_thinking and _is_analytical_query(validated_msg):
+        effective_thinking = True
+        logger.info("Auto-upgraded to gpt-5.4-mini for analytical query: %s", validated_msg[:80])
     is_full_record_summary_request = effective_tool_override == "summarize"
     _audit_log("chat_stream_request", user, tool_override=effective_tool_override or "auto", llm_provider=req_provider)
 
@@ -1547,10 +1615,20 @@ async def chat_stream(req: ChatRequest, request: Request, user: dict = Depends(g
         try:
             for attempt in range(max_retries + 1):
                 try:
-                    for update in _graph_holder["active"].stream(
-                        {"messages": messages}, config, stream_mode="updates"
+                    for stream_item in _graph_holder["active"].stream(
+                        {"messages": messages}, config, stream_mode=["updates", "messages"]
                     ):
-                        q.put(("update", update))
+                        # Multi-mode stream yields (mode, payload) tuples.
+                        if isinstance(stream_item, tuple) and len(stream_item) == 2:
+                            mode, payload = stream_item
+                            if mode == "updates":
+                                q.put(("update", payload))
+                            elif mode == "messages":
+                                q.put(("message", payload))
+                            else:
+                                q.put(("update", payload))
+                        else:
+                            q.put(("update", stream_item))
                     q.put(("end", None))
                     _ended = True
                     return
@@ -1613,9 +1691,11 @@ async def chat_stream(req: ChatRequest, request: Request, user: dict = Depends(g
         full_response = ""
         _last_ai_content = ""   # tracks latest non-empty AI text from ANY node (safety net)
         _defer_token_emission = bool(effective_reply_mode)
+        _live_token_streaming = False
         _STREAM_TIMEOUT_S = 180  # max seconds — must exceed graph timeout (180s) for summarization
-        _STREAM_CHUNK_CHARS = 220
-        _STREAM_CHUNK_DELAY_S = 0.05 if is_full_record_summary_request else 0.0
+        _STREAM_TOKEN_DELAY_S = 0.0
+        _stream_model_name = _stream_model_hint(req_provider, effective_thinking)
+        _progress_stages = _select_progress_stages(is_full_record_summary_request, effective_thinking)
 
         # Phase 11 — audit metadata accumulated across streaming updates
         _audit_mrn: str = ""
@@ -1624,18 +1704,39 @@ async def chat_stream(req: ChatRequest, request: Request, user: dict = Depends(g
         _audit_tool_content: list = []   # tool message content for source counting
         _audit_grounding: dict = {}      # grounding result from synthesizer update
 
+        # Fallback usage aggregation for streamed runs where callback-based token
+        # accounting may be unavailable (observed with some OpenAI stream paths).
+        _stream_usage = {
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "total_tokens": 0,
+            "cost_usd": 0.0,
+            "calls": 0,
+            "models": [],
+            "providers": set(),
+        }
+        _stream_usage_seen: set[tuple] = set()
+
+        def _provider_for_model(model_name: str) -> str:
+            m = (model_name or "").lower()
+            if "gemini" in m:
+                return "google"
+            if "gpt" in m or "o1" in m or "o3" in m or "o4" in m:
+                return "openai"
+            return "unknown"
+
+        _announced_router = False
+        _announced_tools = False
+        _announced_synth = False
+
         async def _emit_token_stream(text: str):
-            """Emit response as incremental SSE token chunks for smoother UX."""
+            """Emit response as incremental SSE token-level chunks."""
             if not text:
                 return
-            if len(text) <= _STREAM_CHUNK_CHARS:
-                yield f"data: {json.dumps({'type': 'token', 'content': text})}\n\n"
-                return
-            for i in range(0, len(text), _STREAM_CHUNK_CHARS):
-                piece = text[i:i + _STREAM_CHUNK_CHARS]
+            for piece in _iter_stream_tokens(text, model_hint=_stream_model_name):
                 yield f"data: {json.dumps({'type': 'token', 'content': piece})}\n\n"
-                if _STREAM_CHUNK_DELAY_S > 0:
-                    await asyncio.sleep(_STREAM_CHUNK_DELAY_S)
+                if _STREAM_TOKEN_DELAY_S > 0:
+                    await asyncio.sleep(_STREAM_TOKEN_DELAY_S)
                 else:
                     await asyncio.sleep(0)
 
@@ -1656,9 +1757,9 @@ async def chat_stream(req: ChatRequest, request: Request, user: dict = Depends(g
             try:
                 kind, data = q.get_nowait()
             except _queue_mod.Empty:
-                if is_full_record_summary_request and stage_idx < len(_SUMMARY_PROGRESS_STAGES):
+                if stage_idx < len(_progress_stages):
                     elapsed_stage = time.perf_counter() - stage_start
-                    threshold_s, stage_text = _SUMMARY_PROGRESS_STAGES[stage_idx]
+                    threshold_s, stage_text = _progress_stages[stage_idx]
                     if elapsed_stage >= threshold_s:
                         yield f"data: {json.dumps({'type': 'status', 'content': stage_text})}\n\n"
                         stage_idx += 1
@@ -1670,10 +1771,149 @@ async def chat_stream(req: ChatRequest, request: Request, user: dict = Depends(g
             if kind == "error":
                 yield f"data: {json.dumps({'type': 'error', 'content': data})}\n\n"
                 return
+            if kind == "message":
+                # True live token streaming from LangGraph message chunks.
+                # Payload format: (AIMessageChunk, metadata)
+                try:
+                    msg_chunk, msg_meta = data
+                except Exception:
+                    await asyncio.sleep(0)
+                    continue
+
+                # Capture model usage from chunk metadata as a reliable fallback
+                # when callback records report zero totals for streamed requests.
+                try:
+                    usage_meta = getattr(msg_chunk, "usage_metadata", None) or {}
+                    response_meta = getattr(msg_chunk, "response_metadata", None) or {}
+                    nested_usage = {}
+                    if isinstance(response_meta, dict):
+                        nested = response_meta.get("token_usage") or response_meta.get("usage")
+                        if isinstance(nested, dict):
+                            nested_usage = nested
+
+                    usage_source = {}
+                    if nested_usage:
+                        usage_source.update(nested_usage)
+                    if isinstance(usage_meta, dict) and usage_meta:
+                        usage_source.update(usage_meta)
+
+                    if usage_source:
+                        input_tokens = int(
+                            usage_source.get("input_tokens")
+                            or usage_source.get("prompt_tokens")
+                            or usage_source.get("prompt_token_count")
+                            or 0
+                        )
+                        output_tokens = int(
+                            usage_source.get("output_tokens")
+                            or usage_source.get("completion_tokens")
+                            or usage_source.get("candidates_token_count")
+                            or 0
+                        )
+                        total_tokens = int(
+                            usage_source.get("total_tokens")
+                            or usage_source.get("total_token_count")
+                            or (input_tokens + output_tokens)
+                        )
+
+                        cached_input_tokens = 0
+                        input_details = usage_source.get("input_token_details")
+                        if isinstance(input_details, dict):
+                            cached_input_tokens = int(
+                                input_details.get("cache_read")
+                                or input_details.get("cached_tokens")
+                                or 0
+                            )
+                        if not cached_input_tokens:
+                            prompt_details = usage_source.get("prompt_tokens_details")
+                            if isinstance(prompt_details, dict):
+                                cached_input_tokens = int(prompt_details.get("cached_tokens") or 0)
+
+                        model_name = ""
+                        if isinstance(response_meta, dict):
+                            model_name = str(response_meta.get("model_name") or response_meta.get("model") or "")
+                        if not model_name and isinstance(msg_meta, dict):
+                            model_name = str(msg_meta.get("ls_model_name") or "")
+                        if not model_name:
+                            model_name = _stream_model_name or "unknown"
+
+                        node_name_for_sig = str(msg_meta.get("langgraph_node", "") or "") if isinstance(msg_meta, dict) else ""
+                        usage_sig = (
+                            model_name,
+                            node_name_for_sig,
+                            input_tokens,
+                            output_tokens,
+                            total_tokens,
+                            cached_input_tokens,
+                        )
+                        if total_tokens > 0 and usage_sig not in _stream_usage_seen:
+                            _stream_usage_seen.add(usage_sig)
+                            _stream_usage["input_tokens"] += input_tokens
+                            _stream_usage["output_tokens"] += output_tokens
+                            _stream_usage["total_tokens"] += total_tokens
+                            _stream_usage["calls"] += 1
+                            _stream_usage["models"].append(model_name)
+                            _stream_usage["providers"].add(_provider_for_model(model_name))
+                            _stream_usage["cost_usd"] = round(
+                                _stream_usage["cost_usd"]
+                                + _compute_cost_usd(
+                                    model_name,
+                                    input_tokens,
+                                    output_tokens,
+                                    PRICING_TABLE,
+                                    cached_input_tokens=cached_input_tokens,
+                                ),
+                                8,
+                            )
+                except Exception:
+                    pass
+
+                if _defer_token_emission:
+                    await asyncio.sleep(0)
+                    continue
+
+                node_name = ""
+                if isinstance(msg_meta, dict):
+                    node_name = str(msg_meta.get("langgraph_node", "") or "")
+
+                # Stream only final-answer nodes. Router direct answers still
+                # work through update-based fallback for compatibility.
+                if node_name not in ("synthesizer", "chatbot"):
+                    await asyncio.sleep(0)
+                    continue
+
+                has_tool_call_chunks = bool(
+                    getattr(msg_chunk, "tool_call_chunks", None)
+                    or getattr(msg_chunk, "tool_calls", None)
+                    or getattr(msg_chunk, "invalid_tool_calls", None)
+                )
+                piece = _normalize_content(getattr(msg_chunk, "content", ""))
+                if has_tool_call_chunks or not piece:
+                    await asyncio.sleep(0)
+                    continue
+
+                _live_token_streaming = True
+                full_response += piece
+                yield f"data: {json.dumps({'type': 'token', 'content': piece})}\n\n"
+                if _STREAM_TOKEN_DELAY_S > 0:
+                    await asyncio.sleep(_STREAM_TOKEN_DELAY_S)
+                else:
+                    await asyncio.sleep(0)
+                continue
 
             # Process graph node update
             for node_name, node_output in data.items():
                 msgs = node_output.get("messages", [])
+
+                if node_name == "router" and not _announced_router:
+                    _announced_router = True
+                    yield f"data: {json.dumps({'type': 'status', 'content': 'I am choosing the best strategy for your question.'})}\n\n"
+                elif node_name == "tools" and not _announced_tools:
+                    _announced_tools = True
+                    yield f"data: {json.dumps({'type': 'status', 'content': 'I am now checking records and evidence for you.'})}\n\n"
+                elif node_name == "synthesizer" and not _announced_synth:
+                    _announced_synth = True
+                    yield f"data: {json.dumps({'type': 'status', 'content': 'I have enough data. I am now writing your final answer.'})}\n\n"
 
                 # Phase 11 — capture MRN from any node that propagates it
                 if not _audit_mrn:
@@ -1711,19 +1951,22 @@ async def chat_stream(req: ChatRequest, request: Request, user: dict = Depends(g
                                 status_msg = _TOOL_STATUS.get(tc_name, f"Running {tc_name}...")
                                 yield f"data: {json.dumps({'type': 'status', 'content': status_msg})}\n\n"
 
+                            if node_name == "synthesizer":
+                                yield f"data: {json.dumps({'type': 'status', 'content': 'I need one more quick check before finalizing your answer.'})}\n\n"
+
                         # Emit content from synthesizer — ONLY when it has a final text
                         # answer (no tool_calls). If tool_calls exist on synthesizer,
                         # this is an intermediate multi-hop step, not the final answer.
                         if content and node_name in ("synthesizer", "chatbot") and not tool_calls:
                             full_response = content
-                            if not _defer_token_emission:
+                            if not _defer_token_emission and not _live_token_streaming:
                                 async for _chunk in _emit_token_stream(content):
                                     yield _chunk
                         elif content and node_name == "router" and not tool_calls:
                             # Router answered directly (no tool calls) — this IS the
                             # final response (e.g., greetings, simple conversation).
                             full_response = content
-                            if not _defer_token_emission:
+                            if not _defer_token_emission and not _live_token_streaming:
                                 async for _chunk in _emit_token_stream(content):
                                     yield _chunk
                         elif content and tool_calls:
@@ -1775,6 +2018,21 @@ async def chat_stream(req: ChatRequest, request: Request, user: dict = Depends(g
             )
 
         request_usage = summarize_request(usage_cb.records)
+        if request_usage.get("total_tokens", 0) == 0 and _stream_usage["total_tokens"] > 0:
+            request_usage = {
+                "input_tokens": _stream_usage["input_tokens"],
+                "output_tokens": _stream_usage["output_tokens"],
+                "total_tokens": _stream_usage["total_tokens"],
+                "cost_usd": round(float(_stream_usage["cost_usd"]), 8),
+                "calls": _stream_usage["calls"],
+                "models": list(_stream_usage["models"]),
+                "providers": sorted(set(_stream_usage["providers"])),
+            }
+            logger.info(
+                "Applied stream usage fallback from message metadata: total_tokens=%s calls=%s",
+                request_usage["total_tokens"],
+                request_usage["calls"],
+            )
         LEDGER.record_request(sid, request_usage)
         PROM_LLM_INPUT_TOKENS.labels(endpoint="/api/chat/stream").inc(request_usage["input_tokens"])
         PROM_LLM_OUTPUT_TOKENS.labels(endpoint="/api/chat/stream").inc(request_usage["output_tokens"])

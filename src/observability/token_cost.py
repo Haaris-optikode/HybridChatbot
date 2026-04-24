@@ -37,6 +37,7 @@ def _load_pricing_table() -> Dict[str, Dict[str, float]]:
         # OpenAI (USD per 1M tokens)
         "gpt-4.1": {"input_per_1m": 2.00, "cached_input_per_1m": 0.50, "output_per_1m": 8.00},
         "gpt-4.1-mini": {"input_per_1m": 0.40, "cached_input_per_1m": 0.10, "output_per_1m": 1.60},
+        "gpt-5.4-mini": {"input_per_1m": 2.00, "cached_input_per_1m": 0.50, "output_per_1m": 8.00},
 
         # Google Gemini (USD per 1M tokens) - April 2026 pricing targets
         # For Gemini 2.5 Pro, this table reflects the <=200k prompt tier.
@@ -177,7 +178,9 @@ def _extract_usage_from_response(response: Any) -> Optional[Dict[str, Any]]:
 
     # Try response.llm_output first (common for OpenAI wrappers)
     llm_output = getattr(response, "llm_output", None) or {}
-    token_usage = llm_output.get("token_usage") if isinstance(llm_output, dict) else None
+    token_usage = None
+    if isinstance(llm_output, dict):
+        token_usage = llm_output.get("token_usage") or llm_output.get("usage")
 
     if token_usage:
         token_counts = _read_token_counts(token_usage if isinstance(token_usage, dict) else {})
@@ -206,6 +209,11 @@ def _extract_usage_from_response(response: Any) -> Optional[Dict[str, Any]]:
 
         usage_meta = getattr(message, "usage_metadata", None) or {}
         resp_meta = getattr(message, "response_metadata", None) or {}
+        resp_token_usage = {}
+        if isinstance(resp_meta, dict):
+            nested_usage = resp_meta.get("token_usage") or resp_meta.get("usage")
+            if isinstance(nested_usage, dict):
+                resp_token_usage = nested_usage
 
         model = (
             resp_meta.get("model_name")
@@ -222,6 +230,7 @@ def _extract_usage_from_response(response: Any) -> Optional[Dict[str, Any]]:
         # - total_token_count
         token_counts = _read_token_counts(
             {
+                **resp_token_usage,
                 **usage_meta,
                 **resp_meta,
             }

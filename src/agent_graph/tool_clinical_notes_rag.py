@@ -81,7 +81,7 @@ _CLINICAL_INTENT_REWRITES: list[tuple] = [
     (_re_init.compile(r"home\s+med|medication.{0,20}at home|medications?\s+before admission|taking\s+at\s+home|admission\s+med", _re_init.I),
      "home medications admission medication list lisinopril carvedilol metformin furosemide atorvastatin aspirin tiotropium omeprazole allopurinol"),
     (_re_init.compile(r"bnp.{0,30}admission|admission.{0,30}bnp|bnp.{0,10}on admission|natriuretic\s+peptide", _re_init.I),
-     "BNP brain natriuretic peptide admission labs 1842"),
+        "BNP brain natriuretic peptide admission labs 1842 1,842 pg/mL"),
     (_re_init.compile(r"weight\s+loss.{0,20}hospital|lost.{0,20}weight.{0,20}hospital|total\s+weight\s+loss|weight\s+was\s+lost|weight\s+lost", _re_init.I),
      "DISCHARGE SUMMARY total weight loss 18.4 kg 40.5 pounds final weight 91.4 kg 30-day hospitalization decongestion"),
     (_re_init.compile(r"epi.?pen|epinephrine\s+auto|shellfish\s+anaphylaxis", _re_init.I),
@@ -325,7 +325,7 @@ class ClinicalNotesRAGTool:
 
         Signals of complexity: multiple clinical domains named in a single query
         (medications AND labs AND procedures), summary/complete requests, or
-        conjunctive structure.  The upper cap (30) keeps latency bounded.
+        conjunctive structure.  The upper cap (20) keeps latency bounded.
         """
         q = query.lower()
         # Count how many domain signals appear
@@ -338,7 +338,7 @@ class ClinicalNotesRAGTool:
         ]
         complexity = sum(domain_signals)
         if complexity >= 2:
-            boosted = min(self.fetch_k * 2, 30)
+            boosted = min(self.fetch_k * 2, 20)
             logger.debug("Adaptive fetch_k: %d→%d (complexity=%d)", self.fetch_k, boosted, complexity)
             return boosted
         return self.fetch_k
@@ -362,8 +362,10 @@ class ClinicalNotesRAGTool:
             return []
         try:
             from rank_bm25 import BM25Okapi
-            tokenized_query = query.lower().split()
-            corpus = [doc.page_content.lower().split() for doc in candidates]
+            tokenized_query = self._bm25_tokenize(query)
+            corpus = [self._bm25_tokenize(doc.page_content) for doc in candidates]
+            if not tokenized_query or not any(corpus):
+                return []
             bm25 = BM25Okapi(corpus)
             scores = bm25.get_scores(tokenized_query)
             scored = sorted(zip(candidates, scores), key=lambda x: x[1], reverse=True)
@@ -406,8 +408,10 @@ class ClinicalNotesRAGTool:
             if not filtered:
                 return []
 
-            tokenized_query = query.lower().split()
-            corpus = [doc.page_content.lower().split() for doc in filtered]
+            tokenized_query = self._bm25_tokenize(query)
+            corpus = [self._bm25_tokenize(doc.page_content) for doc in filtered]
+            if not tokenized_query or not any(corpus):
+                return []
             bm25 = BM25Okapi(corpus)
             scores = bm25.get_scores(tokenized_query)
             scored = sorted(zip(filtered, scores), key=lambda x: x[1], reverse=True)
@@ -423,6 +427,19 @@ class ClinicalNotesRAGTool:
         except Exception as e:
             logger.warning("BM25 fallback failed: %s", e)
             return []
+
+    @staticmethod
+    def _bm25_tokenize(text: str) -> list[str]:
+        """Tokenize text for BM25 with light normalization.
+
+        Key normalization: remove thousands separators inside numbers so
+        "1,842" and "1842" match, then split on punctuation boundaries.
+        """
+        raw = str(text or "").lower()
+        if not raw:
+            return []
+        raw = _re.sub(r"(?<=\d),(?=\d)", "", raw)
+        return _re.findall(r"[a-z0-9]+(?:\.[0-9]+)?", raw)
 
     def _detect_metadata_hints(self, query: str) -> dict[str, list[str]]:
         """Detect document type and section hints from the query.
@@ -2047,7 +2064,7 @@ def _document_summary_cache_file(document_id: str) -> _Path:
 def _get_doc_reduce_llm(model_override: str = None):
     """Higher-accuracy model for document reduce/verification."""
     provider = get_active_llm_provider(getattr(TOOLS_CFG, "llm_provider", "openai"))
-    default_model = "gpt-4.1" if provider == "openai" else "gemini-2.5-pro"
+    default_model = "gpt-5.4-mini" if provider == "openai" else "gemini-2.5-pro"
     preferred = os.environ.get("MEDGRAPH_DOCUMENT_SUMMARY_REDUCE_LLM", "").strip() or default_model
     model = model_override or preferred
     mode = _current_summary_mode()
@@ -2562,7 +2579,7 @@ def _run_structured_summary_pipeline(
     provider = get_active_llm_provider(getattr(TOOLS_CFG, "llm_provider", "openai"))
     default_map = "gpt-4.1-mini" if provider == "openai" else "gemini-2.5-flash"
     default_reduce = "gpt-4.1-mini" if provider == "openai" else "gemini-2.5-flash"
-    thinking_model = "gpt-4.1" if provider == "openai" else "gemini-2.5-pro"
+    thinking_model = "gpt-5.4-mini" if provider == "openai" else "gemini-2.5-pro"
     map_primary = thinking_model if mode == "thinking" else os.environ.get("MEDGRAPH_DOCUMENT_SUMMARY_MAP_LLM", default_map)
     reduce_primary = thinking_model if mode == "thinking" else default_reduce
     is_fast_mode = mode != "thinking"
@@ -3095,6 +3112,19 @@ def lookup_clinical_notes(query: str, patient_mrn: str = "", document_id: str = 
         rag = get_rag_tool_instance()
         result = [None]
         exception = [None]
+
+        # Normalize patient-prefixed prompts so retrieval focuses on the
+        # clinical intent instead of repetitive demographic boilerplate.
+        q_clean = (query or "").strip()
+        q_clean = _re.sub(
+            r"^\s*for\s+patient\s+[^,]{2,120},\s*",
+            "",
+            q_clean,
+            flags=_re.IGNORECASE,
+        )
+        q_clean = _re.sub(r"\(\s*mrn\s*:\s*[^\)]+\)", "", q_clean, flags=_re.IGNORECASE)
+        q_clean = _re.sub(r"\s+", " ", q_clean).strip(" ,")
+        lookup_query = q_clean or (query or "")
         
         # Use document_id filter if provided (strip whitespace, treat empty as None)
         doc_filter = document_id.strip() if document_id else None
@@ -3114,7 +3144,7 @@ def lookup_clinical_notes(query: str, patient_mrn: str = "", document_id: str = 
 
         def _search_with_timeout():
             try:
-                result[0] = rag.search(query, document_id=doc_filter, patient_mrn=mrn_filter)
+                result[0] = rag.search(lookup_query, document_id=doc_filter, patient_mrn=mrn_filter)
             except Exception as e:
                 exception[0] = e
         
@@ -3134,10 +3164,10 @@ def lookup_clinical_notes(query: str, patient_mrn: str = "", document_id: str = 
         # uploaded documents inferred from the query itself.
         if not doc_filter and not mrn_filter and _is_unhelpful_search_result(result[0] or ""):
             try:
-                candidate_doc_ids = rag.find_documents_for_patient_identifier(query, max_docs=3)
+                candidate_doc_ids = rag.find_documents_for_patient_identifier(lookup_query, max_docs=3)
                 fallback_hits: list[str] = []
                 for cand_doc_id in candidate_doc_ids:
-                    scoped = rag.search(query, document_id=cand_doc_id)
+                    scoped = rag.search(lookup_query, document_id=cand_doc_id)
                     if not _is_unhelpful_search_result(scoped or ""):
                         fallback_hits.append(
                             f"[Document Scoped Fallback | document_id: {cand_doc_id}]\n{scoped}"
@@ -3706,7 +3736,6 @@ def summarize_patient_record(patient_identifier: str) -> str:
                 logger.info("Cached → %s (memory + disk)", cache_file.name)
             except Exception as ce:
                 logger.warning("Disk cache write failed (non-critical): %s", ce)
-
         return summary
 
     except Exception as e:

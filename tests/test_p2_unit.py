@@ -113,6 +113,46 @@ class TestAutoToolOverride:
         override = _auto_tool_override("What treatments are there if someone is suffering from anxiety")
         assert override is None
 
+    def test_orders_query_forces_orders_tool(self):
+        from api import _auto_tool_override
+
+        override = _auto_tool_override("List all medications and all labs for Robert Whitfield")
+        assert override == "orders"
+
+    def test_cohort_query_forces_cohort_tool(self):
+        from api import _auto_tool_override
+
+        override = _auto_tool_override("Show all diabetic patients with HbA1c above 9")
+        assert override == "cohort"
+
+
+class TestAnalyticalQueryDetection:
+    """Unit tests for analytical-query auto-upgrade detection."""
+
+    def test_detects_medication_change_question(self):
+        from api import _is_analytical_query
+
+        assert _is_analytical_query("How did medications change during admission and why?") is True
+
+    def test_detects_first_time_question(self):
+        from api import _is_analytical_query
+
+        assert _is_analytical_query("When was spironolactone first started?") is True
+
+    def test_detects_prioritized_triggered_plan_question(self):
+        from api import _is_analytical_query
+
+        q = (
+            "What were the prioritized interventions in the diabetes management plan "
+            "and what triggered them?"
+        )
+        assert _is_analytical_query(q) is True
+
+    def test_simple_fact_query_not_analytical(self):
+        from api import _is_analytical_query
+
+        assert _is_analytical_query("What is the patient's date of birth?") is False
+
 
 class TestPatientIdentifierResolution:
     """Unit tests for robust patient resolution across large/scattered indexes."""
@@ -1516,12 +1556,12 @@ class TestAdaptiveFetchK:
         k = rag._adaptive_fetch_k("Give me a complete summary of all medications and labs")
         assert k > 15
 
-    def test_adaptive_k_capped_at_30(self):
+    def test_adaptive_k_capped_at_20(self):
         rag = self._make_rag(base_fetch_k=20)
         k = rag._adaptive_fetch_k(
             "List all medications and all lab results and all procedures and complete summary"
         )
-        assert k <= 30
+        assert k <= 20
 
 
 class TestPerQueryBM25:

@@ -137,6 +137,7 @@ def test_specific_lookup():
     content = result["content"]
     latency = result["latency_ms"]
     wall = result["wall_time_s"]
+    usage = result.get("usage") or {}
     error = result["error"]
     
     print(f"  Response: {content[:300]}...")
@@ -144,11 +145,18 @@ def test_specific_lookup():
     print(f"  Wall Time: {wall}s")
     if error:
         print(f"  ERROR: {error}")
+
+    total_tokens = int(usage.get("total_tokens") or 0)
+    cost_usd = float(usage.get("cost_usd") or 0.0)
+    print(f"  Stream usage total_tokens: {total_tokens}")
+    print(f"  Stream usage cost_usd: {cost_usd:.6f}")
     
     # Check accuracy — should mention DOB
     has_dob = any(kw in content.lower() for kw in ["dob", "date of birth", "born", "1958", "november"])
-    ok = not error and len(content) > 20
+    usage_ok = total_tokens > 0 and cost_usd > 0
+    ok = not error and len(content) > 20 and usage_ok
     print(f"  Contains DOB info: {'✓ Yes' if has_dob else '✗ No'}")
+    print(f"  Stream usage populated: {'✓ Yes' if usage_ok else '✗ No'}")
     print(f"  {'✓ PASS' if ok else '✗ FAIL'}")
     return ok
 

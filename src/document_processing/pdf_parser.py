@@ -333,8 +333,8 @@ def _extract_page_tables(page) -> List[Tuple[tuple, str]]:
         # border/box lines for table ruling lines, fragmenting narrative text
         # into tiny cells. Two guards:
         #
-        # Guard A — overall avg: if all non-empty cells across the whole table
-        # average < 4 chars, every row is garbage (e.g. "Tel|emet|ry").
+        # Guard A — global tiny-cell fraction: false positive tables usually
+        # fragment narrative text into mostly 1-2 character cells.
         #
         # Guard B — header row: even when later rows have legitimate data, a
         # fragmented section-title header ("19. DISCHA | R | GE | PRE | ...")
@@ -346,12 +346,11 @@ def _extract_page_tables(page) -> List[Tuple[tuple, str]]:
             if c and str(c).strip()
         ]
         if all_cells:
-            avg_cell_len = sum(len(c) for c in all_cells) / len(all_cells)
-            if avg_cell_len < 4:
+            tiny_fraction = sum(1 for c in all_cells if len(c) <= 2) / len(all_cells)
+            if tiny_fraction > 0.85:
                 logger.debug(
-                    "[PDF Parser] Rejecting false-positive table "
-                    "(overall avg cell len %.1f < 4)",
-                    avg_cell_len,
+                    "[PDF Parser] Rejecting false-positive table (%.0f%% cells <=2 chars - word fragment)",
+                    tiny_fraction * 100,
                 )
                 continue
 

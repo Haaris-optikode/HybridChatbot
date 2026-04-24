@@ -1,0 +1,470 @@
+{
+  "generated_at": "2026-04-24T11:31:19Z",
+  "base_url": "http://localhost:7860",
+  "document_target": "data/unstructured_docs/clinical_notes/patient1_clinical_note.pdf",
+  "total_cases": 16,
+  "passed_cases": 15,
+  "overall_accuracy_pct": 93.8,
+  "simple": {
+    "total": 12,
+    "passed": 12,
+    "accuracy_pct": 100.0
+  },
+  "complex": {
+    "total": 4,
+    "passed": 3,
+    "accuracy_pct": 75.0,
+    "gpt_5_4_mini_usage_ok": 3,
+    "gpt_5_4_mini_usage_pct": 75.0
+  },
+  "results": [
+    {
+      "case_id": 1,
+      "label": "demographics_core",
+      "question": "For patient MRN 250813000000794, what are age, gender, race, and ethnicity?",
+      "is_complex": false,
+      "score": 4,
+      "max_score": 4,
+      "min_groups": 4,
+      "base_ok": true,
+      "model_ok": true,
+      "passed": true,
+      "latency_s": 15.25,
+      "usage": {
+        "input_tokens": 6223,
+        "output_tokens": 88,
+        "total_tokens": 6311,
+        "cost_usd": 0.0011708,
+        "calls": 2,
+        "models": [
+          "gpt-4.1-mini-2025-04-14",
+          "gpt-4.1-mini-2025-04-14"
+        ],
+        "providers": [
+          "openai"
+        ]
+      },
+      "reply": "For patient MRN 250813000000794, the documented demographics are as follows:\n\n- Age: 45 years\n- Gender: Male\n- Race: Asian\n- Ethnicity: South Asian\n\nThese details are from the patient demographics section of the record [S1]."
+    },
+    {
+      "case_id": 2,
+      "label": "anthropometrics_blood_group",
+      "question": "For patient MRN 250813000000794, what are the height, weight, and blood group?",
+      "is_complex": false,
+      "score": 3,
+      "max_score": 3,
+      "min_groups": 3,
+      "base_ok": true,
+      "model_ok": true,
+      "passed": true,
+      "latency_s": 30.63,
+      "usage": {
+        "input_tokens": 7752,
+        "output_tokens": 163,
+        "total_tokens": 7915,
+        "cost_usd": 0.0020944,
+        "calls": 2,
+        "models": [
+          "gpt-4.1-mini-2025-04-14",
+          "gpt-4.1-mini-2025-04-14"
+        ],
+        "providers": [
+          "openai"
+        ]
+      },
+      "reply": "For patient MRN 250813000000794, the documented demographics are as follows:\n\n- Height: 5 feet 8 inches (172.7 cm)\n- Weight: 200 pounds (90.7 kg)\n- Blood Group: O Positive\n\nThese values are from the patient's demographic record [S1]."
+    },
+    {
+      "case_id": 3,
+      "label": "penicillin_allergy_severity",
+      "question": "For patient MRN 250813000000794, summarize the penicillin allergy severity and emergency management details.",
+      "is_complex": false,
+      "score": 4,
+      "max_score": 4,
+      "min_groups": 3,
+      "base_ok": true,
+      "model_ok": true,
+      "passed": true,
+      "latency_s": 24.35,
+      "usage": {
+        "input_tokens": 8525,
+        "output_tokens": 220,
+        "total_tokens": 8745,
+        "cost_usd": 0.002994,
+        "calls": 2,
+        "models": [
+          "gpt-4.1-mini-2025-04-14",
+          "gpt-4.1-mini-2025-04-14"
+        ],
+        "providers": [
+          "openai"
+        ]
+      },
+      "reply": "For patient MRN 250813000000794, the documented penicillin allergy is classified as severe. The allergy has been active since onset on 05/01/2010 at age 10. The patient has experienced serious reactions including anaphylaxis, hives, facial/lip swelling, and shortness of breath. Emergency management includes the patient carrying an epinephrine auto-injector and wearing a medical alert bracelet. The patient is advised to avoid beta-lactam antibiotics, with alternatives such as macrolides or cephalosporins considered if no cross-reactivity is present. This allergy status and management plan were last reviewed on 08/10/2025 [S2]."
+    },
+    {
+      "case_id": 4,
+      "label": "active_diagnoses",
+      "question": "For patient MRN 250813000000794, what are the active diagnoses with ICD codes?",
+      "is_complex": false,
+      "score": 3,
+      "max_score": 3,
+      "min_groups": 3,
+      "base_ok": true,
+      "model_ok": true,
+      "passed": true,
+      "latency_s": 14.24,
+      "usage": {
+        "input_tokens": 10664,
+        "output_tokens": 213,
+        "total_tokens": 10877,
+        "cost_usd": 0.0033392,
+        "calls": 2,
+        "models": [
+          "gpt-4.1-mini-2025-04-14",
+          "gpt-4.1-mini-2025-04-14"
+        ],
+        "providers": [
+          "openai"
+        ]
+      },
+      "reply": "For patient MRN 250813000000794, the active diagnoses with ICD codes are:\n\n- Type 2 Diabetes Mellitus (ICD E11.9), active since 06/01/2020, with fair glycemic control (HbA1c 7.2%) requiring ongoing management [S1].\n- Essential Hypertension (ICD I10), active since 03/01/2022, currently stable with no target organ damage [S1].\n- Overweight (ICD E66.9), active since 06/01/2020, with BMI 28.5 kg/m\u00b2 contributing to cardiometabolic risk [S1].\n\nThese are the current active conditions documented in the patient's record. Other conditions such as prediabetes (R73.03) and hyperlipidemia (E78.5) are resolved [S1]. \n\nPlease consult the patient's provider for clinical decisions or further details."
+    },
+    {
+      "case_id": 5,
+      "label": "resolved_conditions",
+      "question": "For patient MRN 250813000000794, which conditions are resolved and what time windows are documented?",
+      "is_complex": false,
+      "score": 2,
+      "max_score": 2,
+      "min_groups": 2,
+      "base_ok": true,
+      "model_ok": true,
+      "passed": true,
+      "latency_s": 30.79,
+      "usage": {
+        "input_tokens": 8693,
+        "output_tokens": 299,
+        "total_tokens": 8992,
+        "cost_usd": 0.0023812,
+        "calls": 2,
+        "models": [
+          "gpt-4.1-mini-2025-04-14",
+          "gpt-4.1-mini-2025-04-14"
+        ],
+        "providers": [
+          "openai"
+        ]
+      },
+      "reply": "For patient MRN 250813000000794, the following conditions are documented as resolved with their respective time windows:\n\n- Prediabetes (ICD R73.03): Resolved from January 2018 to June 2020 through lifestyle changes including dietary modifications and increased physical activity.\n- Hyperlipidemia (ICD E78.5): Resolved from March 2018 to December 2020 through a combination of dietary changes and statin therapy.\n- Chickenpox (ICD B01): Occurred in 1987 at age 7, resolved completely as a childhood illness with no sequelae.\n- Mild Asthma (ICD J45.9): Present from 1988 (age 10) to 1995, resolved by adolescence with no current respiratory deficits.\n\nThese resolved conditions are clearly documented with their time frames and resolution methods in the patient's past medical history [S1][S2][S3]."
+    },
+    {
+      "case_id": 6,
+      "label": "current_meds",
+      "question": "For patient MRN 250813000000794, what are the current ongoing medications with dose and frequency?",
+      "is_complex": false,
+      "score": 2,
+      "max_score": 2,
+      "min_groups": 2,
+      "base_ok": true,
+      "model_ok": true,
+      "passed": true,
+      "latency_s": 15.99,
+      "usage": {
+        "input_tokens": 7192,
+        "output_tokens": 234,
+        "total_tokens": 7426,
+        "cost_usd": 0.0019456,
+        "calls": 2,
+        "models": [
+          "gpt-4.1-mini-2025-04-14",
+          "gpt-4.1-mini-2025-04-14"
+        ],
+        "providers": [
+          "openai"
+        ]
+      },
+      "reply": "For patient MRN 250813000000794, the current ongoing medications with dose and frequency documented are:\n\n- Metformin 500 mg tablet, taken twice daily with meals, started 06/01/2020, for management of type 2 diabetes mellitus. It is well tolerated with no gastrointestinal side effects or lactic acidosis risk factors identified [S4].\n\n- Lisinopril 10 mg tablet, taken once daily in the morning, started 03/15/2022, for essential hypertension management. It is well tolerated with no cough or angioedema reported. Recent labs show creatinine 0.9 mg/dL and potassium 4.2 mEq/L within normal limits [S4][S5].\n\nNo other ongoing medications with dose and frequency were found in the records. Atorvastatin was discontinued in 12/2020 after resolution of hyperlipidemia [S3]. \n\nPlease consult the patient's provider for any clinical decisions or medication changes."
+    },
+    {
+      "case_id": 7,
+      "label": "lisinopril_safety",
+      "question": "For patient MRN 250813000000794, when was lisinopril started and what renal/electrolyte safety labs are documented?",
+      "is_complex": false,
+      "score": 3,
+      "max_score": 3,
+      "min_groups": 2,
+      "base_ok": true,
+      "model_ok": true,
+      "passed": true,
+      "latency_s": 26.15,
+      "usage": {
+        "input_tokens": 6550,
+        "output_tokens": 353,
+        "total_tokens": 6903,
+        "cost_usd": 0.0023784,
+        "calls": 2,
+        "models": [
+          "gpt-4.1-mini-2025-04-14",
+          "gpt-4.1-mini-2025-04-14"
+        ],
+        "providers": [
+          "openai"
+        ]
+      },
+      "reply": "For patient MRN 250813000000794:\n\n- Lisinopril was started on 03/15/2022 at a dose of 10 mg once daily orally in the morning. It was initiated after the diagnosis of essential hypertension on 03/01/2022. The medication is ongoing and well tolerated with no cough or angioedema reported [S1][S2].\n\n- Renal and electrolyte safety labs documented around the time of lisinopril initiation showed:\n  - Creatinine 0.9 mg/dL (normal range 0.7\u20131.3 mg/dL)\n  - Potassium 4.2 mEq/L (normal range 3.5\u20135.0 mEq/L)\nThese values were within normal limits at the start of therapy [S2].\n\n- More recent labs from 07/10/2025 also show stable renal function and electrolytes:\n  - Creatinine 0.9 mg/dL (normal)\n  - eGFR >90 mL/min/1.73 m\u00b2 (normal)\n  - Sodium 138 mEq/L (normal)\n  - Potassium 4.2 mEq/L (normal)\nThese indicate ongoing renal and electrolyte stability on lisinopril [S4].\n\nIn summary, lisinopril was started on 03/15/2022 with normal baseline renal and potassium labs, and recent labs continue to show stable kidney function and electrolytes [S1][S2][S4]."
+    },
+    {
+      "case_id": 8,
+      "label": "discontinued_statin",
+      "question": "For patient MRN 250813000000794, which medication was discontinued and why?",
+      "is_complex": false,
+      "score": 3,
+      "max_score": 3,
+      "min_groups": 2,
+      "base_ok": true,
+      "model_ok": true,
+      "passed": true,
+      "latency_s": 15.88,
+      "usage": {
+        "input_tokens": 6259,
+        "output_tokens": 114,
+        "total_tokens": 6373,
+        "cost_usd": 0.0045308,
+        "calls": 2,
+        "models": [
+          "gpt-4.1-mini-2025-04-14",
+          "gpt-5.4-mini-2026-03-17"
+        ],
+        "providers": [
+          "openai"
+        ]
+      },
+      "reply": "The discontinued medication was **atorvastatin 10 mg tablet** [S2].\n\n- **Reason for discontinuation:** **Resolved hyperlipidemia and achievement of lipid targets** [S2].\n- **Duration documented:** **03/2018 to 12/2020** [S2].\n\nIf you want, I can also check whether any other medications were stopped or changed for this patient."
+    },
+    {
+      "case_id": 9,
+      "label": "surgical_history",
+      "question": "For patient MRN 250813000000794, what past surgeries/procedures are documented and outcomes?",
+      "is_complex": false,
+      "score": 2,
+      "max_score": 2,
+      "min_groups": 2,
+      "base_ok": true,
+      "model_ok": true,
+      "passed": true,
+      "latency_s": 44.98,
+      "usage": {
+        "input_tokens": 8609,
+        "output_tokens": 263,
+        "total_tokens": 8872,
+        "cost_usd": 0.0025972,
+        "calls": 2,
+        "models": [
+          "gpt-4.1-mini-2025-04-14",
+          "gpt-4.1-mini-2025-04-14"
+        ],
+        "providers": [
+          "openai"
+        ]
+      },
+      "reply": "For patient MRN 250813000000794, the documented past surgeries and procedures along with their outcomes are:\n\n- Appendectomy on 04/20/2015 performed by Dr. Sarah Johnson (General Surgery) via laparoscopic approach for acute appendicitis. There were no complications, hospital stay was 2 days, and the postoperative course was uncomplicated with complete recovery.\n\n- Skin biopsy on 03/10/2017 performed by Dr. Michael Chen (Dermatology) involving excision of a suspicious lesion on the left shoulder. Pathology was benign, no complications occurred, and there was no recurrence on follow-up [S2][S4].\n\nNo adverse outcomes or complications were documented related to these procedures."
+    },
+    {
+      "case_id": 10,
+      "label": "family_history",
+      "question": "For patient MRN 250813000000794, summarize major family history risks relevant to cardiometabolic disease.",
+      "is_complex": false,
+      "score": 2,
+      "max_score": 2,
+      "min_groups": 2,
+      "base_ok": true,
+      "model_ok": true,
+      "passed": true,
+      "latency_s": 17.08,
+      "usage": {
+        "input_tokens": 6683,
+        "output_tokens": 184,
+        "total_tokens": 6867,
+        "cost_usd": 0.0021996,
+        "calls": 2,
+        "models": [
+          "gpt-4.1-mini-2025-04-14",
+          "gpt-4.1-mini-2025-04-14"
+        ],
+        "providers": [
+          "openai"
+        ]
+      },
+      "reply": "For patient MRN 250813000000794, the major family history risks relevant to cardiometabolic disease include:\n\n- Father: Deceased at age 68 with type 2 diabetes mellitus diagnosed at age 50 and a history of myocardial infarction. The cause of death was myocardial infarction related to diabetic cardiovascular disease.\n- Brother: Alive at age 43 with prediabetes diagnosed in 2023, currently managed with lifestyle modifications and monitoring.\n- Mother: Alive at age 70 with no significant health conditions reported.\n- Sister: Alive at age 38 with migraine headaches but no chronic cardiometabolic conditions.\n\nThere is no documented family history of cancers, autoimmune diseases, or neurological disorders relevant to cardiometabolic risk [S1]."
+    },
+    {
+      "case_id": 11,
+      "label": "social_history",
+      "question": "For patient MRN 250813000000794, what are smoking, alcohol, and support-system details?",
+      "is_complex": false,
+      "score": 3,
+      "max_score": 3,
+      "min_groups": 2,
+      "base_ok": true,
+      "model_ok": true,
+      "passed": true,
+      "latency_s": 32.04,
+      "usage": {
+        "input_tokens": 6867,
+        "output_tokens": 275,
+        "total_tokens": 7142,
+        "cost_usd": 0.0024572,
+        "calls": 2,
+        "models": [
+          "gpt-4.1-mini-2025-04-14",
+          "gpt-4.1-mini-2025-04-14"
+        ],
+        "providers": [
+          "openai"
+        ]
+      },
+      "reply": "For patient MRN 250813000000794, the documented social history and support details are as follows:\n\n- Smoking status: The patient is a never smoker with no history of tobacco use.\n- Alcohol use: The patient consumes 1\u20132 beers per week socially, with no evidence of problematic drinking.\n- Support system: The patient lives in a stable suburban home with his wife and two children. He has strong family and community support, with no reported depression or anxiety. His wife provides comprehensive support including medication management, dietary planning, appointment coordination, and glucose monitoring assistance. Additionally, his sister-in-law offers childcare support during medical appointments and serves as emergency backup. Both caregivers are educated about diabetes management and emergency procedures [S1][S2][S3].\n\nThis information reflects a supportive home environment and healthy lifestyle habits regarding smoking and alcohol."
+    },
+    {
+      "case_id": 12,
+      "label": "vitals_and_labs",
+      "question": "For patient MRN 250813000000794, what were the key vitals and labs from the July 2025 diabetes follow-up?",
+      "is_complex": false,
+      "score": 4,
+      "max_score": 4,
+      "min_groups": 3,
+      "base_ok": true,
+      "model_ok": true,
+      "passed": true,
+      "latency_s": 35.58,
+      "usage": {
+        "input_tokens": 10212,
+        "output_tokens": 647,
+        "total_tokens": 10859,
+        "cost_usd": 0.0035456,
+        "calls": 2,
+        "models": [
+          "gpt-4.1-mini-2025-04-14",
+          "gpt-4.1-mini-2025-04-14"
+        ],
+        "providers": [
+          "openai"
+        ]
+      },
+      "reply": "For patient MRN 250813000000794, at the July 15, 2025 diabetes follow-up visit, the key documented vitals and labs were:\n\nVitals (07/15/2025, 10:00 AM):\n- Blood pressure: 130/80 mmHg\n- Temperature: 98.6\u00b0F\n- Heart rate: 80 bpm\n- Respiratory rate: 16/min\n- Oxygen saturation: 98%\n- Body mass index (BMI): 28.5 kg/m\u00b2\n- Body surface area (BSA): 2.1\nThese vitals showed stable cardiovascular and respiratory status trending toward goal ranges [S2].\n\nLaboratory results (07/10/2025):\n- HbA1c: 7.2% (target <7.0%) \u2014 above target\n- Fasting glucose: 115 mg/dL (normal 70\u201399) \u2014 elevated\n- Creatinine: 0.9 mg/dL (0.7\u20131.3) \u2014 normal\n- eGFR: >90 mL/min/1.73 m\u00b2 \u2014 normal\n- Sodium: 138 mEq/L (136\u2013145) \u2014 normal\n- Potassium: 4.2 mEq/L (3.5\u20135.0) \u2014 normal\n- ALT: 25 U/L (7\u201340) \u2014 normal\n- AST: 22 U/L (10\u201340) \u2014 normal\n- Total cholesterol: 180 mg/dL (<200) \u2014 desirable\n- HDL: 50 mg/dL (>40 male) \u2014 normal\n- LDL: 110 mg/dL (<100) \u2014 slightly elevated\n- Triglycerides: 150 mg/dL (<150) \u2014 upper normal\nThese labs indicate suboptimal glycemic control with HbA1c and fasting glucose above target, and mildly elevated LDL cholesterol [S3].\n\nThe patient reported stable overall health with intermittent fatigue, home glucose monitoring fasting levels 110\u2013140 mg/dL, post-prandial up to 180 mg/dL, no hypoglycemia or diabetic complications symptoms, and mild foot discomfort with prolonged standing. Current management included metformin 500 mg twice daily and lisinopril 10 mg once daily, with partial adherence to a low-carb diet and regular exercise [S6].\n\nIn summary, the July 2025 diabetes follow-up showed stable vital signs, but labs revealed above-target glycemic markers and slightly elevated LDL cholesterol, prompting ongoing management and monitoring [S2][S3][S6]."
+    },
+    {
+      "case_id": 13,
+      "label": "complex_trend",
+      "question": "For patient MRN 250813000000794, compare trends over time between the July and August 2025 follow-ups for blood pressure and A1C.",
+      "is_complex": true,
+      "score": 4,
+      "max_score": 4,
+      "min_groups": 3,
+      "base_ok": true,
+      "model_ok": true,
+      "passed": true,
+      "latency_s": 37.72,
+      "usage": {
+        "input_tokens": 10348,
+        "output_tokens": 405,
+        "total_tokens": 10753,
+        "cost_usd": 0.0183632,
+        "calls": 2,
+        "models": [
+          "gpt-4.1-mini-2025-04-14",
+          "gpt-5.4-mini-2026-03-17"
+        ],
+        "providers": [
+          "openai"
+        ]
+      },
+      "reply": "For this patient, the documented **July 2025** follow-up shows **blood pressure 130/80 mmHg** on **07/15/2025** [S2]. A separate later vital-signs entry in the record shows **128/78 mmHg** on **04/20/2025** and **132/82 mmHg** on **01/10/2025**, with the note that blood pressure was \u201ctrending toward goal ranges\u201d [S2]. The available record does **not** show a distinct **August 2025 blood pressure** measurement; this information was not found in the available records.\n\nFor glycemic control, the documented **July 2025 HbA1c was 7.2%** on **07/10/2025**, which was **above target** [S3]. The record also shows an **A1C follow-up on 08/10/2025**, but the retrieved notes do **not** include a numeric August A1c result [S2][S4]. So, based on available documentation, July BP was stable and July A1c was mildly above goal, but the exact August-to-July trend for both measures cannot be fully confirmed from the retrieved record."
+    },
+    {
+      "case_id": 14,
+      "label": "complex_medication_reasoning",
+      "question": "For patient MRN 250813000000794, compare current medications versus discontinued medications and explain why those choices were made.",
+      "is_complex": true,
+      "score": 4,
+      "max_score": 4,
+      "min_groups": 3,
+      "base_ok": true,
+      "model_ok": true,
+      "passed": true,
+      "latency_s": 31.5,
+      "usage": {
+        "input_tokens": 9696,
+        "output_tokens": 509,
+        "total_tokens": 10205,
+        "cost_usd": 0.0138432,
+        "calls": 2,
+        "models": [
+          "gpt-4.1-mini-2025-04-14",
+          "gpt-5.4-mini-2026-03-17"
+        ],
+        "providers": [
+          "openai"
+        ]
+      },
+      "reply": "For MRN **250813000000794**, the documented **current medications** are:\n\n- **Metformin 500 mg tablet**, **500 mg orally twice daily with meals** \u2014 ongoing since **06/01/2020** for **type 2 diabetes mellitus**; noted as well-tolerated with no GI side effects or lactic acidosis risk factors identified. [S1][S3]\n- **Lisinopril 10 mg tablet**, **10 mg orally once daily (AM)** \u2014 ongoing since **03/15/2022** for **essential hypertension**; noted as well-tolerated, with **no cough or angioedema** reported and normal **creatinine 0.9 mg/dL** and **potassium 4.2 mEq/L**. [S1][S3]\n\nThe only documented **discontinued medication** is:\n\n- **Atorvastatin 10 mg tablet** \u2014 used from **03/2018 to 12/2020**, then stopped because **hyperlipidemia resolved** and **lipid targets were achieved**. [S2][S4]\n\n**Why these choices were made:**\n- **Metformin** was continued because diabetes remains active and control is only fair, with **HbA1c 7.2%** above the stated goal of **<7.0%**, so ongoing diabetes management is still needed. [S3]\n- **Lisinopril** was continued for blood pressure control, with documentation that hypertension is **stable** and managed with ACE-inhibitor therapy. [S1][S3]\n- **Atorvastatin** was discontinued because the lipid disorder is documented as **resolved** after dietary changes and statin therapy, with lipid goals met. [S2][S4]\n\nIf you want, I can also compare these with the patient\u2019s **active diagnoses** or summarize whether any medication changes are suggested in the chart."
+    },
+    {
+      "case_id": 15,
+      "label": "complex_risk_prognosis",
+      "question": "For patient MRN 250813000000794, which findings are most important for future cardiometabolic risk and prognosis, and why?",
+      "is_complex": true,
+      "score": 3,
+      "max_score": 4,
+      "min_groups": 3,
+      "base_ok": true,
+      "model_ok": true,
+      "passed": true,
+      "latency_s": 31.99,
+      "usage": {
+        "input_tokens": 10135,
+        "output_tokens": 456,
+        "total_tokens": 10591,
+        "cost_usd": 0.0142956,
+        "calls": 2,
+        "models": [
+          "gpt-4.1-mini-2025-04-14",
+          "gpt-5.4-mini-2026-03-17"
+        ],
+        "providers": [
+          "openai"
+        ]
+      },
+      "reply": "For this patient, the most important cardiometabolic findings for future risk and prognosis are:\n\n- **Type 2 diabetes mellitus with fair control**: HbA1c is **7.2%**, which is above the stated target of **<7.0%** and is documented as raising risk for **microvascular complications if not optimized**. This is the main long-term prognostic issue because glycemic control drives future vascular risk. [S1][S2]\n- **Overweight status**: BMI is **28.5 kg/m\u00b2**, and the record explicitly states this is **contributing to cardiometabolic risk**. [S1][S3]\n- **Hypertension, currently stable**: Blood pressure is described as **stable** with **no evidence of target-organ damage**, which is favorable prognostically, but it remains an active cardiometabolic risk factor. Recorded BPs were **132/82**, **128/78**, and **130/80 mmHg**, trending toward goal. [S1][S2]\n- **Past hyperlipidemia**: It is documented as a **resolved condition** with lipid levels **within acceptable ranges** after dietary changes and statin therapy, which is reassuring for prognosis. [S3]\n\nAdditional context: the plan emphasizes continued **metformin 500 mg twice daily**, **lisinopril 10 mg daily**, diet/exercise intensification, weight reduction, and repeat **A1C and CMP in 3 months**. [S1][S4] If you want, I can also turn this into a brief risk-prioritized problem list."
+    },
+    {
+      "case_id": 16,
+      "label": "complex_plan_prioritization",
+      "question": "For patient MRN 250813000000794, what were the prioritized interventions in the diabetes management plan and what triggered them?",
+      "is_complex": true,
+      "score": 4,
+      "max_score": 4,
+      "min_groups": 3,
+      "base_ok": true,
+      "model_ok": false,
+      "passed": false,
+      "latency_s": 34.26,
+      "usage": {
+        "input_tokens": 9723,
+        "output_tokens": 430,
+        "total_tokens": 10153,
+        "cost_usd": 0.003118,
+        "calls": 2,
+        "models": [
+          "gpt-4.1-mini-2025-04-14",
+          "gpt-4.1-mini-2025-04-14"
+        ],
+        "providers": [
+          "openai"
+        ]
+      },
+      "reply": "For patient MRN 250813000000794, the prioritized interventions in the diabetes management plan were triggered by suboptimal glycemic control, with an HbA1c of 7.2%, which is above the target of <7.0%. This indicated the need for ongoing optimization of diabetes management.\n\nKey prioritized interventions included:\n- Continuation of Metformin 500 mg twice daily.\n- Referral to a nutritionist for culturally appropriate low-carb South Asian meal planning, addressing dietary patterns contributing to suboptimal control.\n- Increasing exercise to 150 minutes per week.\n- Weekly weight monitoring targeting a 5\u201310% weight reduction with behavioral support.\n- Reinforcement of foot care education to prevent complications.\n- Consideration of adding an SGLT2 inhibitor if HbA1c remains above 7.0%.\n- Scheduled endocrinology consultation for further management.\n- Follow-up labs including A1C and comprehensive metabolic panel in 3 months.\n- Patient instructed to upload glucose logs via the portal for ongoing monitoring.\n\nThese interventions were prompted by the assessment of suboptimal glycemic control related to diet and activity levels, with a BMI of 28.5 kg/m\u00b2 contributing to lifestyle-related risks. The patient reported improved dietary adherence but unchanged exercise levels (3\u20134 walks/week). The plan emphasized culturally tailored dietary modifications and exercise reinforcement to improve glycemic outcomes [S2][S3][S5].\n\nFollow-up was planned in 3 months or sooner if symptoms worsened, with education on warning signs and foot care to prevent diabetic complications [S3]."
+    }
+  ]
+}

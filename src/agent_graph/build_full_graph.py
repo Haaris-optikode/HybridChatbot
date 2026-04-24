@@ -68,9 +68,10 @@ def _make_llm(model_name: str, timeout: int = 60, max_tokens: int = None, thinki
         api_key=os.getenv("OPENAI_API_KEY"),
         request_timeout=timeout,
         max_retries=2,
+        stream_usage=True,
     )
     if _is_reasoning_model(model_name):
-        kwargs["max_completion_tokens"] = 16384
+        kwargs["max_completion_tokens"] = max_tokens or 16384
     else:
         kwargs["temperature"] = TOOLS_CFG.primary_agent_llm_temperature
         if max_tokens:
@@ -211,8 +212,7 @@ def build_graph(thinking_mode: bool = False):
         synth_model = os.getenv("MEDGRAPH_THINKING_MODEL_OVERRIDE", "").strip() or getattr(
             TOOLS_CFG, "primary_agent_thinking_llm", "gemini-2.5-pro"
         )
-        # GPT-4.1 is a non-reasoning model (no "reasoning effort" knob). In
-        # practice, "deep thinking mode" here is prompt + higher accuracy
+        # Deep thinking mode uses a higher-capability model and prompt guidance.
         thinking_max_out = int(os.getenv("MEDGRAPH_THINKING_MAX_OUTPUT_TOKENS", "4096"))
         synth_llm = _make_llm(synth_model, timeout=180, max_tokens=thinking_max_out, thinking_budget=8192)
         logger.info("Router LLM: %s (timeout=20s)", router_model)
@@ -356,7 +356,7 @@ def build_graph(thinking_mode: bool = False):
     ))
 
     _OPENAI_THINKING_HINT = _SysMsg(content=(
-        "Deep thinking mode (OpenAI GPT-4.1):\n"
+        "Deep thinking mode (OpenAI GPT-5.4-mini):\n"
         "- Verify every factual claim is directly supported by the provided tool sources.\n"
         "- If a key detail is missing, explicitly state it is not documented in the retrieved context.\n"
         "- If multiple retrieved sources disagree, report the discrepancy rather than averaging.\n"

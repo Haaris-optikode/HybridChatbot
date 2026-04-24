@@ -705,6 +705,11 @@
             font-weight: 500;
         }
 
+        .msg-content.streaming {
+            white-space: pre-wrap;
+            word-break: break-word;
+        }
+
         .message.bot .msg-content {
             background: var(--bg-secondary);
             border: 1px solid var(--border-color);
@@ -1797,7 +1802,7 @@
                                 </button>
                                 <div class="tooltip">
                                     Deep Thinking Mode
-                                    <span class="tooltip-desc">Activates advanced reasoning with GPT-4.1 (OpenAI) or Gemini-2.5-Pro (Gemini)</span>
+                                    <span class="tooltip-desc">Activates advanced reasoning with GPT-5.4-mini (OpenAI) or Gemini-2.5-Pro (Gemini)</span>
                                 </div>
                             </div>
                             <button class="control-btn provider-btn openai" id="providerBtn" onclick="toggleProvider()" title="Switch LLM provider">OPENAI</button>
@@ -2002,7 +2007,7 @@
         const MODEL_CONFIG = {
             openai: {
                 standard: 'gpt-4.1-mini',
-                thinking: 'gpt-4.1'
+                thinking: 'gpt-5.4-mini'
             },
             google: {
                 standard: 'gemini-2.5-flash',
@@ -2473,7 +2478,10 @@
         function finalizeStreamingMessage(row, fullContent, latencyMs, usage = null) {
             const body = row.querySelector('.msg-body');
             const bubble = row.querySelector('.msg-content');
-            if (bubble) bubble.classList.remove('streaming');
+            if (bubble) {
+                bubble.classList.remove('streaming');
+                bubble.innerHTML = renderMarkdown(fullContent);
+            }
             row.dataset.botContent = fullContent;
             let metaHtml = '';
             if (latencyMs > 0) {
@@ -2591,7 +2599,7 @@
                                 }
                                 fullContent += payload.content;
                                 const bubble = messageRow.querySelector('.msg-content');
-                                bubble.innerHTML = renderMarkdown(fullContent);
+                                bubble.textContent = fullContent;
                                 scrollToBottom();
                             } else if (payload.type === 'done') {
                                 sessionId = payload.session_id;
@@ -2878,7 +2886,7 @@
         // Tool selection
         const TOOL_LABELS = { auto: 'Auto', vector_db: 'Clinical Notes', web_search: 'Web Search', summarize: 'Summarize' };
 
-        // Toggle thinking mode - switches to advanced models (GPT-4.1 / Gemini-2.5-Pro)
+        // Toggle thinking mode - switches to advanced models (GPT-5.4-mini / Gemini-2.5-Pro)
         function toggleThinking() {
             thinkingMode = !thinkingMode;
             document.getElementById('thinkingBtn').classList.toggle('active', thinkingMode);

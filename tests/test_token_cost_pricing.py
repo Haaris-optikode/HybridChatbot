@@ -55,6 +55,12 @@ def test_longest_prefix_match_prefers_gpt41_mini_over_gpt41():
     assert float(price.get("output_per_1m", -1)) == 1.60
 
 
+def test_gpt54_mini_pricing_entry_present():
+    price = _price_for_model("gpt-5.4-mini", PRICING_TABLE)
+    assert float(price.get("input_per_1m", -1)) == 2.0
+    assert float(price.get("output_per_1m", -1)) == 8.0
+
+
 def test_extract_usage_reads_cached_tokens_from_openai_shape():
     class _Resp:
         llm_output = {
@@ -73,3 +79,29 @@ def test_extract_usage_reads_cached_tokens_from_openai_shape():
     assert usage["output_tokens"] == 300
     assert usage["total_tokens"] == 1500
     assert usage["cached_input_tokens"] == 500
+
+
+def test_extract_usage_reads_nested_response_metadata_token_usage_shape():
+    class _Message:
+        usage_metadata = {}
+        response_metadata = {
+            "model_name": "gpt-4.1-mini-2025-04-14",
+            "token_usage": {
+                "prompt_tokens": 2575,
+                "completion_tokens": 21,
+                "total_tokens": 2596,
+            },
+        }
+
+    class _Generation:
+        message = _Message()
+
+    class _Resp:
+        llm_output = {"model_name": "gpt-4.1-mini-2025-04-14"}
+        generations = [[_Generation()]]
+
+    usage = _extract_usage_from_response(_Resp())
+    assert usage is not None
+    assert usage["input_tokens"] == 2575
+    assert usage["output_tokens"] == 21
+    assert usage["total_tokens"] == 2596

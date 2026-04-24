@@ -1,0 +1,447 @@
+PATIENT MEDICAL RECORD
+1 PATIENT IDENTIFICATION
+Patient ID: 123456
+MRN: 250813000000794
+2 PATIENT DEMOGRAPHICS
+Field Value
+Age 45 years
+Gender Male
+Race Asian
+Ethnicity South Asian
+Height 5’8" (172.7 cm)
+Weight 200 lbs (90.7 kg)
+Blood Group O Positive
+3 APPOINTMENT HISTORY
+Date Time Type Status Notes
+01/10/2025 11:00-11:20
+AMHypertension
+follow-upCompleted BP stable
+02/15/2025 3:00-3:30 PM Eye exam Completed No diabetic retinopathy
+04/20/2025 09:30-10:00
+AMWellness
+checkCompleted Vaccines updated
+05/10/2025 11:30-12:00
+PMPodiatry
+consultCompleted Foot care education
+06/05/2025 1:00-1:30 PM Dietary
+consultCompleted Low-carb plan
+07/15/2025 10:00-10:30
+AMDiabetes
+follow-upCompleted Labs reviewed
+08/10/2025 09:00-09:15
+AMA1C follow-up Completed Diet tweaks
+09/05/2025 2:00-2:45 PM Endocrinology
+referralScheduled Initial consult
+Notes: No no-shows/cancellations past 2 years; wife coordinates logistics.
+4 ENCOUNTER DETAILS
+Date Type Setting Focus Additional Notes
+01/10/2025 Hypertension
+follow-upOffice
+visitBP
+monitoringRoutine care
+management
+1
+Date Type Setting Focus Additional Notes
+02/15/2025 Ophthalmic
+examOffice
+visitRetinopathy
+screeningAnnual diabetic eye
+surveillance
+04/20/2025 Wellness exam Office
+visitFull
+physicalPreventive care and
+immunization updates
+05/10/2025 Podiatry
+assessmentOffice
+visitNeuropathy
+preventionDiabetic foot care
+education and
+assessment
+06/05/2025 Dietary review Office
+visitMeal
+planningNutritional counseling
+for diabetes
+management
+07/15/2025 Diabetes
+managementOffice
+visitGlucose logs
+reviewedMedication adherence
+assessment
+08/10/2025 A1C review Office
+visitDietary
+counselingGlycemic control
+optimization
+Notes: No ER visits/hospitalizations past 18 months; all outpatient care main-
+tained with excellent continuity.
+5 ALLERGIES
+5.1 Penicillin (Drug Allergy)
+•Severity: Severe
+•Status: Active
+•Onset Date: 05/01/2010 (age 10)
+•Reactions: Anaphylaxis; hives; facial/lip swelling; shortness of breath
+•Management: Carries epinephrine auto-injector and medical alert bracelet.
+Avoid beta-lactams. Alternatives include macrolides or cephalosporins if no
+cross-reactivity
+•Last Reviewed: 08/10/2025
+Additional Notes: No food allergies, environmental allergies, or latex allergies
+documented in current record.
+6 CURRENT DIAGNOSES
+6.1 Active Conditions
+6.1.1 1. Type 2 Diabetes Mellitus (E11.9)
+•Status: Active
+•Diagnosis Date: 06/01/2020
+2
+•Clinical Notes: Management includes Metformin therapy, dietary modifica-
+tions, and exercise program with current HbA1c (A1C) of 7.2% indicating fair
+glycemic control.
+6.1.2 2. Essential Hypertension (I10)
+•Status: Active
+•Diagnosis Date: 03/01/2022
+•Clinical Notes: Management includes ACE inhibitor therapy (Lisinopril) and
+sodium restriction with stable blood pressure control achieved.
+6.2 Resolved Conditions
+6.2.1 1. Prediabetes (R73.03)
+•Status: Problem Resolved
+•Duration: 01/2018 - 06/2020
+•Resolution: Successfully managed through lifestyle interventions and weight
+management.
+6.2.2 2. Hyperlipidemia (E78.5)
+•Status: Problem Resolved
+•Duration: 03/2018 - 12/2020
+•Resolution: Achieved through dietary changes and statin therapy with current
+lipid levels within acceptable ranges.
+7 CURRENT MEDICATIONS
+7.1 Metformin 500 mg Tablet
+•Dosage: 500 mg
+•Frequency: Twice daily with meals
+•Route: Oral
+•Start Date: 06/01/2020
+•Status: Ongoing
+•Notes: Well-tolerated with no gastrointestinal side effects or lactic acidosis risk
+factors identified. Indication: Type 2 diabetes mellitus management.
+7.2 Lisinopril 10 mg Tablet
+•Dosage: 10 mg
+•Frequency: Once daily (AM)
+3
+•Route: Oral
+•Start Date: 03/15/2022
+•Status: Ongoing
+•Notes: Well-tolerated; no cough or angioedema reported. Creatinine 0.9 mg/dL
+and potassium 4.2 mEq/L within normal limits. Indication: Essential hyperten-
+sion management. Started 03/15/2022, initiated after hypertension diagnosis
+(03/01/2022).
+7.3 Discontinued Medications
+7.3.1 Atorvastatin 10 mg Tablet
+•Duration: 03/2018 - 12/2020
+•Reason for Discontinuation: Resolved hyperlipidemia and achievement of
+lipid targets
+Additional Notes: Refills: 90-day supply of Metformin and Lisinopril most re-
+cently issued 08/10/2025. Atorvastatin discontinued 12/2020 — no active refills.
+Adherence: High medication compliance supported by wife’s pill organization
+and monitoring system.
+8 PROBLEM LIST
+ICD Code &
+DescriptionSeverity Status Date Primary Clinical Notes
+E11.9 - Type 2
+diabetes mellitusModerate Active 06/01/2020 Yes Current status shows
+fair glycemic control
+with HbA1c 7.2%
+above target of <7.0%,
+requiring ongoing
+management
+optimization.
+I10 - Essential
+(primary)
+hypertensionMild-
+ModerateActive 03/01/2022 No Current status shows
+stable control with no
+evidence of target
+organ damage.
+E66.9 -
+OverweightMild Active 06/01/2020 No BMI 28.5 kg/m ²
+contributing to
+lifestyle-related
+health risks and
+suboptimal diabetes
+management.
+4
+ICD Code &
+DescriptionSeverity Status Date Primary Clinical Notes
+R73.03 -
+PrediabetesMild Problem
+Resolved01/2018-
+06/2020No Previously managed
+from 2018–2020
+through successful
+lifestyle
+modifications.
+E78.5 -
+HyperlipidemiaMild Problem
+Resolved03/2018-
+12/2020No Previously managed
+through dietary
+interventions and
+statin therapy.
+9 PAST MEDICAL HISTORY
+9.1 Resolved Conditions
+9.1.1 Prediabetes (R73.03)
+•Duration: 01/2018 - 06/2020
+•Resolution: Through lifestyle changes including dietary modifications and in-
+creased physical activity
+9.1.2 Hyperlipidemia (E78.5)
+•Duration: 03/2018 - 12/2020
+•Resolution: Through combination of dietary changes and statin therapy
+9.1.3 Chickenpox (B01)
+•Occurrence: 1987 (age 7)
+•Status: Childhood illness with complete resolution and no sequelae
+9.1.4 Mild Asthma (J45.9)
+•Duration: 1988 (age 10) - 1995
+•Status: Childhood asthma with resolution by adolescence; no current respira-
+tory deficits
+Additional Notes: Immunizations are up-to-date including tetanus booster in
+2020, annual influenza vaccines, and complete COVID-19 vaccination series. Pre-
+ventive screenings include PSA testing and colonoscopy performed in 2023 (nor-
+mal), and biannual dental care without significant pathology.
+10 PAST SURGICAL HISTORY
+10.1 Appendectomy (04/20/2015)
+•Surgeon: Dr . Sarah Johnson, General Surgery
+5
+•Approach: Laparoscopic
+•Indication: Acute appendicitis
+•Complications: None
+•Hospital Stay: 2 days
+•Outcome: Uncomplicated postoperative course and complete recovery
+10.2 Skin Biopsy (03/10/2017)
+•Surgeon: Dr . Michael Chen, Dermatology
+•Procedure: Excision of suspicious lesion on left shoulder
+•Pathology: Benign
+•Complications: None
+•Follow-up: No recurrence
+11 FAMILY HISTORY
+Relationship Age Status Health Conditions Additional Notes
+Father 68 Deceased Type 2 diabetes
+mellitus (E11.9);
+myocardial
+infarctionDiabetes onset at
+age 50; died from
+MI related to
+diabetic
+cardiovascular
+disease
+Mother 70 Alive None significant Generally healthy
+with regular
+medical care
+Brother 43 Alive Prediabetes
+(R73.03)Diagnosed 2023;
+currently managed
+with lifestyle
+modifications and
+monitoring
+Sister 38 Alive Migraine
+headachesEpisodic migraines,
+no chronic
+conditions
+Additional Notes: No immediate family history of cancers, autoimmune dis-
+ease, or neurological disorders documented.
+12 SOCIAL HISTORY
+12.1 Lifestyle Factors
+•Smoking Status: Never smoker; no history of tobacco use
+6
+•Alcohol Consumption: 1–2 beers per week in social settings; no evidence of
+problematic drinking
+•Substance Use: No illicit drugs
+12.2 Living Situation
+•Residence: Suburban home with wife and two children (son 12, daughter 8)
+•Housing: Stable suburban home
+•Support System: Strong family/community support; no depression/anxiety re-
+ported
+12.3 Diet and Exercise
+•Diet: Traditional South Asian cuisine (high carbohydrate) but transitioning to
+low-carb alternatives with nutritionist guidance
+•Exercise: Walking 30 minutes, 3–4 times weekly; goals to increase to 150 min-
+utes/week via hikes, yoga, standing desk
+12.4 Work and Community
+•Employment: Software engineer , full-time, employer-provided health insur-
+ance
+•Community Involvement: Volunteers at mosque; mentors tech professionals
+•Hobbies: Gardening, volunteer work, mentoring
+12.5 Mental Health
+•Status: No screening indicators for depression or anxiety
+13 VITAL SIGNS HISTORY
+OnJuly 15, 2025 at 10:00 AM , the patient’s blood pressure was 130/80 mmHg ,
+temperature 98.6 °F, heart rate 80 bpm , respiratory rate 16/min , oxygen satura-
+tion 98% , body mass index (BMI) 28.5 kg/m2, and body surface area (BSA) 2.1.
+OnApril 20, 2025 at 09:30 AM , the recorded vital signs included a blood pres-
+sure of 128/78 mmHg , temperature 98.7 °F, heart rate 78 bpm , respiratory rate
+15/min , oxygen saturation 99% , BMI 28.6 , and BSA 2.1.
+OnJanuary 10, 2025 at 11:00 AM , the patient’s blood pressure was 132/82 mmHg ,
+temperature 98.5 °F, heart rate 79 bpm , respiratory rate 16/min , oxygen satura-
+tion 97% , BMI 28.5 , and BSA 2.1.
+Notes: All vital signs demonstrate stable cardiovascular parameters, with blood
+pressure trending toward goal ranges and otherwise normal respiratory and metabolic
+indicators.
+7
+Notes: All vital signs demonstrate stable cardiovascular parameters with blood pressure trend-
+ing toward goal ranges and otherwise normal respiratory and metabolic indicators.
+13 LABORATORY RESULTS
+13.1 Recent Labs (07/10/2025)
+Test Value Normal Range Status
+HbA1c (A1C) 7.2% <7.0% (target) Above
+target
+Glucose (fasting) 115 mg/dL 70–99 mg/dL Elevated
+Creatinine 0.9 mg/dL 0.7–1.3 mg/dL Normal
+eGFR >90
+mL/min/1.73
+m²>90 Normal
+Sodium 138 mEq/L 136–145 Normal
+Potassium 4.2 mEq/L 3.5–5.0 Normal
+ALT 25 U/L 7–40 Normal
+AST 22 U/L 10–40 Normal
+Total Cholesterol 180 mg/dL <200 Desirable
+HDL 50 mg/dL >40 (male) Normal
+LDL 110 mg/dL <100 Slightly
+elevated
+Triglycerides 150 mg/dL <150 Upper
+normal
+13.2 Historical Labs
+•01/2025: Total Cholesterol 175 mg/dL
+•04/2025: Fasting Glucose 120 mg/dL
+•06/2025: TSH 2.5 mIU/L
+•06/2025: Free T4 1.2 ng/dL
+14 RECENT ORDERS
+Date Test Preparation Billing Results Access
+07/01/2025 Comprehensive
+Metabolic Panel8-hour fasting Insurance Patient portal
+08/01/2025 Hemoglobin A1C No preparation Insurance Patient portal
+01/2025 Lipid Panel No fasting Insurance Patient portal
+04/2025 Glucose check No preparation Insurance Patient portal
+06/2025 Thyroid panel No preparation Insurance Patient portal
+02/2025 Urine
+microalbuminNo preparation Insurance Patient portal
+05/2025 Complete Blood
+CountNo preparation Insurance Patient portal
+Notes: All laboratory services billed to insurance with results communicated via the patient
+portal.
+8
+15 CARE TEAM
+15.1 Patient Care Givers
+•Primary: Wife (Aisha) - Comprehensive support including medication management, dietary
+planning/preparation, appointment coordination, and glucose monitoring assistance
+•Secondary: Sister-in-law - Childcare support during medical appointments and emergency
+backup
+Additional Notes: Both caregivers educated about diabetes management, emergency proce-
+dures, and medication administration protocols.
+15.2 Patient Care Providers
+Specialty Provider Frequency Role
+Primary Care Internal Medicine
+physicianQuarterly Diabetes visits and
+comprehensive medical
+management
+Endocrinology Specialist Biannual Specialized diabetes
+management and
+medication
+optimization
+Nutrition Registered
+DietitianOngoing since
+06/2025Nutritional counseling
+for culturally
+appropriate low-carb
+meal planning
+Cardiology Cardiologist As-needed Consultation
+performed in 2022 for
+cardiovascular risk
+assessment
+16 PROVIDER NOTES
+16.1 Diabetes Follow-up Visit (07/15/2025, 10:00-10:30 AM)
+Encounter: Diabetes follow-up, office visit, Internal Medicine
+Signed: 07/15/2025, 11:00 AM, electronic signature, no addendums required
+16.1.1 Subjective
+Chief Complaint: Routine diabetes check.
+History of Present Illness: 45-year-old male software engineer presents for quarterly diabetes
+follow-up reporting stable overall health with intermittent fatigue after prolonged workdays.
+Home glucose monitoring shows fasting levels 110–140 mg/dL with post-prandial readings to 180
+mg/dL after high-carbohydrate meals. No hypoglycemia, polyuria, polydipsia, vision changes, or
+peripheral neuropathy symptoms reported. Mild foot discomfort with prolonged standing.
+Current Management:
+•Diet: Traditional South Asian (high carbohydrate) with partial adherence to recommended
+low-carb plan
+•Exercise: Walking 30 minutes 3–4 times/week
+•Medications: Metformin 500 mg twice daily and Lisinopril 10 mg once daily with good toler-
+ance
+9
+•Social history: Non-smoker , 1–2 beers weekly, no illicit drugs
+•Support: Wife provides meal prep and glucose monitoring support
+•Communication: Patient prefers email communication for results and follow-up
+•Motivation: Strong motivation to avoid cardiovascular complications seen in father
+Review of Systems: Negative for chest pain, shortness of breath, GI complaints, or focal neuro-
+logical deficits.
+16.1.2 Objective
+Vital Signs: BP 130/80 mmHg (R arm, seated), HR 80 bpm regular , RR 16/min, Temp 98.6 °F, BMI
+28.5 kg/m ², SpO2 98% on room air , Waist 38 inches
+Physical Examination:
+•General: Alert, no acute distress
+•HEENT: Normal; fundoscopic exam shows no diabetic retinopathy
+•Neck: Supple, no thyromegaly or lymphadenopathy
+•Chest: Clear bilaterally; cardiac rhythm regular , no murmurs
+•Abdomen: Soft, non-tender; normal bowel sounds
+•Extremities: Warm, no edema; normal sensation to light touch and vibration
+•Neurological: Intact; DTRs preserved; gait normal
+Laboratory Results (07/10/2025): HbA1c 7.2%, fasting glucose 115 mg/dL, CMP within normal
+limits, lipid panel: total cholesterol 180 mg/dL, HDL 50 mg/dL, LDL 110 mg/dL, triglycerides 150
+mg/dL.
+Allergies: Penicillin — severe anaphylaxis reaction reviewed and confirmed.
+Current Medications: Metformin 500 mg twice daily and Lisinopril 10 mg once daily — excellent
+adherence.
+16.1.3 Assessment
+Priority Diagnosis ICD Code Details
+1 Type 2 Diabetes
+MellitusE11.9 Fair glycemic control; HbA1c
+7.2% (> target <7.0%) — risk
+of microvascular
+complications if not
+optimized.
+2 Essential
+HypertensionI10 Stable control; no evidence of
+target organ damage.
+3 Overweight E66.9 BMI 28.5 kg/m ²contributing
+to cardiometabolic risk.
+16.1.4 Plan
+Diabetes Management:
+•Continue Metformin 500 mg twice daily
+•Refer to nutritionist for culturally appropriate low-carb South Asian meal planning
+•Increase exercise to 150 minutes/week
+•A1C and CMP in 3 months
+10
+•Consider SGLT2 inhibitor if A1C remains >7.0%
+•Endocrinology consult scheduled 09/05/2025
+•Reinforce foot care education
+Hypertension Management:
+•Continue current Lisinopril therapy and home blood pressure monitoring
+Lifestyle Interventions:
+•Target 5–10% weight reduction with weekly weight monitoring and behavioral support
+Preventive Care:
+•Influenza vaccination (September 2025)
+•Annual ophthalmologic exam (October 2025)
+Follow-up: Patient to upload glucose logs via portal; will be contacted by email with results.
+Follow up in 3 months or sooner if symptoms worsen.
+16.2 A1C Follow-up (08/10/2025, 09:00–09:15 AM)
+Subjective: Improved dietary adherence with reduced rice consumption and increased vegeta-
+bles. Exercise unchanged at 3–4 walks/week. No new symptoms.
+Objective: BP 128/78 mmHg, HR 78 bpm, RR 15/min, Temp 98.7 °F, BMI 28.5 kg/m ². HbA1c 7.2%
+(unchanged). CMP normal.
+Assessment: Suboptimal glycemic control related to diet and activity levels.
+Plan: Reinforce diet and exercise modifications; implement weekly weight monitoring; follow
+up in 3 months.
+Signed: 08/10/2025, 09:30 AM, electronic signature.
+16.3 Dietary Consultation (06/05/2025, 1:00–1:30 PM)
+Subjective: Patient eager to refine dietary habits; difficulty adapting low-carb options to cultural
+foods; reports improved energy with dietary changes.
+Objective: BMI 28.6 kg/m ²; otherwise normal exam.
+Assessment: Dietary patterns contributing to suboptimal diabetes control; need culturally ap-
+propriate adaptations.
+Plan: Develop comprehensive low-carb South Asian meal plan (cauliflower rice alternatives, ap-
+propriate lentil preparations) with a grocery list; follow up in 3 months.
+Signed: 06/05/2025, 2:00 PM electronic signature.
+Document generated: August 26, 2025
+Patient ID: 123456 | MRN: 250813000000794
+11
