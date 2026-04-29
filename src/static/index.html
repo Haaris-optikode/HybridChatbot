@@ -769,6 +769,27 @@
             margin-top: 8px;
         }
 
+        /* Phase 2.2 — Grounding warning banner */
+        .grounding-warning {
+            display: flex;
+            align-items: flex-start;
+            gap: 8px;
+            margin-top: 10px;
+            padding: 10px 14px;
+            background: var(--amber-muted);
+            border: 1px solid var(--amber);
+            border-radius: var(--radius-sm);
+            font-size: 12px;
+            color: var(--amber);
+            font-weight: 600;
+            line-height: 1.5;
+        }
+        .grounding-warning-icon {
+            flex-shrink: 0;
+            font-size: 14px;
+            margin-top: 1px;
+        }
+
         .feedback-btn {
     display: inline-flex;
     align-items: center;
@@ -1589,44 +1610,104 @@
             .welcome-title { font-size: 22px; }
             .metrics-grid { grid-template-columns: 1fr; }
         }
+
+        /* ══════════════════════════════════════════════════════════
+           PHASE 3 — DOCUMENT SCOPE PANEL
+           ══════════════════════════════════════════════════════════ */
+        .scope-section { padding: 0 16px 12px; border-top: 1px solid var(--border-color); flex-shrink: 0; }
+        .scope-toggle { display: flex; align-items: center; justify-content: space-between; padding: 12px 0 8px; cursor: pointer; user-select: none; }
+        .scope-toggle-label { display: flex; align-items: center; gap: 8px; font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 1px; color: var(--text-muted); }
+        .scope-active-dot { display: none; width: 7px; height: 7px; border-radius: 50%; background: var(--accent); box-shadow: 0 0 0 2px var(--accent-muted); flex-shrink: 0; }
+        .scope-active-dot.visible { display: inline-block; }
+        .scope-toggle-arrow { font-size: 10px; color: var(--text-muted); transition: transform 0.2s; }
+        .scope-toggle-arrow.open { transform: rotate(180deg); }
+        .scope-body { display: none; }
+        .scope-body.open { display: block; }
+        .scope-active-badge { display: none; align-items: center; gap: 6px; padding: 6px 10px; border-radius: var(--radius-sm); background: var(--accent-muted); border: 1px solid var(--accent); font-size: 11px; color: var(--accent); font-weight: 700; margin-bottom: 10px; }
+        .scope-active-badge.visible { display: flex; }
+        .scope-field { margin-bottom: 10px; }
+        .scope-field-label { font-size: 11px; font-weight: 700; color: var(--text-secondary); margin-bottom: 5px; text-transform: uppercase; letter-spacing: 0.5px; display: block; }
+        .scope-input { width: 100%; padding: 8px 10px; background: var(--bg-primary); border: 1px solid var(--border-color); border-radius: var(--radius-sm); color: var(--text-primary); font-size: 12px; font-family: var(--font-mono); outline: none; transition: border-color 0.2s; }
+        .scope-input:focus { border-color: var(--accent); }
+        .scope-docs-label { font-size: 11px; font-weight: 700; color: var(--text-secondary); text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 6px; display: flex; align-items: center; justify-content: space-between; }
+        .scope-docs-refresh { background: none; border: none; color: var(--text-muted); cursor: pointer; font-size: 14px; padding: 2px 4px; transition: color 0.2s; line-height: 1; }
+        .scope-docs-refresh:hover { color: var(--accent); }
+        .scope-doc-list { border: 1px solid var(--border-color); border-radius: var(--radius-sm); background: var(--bg-primary); max-height: 124px; overflow-y: auto; }
+        .scope-doc-list::-webkit-scrollbar { width: 4px; }
+        .scope-doc-list::-webkit-scrollbar-thumb { background: var(--border-color); border-radius: 4px; }
+        .scope-doc-item { display: flex; align-items: center; gap: 8px; padding: 7px 10px; cursor: pointer; transition: background 0.15s; border-bottom: 1px solid var(--border-subtle); }
+        .scope-doc-item:last-child { border-bottom: none; }
+        .scope-doc-item:hover { background: var(--bg-tertiary); }
+        .scope-doc-item.checked { background: var(--accent-muted); }
+        .scope-doc-cb { width: 14px; height: 14px; accent-color: var(--accent); flex-shrink: 0; cursor: pointer; }
+        .scope-doc-info { flex: 1; min-width: 0; }
+        .scope-doc-name { font-size: 12px; font-weight: 600; color: var(--text-primary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+        .scope-doc-meta { font-size: 10px; color: var(--text-muted); font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+        .scope-doc-status { font-size: 10px; padding: 1px 6px; border-radius: 8px; font-weight: 700; flex-shrink: 0; }
+        .scope-doc-status.ready { background: var(--accent-muted); color: var(--accent); }
+        .scope-doc-status.processing { background: var(--amber-muted); color: var(--amber); }
+        .scope-doc-status.error { background: var(--red-muted); color: var(--red); }
+        .scope-doc-status.duplicate { background: var(--blue-muted); color: var(--blue); }
+        .scope-doc-empty { padding: 16px; text-align: center; font-size: 12px; color: var(--text-muted); font-weight: 500; }
+        .scope-actions { display: flex; gap: 8px; margin-top: 10px; }
+        .scope-apply-btn { flex: 1; padding: 9px; border: none; border-radius: var(--radius-sm); background: var(--accent); color: white; font-size: 12px; font-weight: 700; cursor: pointer; font-family: inherit; transition: all 0.2s; }
+        .scope-apply-btn:hover { background: var(--accent-hover); }
+        .scope-clear-btn { padding: 9px 12px; border: 1px solid var(--border-color); border-radius: var(--radius-sm); background: transparent; color: var(--text-muted); font-size: 12px; font-weight: 700; cursor: pointer; font-family: inherit; transition: all 0.2s; }
+        .scope-clear-btn:hover { background: var(--red-muted); border-color: var(--red); color: var(--red); }
+
+        /* Batch Ingest Button */
+        .batch-ingest-btn { width: 100%; margin-top: 8px; padding: 9px 12px; border: 1px dashed var(--border-color); border-radius: var(--radius-sm); background: transparent; color: var(--text-muted); font-size: 12px; font-weight: 700; cursor: pointer; display: flex; align-items: center; justify-content: center; gap: 6px; transition: all 0.2s; font-family: inherit; }
+        .batch-ingest-btn:hover { border-color: var(--blue); color: var(--blue); background: var(--blue-muted); border-style: solid; }
+
+        /* Scope indicator row (above chat input) */
+        .scope-indicator-row { display: none; max-width: 850px; margin: 0 auto 8px; gap: 6px; flex-wrap: wrap; align-items: center; }
+        .scope-indicator-row.visible { display: flex; }
+        .scope-indicator-label { font-size: 11px; font-weight: 700; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.5px; }
+        .scope-indicator-pill { display: inline-flex; align-items: center; gap: 4px; padding: 3px 9px; border-radius: 20px; background: var(--accent-muted); border: 1px solid var(--accent); font-size: 11px; font-weight: 700; color: var(--accent); font-family: var(--font-mono); }
+        .scope-indicator-clear { background: none; border: 1px solid var(--border-color); border-radius: var(--radius-sm); color: var(--text-muted); cursor: pointer; padding: 3px 8px; font-size: 11px; font-weight: 700; transition: all 0.2s; font-family: inherit; }
+        .scope-indicator-clear:hover { background: var(--red-muted); border-color: var(--red); color: var(--red); }
+
+        /* ══════════════════════════════════════════════════════════
+           BATCH INGEST MODAL
+           ══════════════════════════════════════════════════════════ */
+        .modal-overlay { position: fixed; inset: 0; z-index: 500; background: rgba(0,0,0,0.65); display: none; align-items: center; justify-content: center; padding: 20px; }
+        .modal-overlay.open { display: flex; animation: fadeIn 0.2s ease; }
+        .modal-card { width: 560px; max-width: 100%; max-height: 88vh; background: var(--bg-secondary); border: 1px solid var(--border-color); border-radius: var(--radius-lg); display: flex; flex-direction: column; box-shadow: var(--shadow); }
+        .modal-header { display: flex; align-items: center; justify-content: space-between; padding: 18px 24px; border-bottom: 1px solid var(--border-color); flex-shrink: 0; }
+        .modal-title { font-size: 15px; font-weight: 800; color: var(--text-primary); }
+        .modal-close { width: 30px; height: 30px; border: 1px solid var(--border-color); border-radius: var(--radius-sm); background: transparent; color: var(--text-muted); cursor: pointer; display: flex; align-items: center; justify-content: center; font-size: 14px; transition: all 0.2s; }
+        .modal-close:hover { background: var(--red-muted); border-color: var(--red); color: var(--red); }
+        .modal-body { flex: 1; overflow-y: auto; padding: 20px 24px; display: flex; flex-direction: column; gap: 16px; }
+        .modal-footer { padding: 14px 24px; border-top: 1px solid var(--border-color); display: flex; gap: 10px; justify-content: flex-end; flex-shrink: 0; }
+        .modal-field label { display: block; font-size: 11px; font-weight: 700; color: var(--text-secondary); margin-bottom: 6px; text-transform: uppercase; letter-spacing: 0.5px; }
+        .modal-field-hint { font-size: 11px; color: var(--text-muted); margin-top: 5px; font-weight: 500; line-height: 1.5; }
+        .modal-field-hint code { font-family: var(--font-mono); background: var(--bg-tertiary); padding: 1px 5px; border-radius: 3px; font-size: 10px; }
+        .modal-textarea { width: 100%; padding: 10px 12px; background: var(--bg-tertiary); border: 1px solid var(--border-color); border-radius: var(--radius-sm); color: var(--text-primary); font-size: 12px; font-family: var(--font-mono); outline: none; resize: vertical; min-height: 160px; transition: border-color 0.2s; }
+        .modal-textarea:focus { border-color: var(--accent); }
+        .modal-file-drop { border: 2px dashed var(--border-color); border-radius: var(--radius); padding: 18px; text-align: center; cursor: pointer; transition: all 0.2s; background: var(--bg-tertiary); }
+        .modal-file-drop:hover, .modal-file-drop.drag-over { border-color: var(--accent); background: var(--accent-muted); }
+        .modal-file-list { margin-top: 8px; display: flex; flex-direction: column; gap: 5px; max-height: 110px; overflow-y: auto; }
+        .modal-file-item { display: flex; align-items: center; gap: 8px; padding: 6px 10px; background: var(--bg-elevated); border: 1px solid var(--border-color); border-radius: var(--radius-sm); font-size: 12px; }
+        .modal-file-item-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; color: var(--text-secondary); }
+        .modal-file-item-size { font-size: 10px; color: var(--text-muted); font-family: var(--font-mono); flex-shrink: 0; }
+        .modal-file-remove { background: none; border: none; color: var(--text-muted); cursor: pointer; font-size: 12px; padding: 2px 4px; }
+        .modal-file-remove:hover { color: var(--red); }
+        .modal-btn { padding: 9px 18px; border-radius: var(--radius-sm); font-size: 13px; font-weight: 700; cursor: pointer; font-family: inherit; transition: all 0.2s; border: 1px solid transparent; }
+        .modal-btn.primary { background: var(--accent); color: white; border-color: var(--accent); }
+        .modal-btn.primary:hover { background: var(--accent-hover); }
+        .modal-btn.primary:disabled { opacity: 0.4; cursor: not-allowed; }
+        .modal-btn.secondary { background: transparent; color: var(--text-secondary); border-color: var(--border-color); }
+        .modal-btn.secondary:hover { background: var(--bg-tertiary); }
+        .ingest-result { padding: 12px; border-radius: var(--radius-sm); font-size: 12px; font-weight: 600; line-height: 1.6; }
+        .ingest-result.success { background: var(--accent-muted); border: 1px solid var(--accent); color: var(--accent); }
+        .ingest-result.error { background: var(--red-muted); border: 1px solid var(--red); color: var(--red); }
     </style>
 </head>
 <body>
-    <!-- Login Overlay -->
-    <div class="login-overlay" id="loginOverlay">
-        <div class="login-card">
-            <div class="login-header">
-                <div class="login-logo">+</div>
-                <div class="login-title">MedGraph AI</div>
-                <div class="login-subtitle">Clinical Intelligence Platform</div>
-            </div>
-            <form onsubmit="handleLogin(event)">
-                <div class="login-field">
-                    <label class="login-label" for="loginUserId">User ID</label>
-                    <input class="login-input" type="text" id="loginUserId" placeholder="e.g. dr.smith" required autocomplete="username">
-                </div>
-                <div class="login-field">
-                    <label class="login-label" for="loginRole">Role</label>
-                    <select class="login-select" id="loginRole">
-                        <option value="clinician">Clinician</option>
-                        <option value="nurse">Nurse</option>
-                        <option value="admin">Admin</option>
-                    </select>
-                </div>
-                <button type="submit" class="login-btn" id="loginBtn">Sign In</button>
-                <div class="login-error" id="loginError"></div>
-            </form>
-            <div class="login-footer">
-                <span class="login-footer-icon">&#9679;</span>
-                HIPAA-Ready &middot; JWT Auth &middot; Audit Logged
-            </div>
-        </div>
-    </div>
-
     <!-- Sidebar Overlay (Mobile) -->
     <div class="sidebar-overlay" id="sidebarOverlay" onclick="closeSidebar()"></div>
 
-    <div class="app" id="appContainer" style="display: none;">
+    <div class="app" id="appContainer">
         <!-- Left Sidebar -->
         <aside class="sidebar" id="sidebar">
             <div class="sidebar-header">
@@ -1661,6 +1742,47 @@
                 </div>
                 <input type="file" id="uploadInput" class="upload-input" accept=".pdf,.docx,.png,.jpg,.jpeg,.tiff,.tif,.bmp" onchange="handleFileSelect(event)">
                 <div class="uploaded-files" id="uploadedFiles"></div>
+                <button class="batch-ingest-btn" onclick="openBatchIngestModal()">
+                    &#128230; EHR Batch Ingest
+                </button>
+            </div>
+
+            <!-- Phase 3: Document Scope Panel -->
+            <div class="scope-section">
+                <div class="scope-toggle" onclick="toggleScopePanel()">
+                    <div class="scope-toggle-label">
+                        <span class="scope-active-dot" id="scopeActiveDot"></span>
+                        &#128451; Document Scope
+                    </div>
+                    <span class="scope-toggle-arrow" id="scopeArrow">&#9660;</span>
+                </div>
+                <div class="scope-body" id="scopeBody">
+                    <div class="scope-active-badge" id="scopeActiveBadge">
+                        <span>&#9679;</span>
+                        <span id="scopeActiveBadgeText">Scope active</span>
+                    </div>
+                    <div class="scope-field">
+                        <span class="scope-field-label">Patient MRN</span>
+                        <input type="text" id="scopeMrn" class="scope-input" placeholder="e.g. MRN-2026-004782" oninput="onScopeInputChange()">
+                    </div>
+                    <div class="scope-field">
+                        <span class="scope-field-label">Patient ID <span style="font-weight:400;text-transform:none;letter-spacing:0;font-size:10px;color:var(--text-muted);">(optional)</span></span>
+                        <input type="text" id="scopePatientId" class="scope-input" placeholder="Optional — if separate from MRN">
+                    </div>
+                    <div class="scope-field">
+                        <div class="scope-docs-label">
+                            <span>Documents</span>
+                            <button class="scope-docs-refresh" onclick="loadDocsForScope()" title="Refresh">&#8634;</button>
+                        </div>
+                        <div class="scope-doc-list" id="scopeDocList">
+                            <div class="scope-doc-empty">Click &#8634; to load documents</div>
+                        </div>
+                    </div>
+                    <div class="scope-actions">
+                        <button class="scope-apply-btn" onclick="applyDocumentScope()">Apply Scope</button>
+                        <button class="scope-clear-btn" onclick="clearDocumentScope()">Clear</button>
+                    </div>
+                </div>
             </div>
 
             <div class="history-section">
@@ -1750,6 +1872,7 @@
                 </div>
 
                 <div class="input-area">
+                    <div class="scope-indicator-row" id="scopeIndicatorRow"></div>
                     <div class="input-row">
                         <div class="input-controls">
                             <div style="position: relative;">
@@ -1953,6 +2076,49 @@
         </div>
     </div>
 
+    <!-- Phase 3: Batch Ingest Modal -->
+    <div class="modal-overlay" id="batchIngestModal" onclick="closeBatchIngestModalOnOverlay(event)">
+        <div class="modal-card">
+            <div class="modal-header">
+                <div class="modal-title">&#128230; EHR Batch Document Ingest</div>
+                <button class="modal-close" onclick="closeBatchIngestModal()">&#10005;</button>
+            </div>
+            <div class="modal-body">
+                <div class="modal-field">
+                    <label>Files</label>
+                    <div class="modal-file-drop" id="batchDropZone" onclick="document.getElementById('batchFileInput').click()">
+                        <div style="font-size:24px;margin-bottom:6px">&#128196;</div>
+                        <div style="font-size:13px;font-weight:600;color:var(--text-secondary)">Drop files or click to browse</div>
+                        <div style="font-size:11px;color:var(--text-muted);margin-top:4px">PDF, DOCX, PNG, JPG, TIFF, BMP &bull; Max 50 MB each</div>
+                    </div>
+                    <input type="file" id="batchFileInput" style="display:none" multiple accept=".pdf,.docx,.png,.jpg,.jpeg,.tiff,.tif,.bmp" onchange="onBatchFilesSelected(event)">
+                    <div class="modal-file-list" id="batchFileList"></div>
+                </div>
+                <div class="modal-field">
+                    <label>Metadata JSON</label>
+                    <textarea class="modal-textarea" id="batchMetadataJson" placeholder='[
+  {
+    "filename": "discharge-note.pdf",
+    "document_id": "doc_001_v1",
+    "patient_mrn": "MRN-2026-004782",
+    "patient_id": "MRN-2026-004782",
+    "document_type": "discharge_summary",
+    "document_date": "2026-04-27",
+    "encounter_id": "enc-001",
+    "source_system": "EHR"
+  }
+]'></textarea>
+                    <div class="modal-field-hint">One JSON object per file. <code>document_id</code> and at least <code>patient_mrn</code> or <code>patient_id</code> are required. <code>filename</code> must match the uploaded file name exactly.</div>
+                </div>
+                <div id="batchIngestResult"></div>
+            </div>
+            <div class="modal-footer">
+                <button class="modal-btn secondary" onclick="closeBatchIngestModal()">Cancel</button>
+                <button class="modal-btn primary" id="batchSubmitBtn" onclick="submitBatchIngest()">&#8679; Submit Ingest</button>
+            </div>
+        </div>
+    </div>
+
     <script>
         // Theme
         function toggleTheme() {
@@ -2002,6 +2168,9 @@
         // Token and cost tracking
         let totalTokens = 0;
         let totalCost = 0;
+
+        // Phase 3: document scope state
+        let activeScope = { mrn: '', patientId: '', docIds: [] };
 
         // Model configurations
         const MODEL_CONFIG = {
@@ -2066,33 +2235,17 @@
             }
         }
 
-        // Auth
-        function getToken() { return localStorage.getItem('medgraph-token'); }
-        function setToken(t) { localStorage.setItem('medgraph-token', t); }
-        function clearToken() { localStorage.removeItem('medgraph-token'); localStorage.removeItem('medgraph-user'); }
-        function getUser() { try { return JSON.parse(localStorage.getItem('medgraph-user') || 'null'); } catch { return null; } }
-        function setUser(u) { localStorage.setItem('medgraph-user', JSON.stringify(u)); }
-
+        // Auth (JWT removed — all endpoints are open)
         function authHeaders() {
-            const h = { 'Content-Type': 'application/json' };
-            const t = getToken();
-            if (t) h['Authorization'] = 'Bearer ' + t;
-            return h;
+            return { 'Content-Type': 'application/json' };
         }
 
         async function authFetch(url, options = {}) {
-            const token = getToken();
             if (!options.headers) options.headers = {};
-            if (token) options.headers['Authorization'] = 'Bearer ' + token;
             if (!options.headers['Content-Type'] && options.method && options.method !== 'GET') {
                 options.headers['Content-Type'] = 'application/json';
             }
-            const resp = await fetch(url, options);
-            if (resp.status === 401) {
-                handleLogout();
-                throw new Error('Session expired');
-            }
-            return resp;
+            return await fetch(url, options);
         }
 
         // Provider toggle - switches between OpenAI and Gemini
@@ -2111,60 +2264,19 @@
             applyProviderUI();
         }
 
-        // Login
-        async function handleLogin(e) {
-            e.preventDefault();
-            const btn = document.getElementById('loginBtn');
-            const errEl = document.getElementById('loginError');
-            const userId = document.getElementById('loginUserId').value.trim();
-            const role = document.getElementById('loginRole').value;
-            if (!userId) { errEl.textContent = 'Please enter a User ID.'; return; }
-            btn.disabled = true;
-            errEl.textContent = '';
-            try {
-                const resp = await fetch('/api/auth/token', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ user_id: userId, role: role })
-                });
-                if (!resp.ok) {
-                    const d = await resp.json().catch(() => ({}));
-                    throw new Error(d.detail || `HTTP ${resp.status}`);
-                }
-                const data = await resp.json();
-                setToken(data.token);
-                setUser({ id: userId, role: role });
-                showApp();
-                loadUploadedDocs();
-            } catch (err) {
-                errEl.textContent = 'Login failed: ' + err.message;
-            } finally {
-                btn.disabled = false;
-            }
-        }
-
         function handleLogout() {
-            clearToken();
             sessionId = null;
-            document.getElementById('appContainer').style.display = 'none';
-            document.getElementById('loginOverlay').classList.remove('hidden');
-            document.getElementById('loginUserId').value = '';
-            document.getElementById('loginError').textContent = '';
+            location.reload();
         }
 
         function showApp() {
-            document.getElementById('loginOverlay').classList.add('hidden');
-            document.getElementById('appContainer').style.display = '';
             applyProviderUI();
             // Initialize model display
             updateActiveModelDisplay();
-            const user = getUser();
-            if (user) {
-                document.getElementById('userCard').classList.add('visible');
-                document.getElementById('userName').textContent = user.id;
-                document.getElementById('userRole').textContent = user.role;
-                document.getElementById('userAvatar').textContent = user.id.charAt(0).toUpperCase();
-            }
+            document.getElementById('userCard').classList.add('visible');
+            document.getElementById('userName').textContent = 'MedGraph AI';
+            document.getElementById('userRole').textContent = 'Clinical System';
+            document.getElementById('userAvatar').textContent = 'M';
             pollHealth();
             setInterval(pollHealth, 30000);
             loadChatHistory();
@@ -2230,9 +2342,8 @@
             await pollHealth();
         }
 
-        (function() {
-            if (getToken()) showApp();
-        })();
+        showApp();
+        loadUploadedDocs();
 
         // DOM refs
         const chatArea = document.getElementById('chatArea');
@@ -2351,7 +2462,7 @@
             return div.innerHTML;
         }
 
-        function addMessage(role, content, latencyMs = null, timeStr = null, usage = null) {
+        function addMessage(role, content, latencyMs = null, timeStr = null, usage = null, groundingWarning = null) {
             welcomeScreen.style.display = 'none';
             messagesContainer.classList.add('visible');
             const row = document.createElement('div');
@@ -2368,6 +2479,10 @@
                 metaHtml += `<span class="msg-pill">&#128187; ${tokens.toLocaleString()} tokens</span>`;
                 metaHtml += `<span class="msg-pill">&#36; $${msgCost.toFixed(6)}</span>`;
             }
+            // Phase 2.2 — grounding warning banner HTML
+            const warnHtml = (role === 'bot' && groundingWarning)
+                ? `<div class="grounding-warning"><span class="grounding-warning-icon">&#9888;</span><span>${groundingWarning}</span></div>`
+                : '';
             let feedbackHtml = '';
             if (role === 'bot') {
                 const idx = botMessageIndex++;
@@ -2395,6 +2510,7 @@
                     </div>
                     <div class="msg-content">${role === 'bot' ? renderMarkdown(content) : escapeHtml(content)}</div>
                     ${metaHtml ? '<div class="msg-meta-row">' + metaHtml + '</div>' : ''}
+                    ${warnHtml}
                     ${feedbackHtml}
                 </div>
             `;
@@ -2475,7 +2591,7 @@
             return row;
         }
 
-        function finalizeStreamingMessage(row, fullContent, latencyMs, usage = null) {
+        function finalizeStreamingMessage(row, fullContent, latencyMs, usage = null, groundingWarning = null) {
             const body = row.querySelector('.msg-body');
             const bubble = row.querySelector('.msg-content');
             if (bubble) {
@@ -2497,6 +2613,13 @@
                 metaDiv.className = 'msg-meta-row';
                 metaDiv.innerHTML = metaHtml;
                 body.appendChild(metaDiv);
+            }
+            // Phase 2.2 — render amber grounding warning banner when present
+            if (groundingWarning) {
+                const warnDiv = document.createElement('div');
+                warnDiv.className = 'grounding-warning';
+                warnDiv.innerHTML = `<span class="grounding-warning-icon">&#9888;</span><span>${groundingWarning}</span>`;
+                body.appendChild(warnDiv);
             }
             const idx = botMessageIndex++;
             const fbDiv = document.createElement('div');
@@ -2556,7 +2679,7 @@
             try {
                 const resp = await fetch('/api/chat/stream', {
                     method: 'POST',
-                    headers: authHeaders(),
+                    headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({
                         message: text,
                         session_id: sessionId,
@@ -2565,19 +2688,20 @@
                         reply_mode: effectiveReplyMode,
                         llm_provider: selectedProvider,
                         // Use the appropriate model based on provider and thinking mode
-                        model: currentModel
+                        model: currentModel,
+                        // Phase 3: document scope
+                        patient_mrn: activeScope.mrn || null,
+                        patient_id: activeScope.patientId || null,
+                        document_ids: activeScope.docIds.length > 0 ? activeScope.docIds : []
                     })
                 });
-                if (resp.status === 401) {
-                    handleLogout();
-                    throw new Error('Unauthorized');
-                }
                 if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
                 const reader = resp.body.getReader();
                 const decoder = new TextDecoder();
                 let fullContent = '';
                 let latencyMs = 0;
                 let usage = null;
+                let groundingWarning = null;
                 let buffer = '';
                 let messageRow = null;
                 while (true) {
@@ -2605,6 +2729,7 @@
                                 sessionId = payload.session_id;
                                 latencyMs = payload.latency_ms;
                                 usage = payload.usage || null;
+                                groundingWarning = payload.grounding_warning || null;
                             } else if (payload.type === 'error') {
                                 hideTyping();
                                 if (!messageRow) messageRow = createStreamingMessage();
@@ -2620,9 +2745,9 @@
                 clearTimeout(safetyTimer);
                 hideTyping();
                 if (!messageRow) {
-                    addMessage('bot', fullContent || 'No response received.', latencyMs, null, usage);
+                    addMessage('bot', fullContent || 'No response received.', latencyMs, null, usage, groundingWarning);
                 } else {
-                    finalizeStreamingMessage(messageRow, fullContent, latencyMs, usage);
+                    finalizeStreamingMessage(messageRow, fullContent, latencyMs, usage, groundingWarning);
                 }
                 if (sessionId) {
                     document.getElementById('sessionLabel').textContent = `Session: ${sessionId.substring(0, 8)}...`;
@@ -2964,10 +3089,9 @@
             const formData = new FormData();
             formData.append('file', file);
             try {
-                const token = getToken();
                 const resp = await fetch('/api/documents/upload', {
                     method: 'POST',
-                    headers: token ? { 'Authorization': 'Bearer ' + token } : {},
+                    headers: {},
                     body: formData,
                 });
                 if (!resp.ok) {
@@ -3030,7 +3154,276 @@
             }
         }
 
-        if (getToken()) loadUploadedDocs();
+        // ── Phase 3: Document Scope ─────────────────────────────────────────────
+
+        function toggleScopePanel() {
+            const body = document.getElementById('scopeBody');
+            const arrow = document.getElementById('scopeArrow');
+            const isOpen = body.classList.toggle('open');
+            arrow.classList.toggle('open', isOpen);
+            if (isOpen) loadDocsForScope();
+        }
+
+        let _scopeInputTimer = null;
+        function onScopeInputChange() {
+            clearTimeout(_scopeInputTimer);
+            _scopeInputTimer = setTimeout(loadDocsForScope, 500);
+        }
+
+        async function loadDocsForScope() {
+            const list = document.getElementById('scopeDocList');
+            if (!list) return;
+            const mrn = (document.getElementById('scopeMrn').value || '').trim().toLowerCase();
+            list.innerHTML = '<div class="scope-doc-empty">Loading...</div>';
+            try {
+                const resp = await authFetch('/api/documents');
+                if (!resp.ok) throw new Error('HTTP ' + resp.status);
+                const data = await resp.json();
+                let docs = data.documents || [];
+                if (mrn) {
+                    docs = docs.filter(d =>
+                        (d.patient_mrn || '').toLowerCase().includes(mrn) ||
+                        (d.patient_id || '').toLowerCase().includes(mrn) ||
+                        (d.document_id || '').toLowerCase().includes(mrn)
+                    );
+                }
+                if (docs.length === 0) {
+                    list.innerHTML = `<div class="scope-doc-empty">${mrn ? 'No documents for this patient.' : 'No documents uploaded yet.'}</div>`;
+                    return;
+                }
+                list.innerHTML = docs.map(doc => {
+                    const isChecked = activeScope.docIds.includes(doc.document_id);
+                    const parts = [doc.document_id, doc.document_type, doc.document_date].filter(Boolean);
+                    const meta = parts.join(' \u00b7 ');
+                    return `
+                        <div class="scope-doc-item${isChecked ? ' checked' : ''}" onclick="toggleScopeDoc('${doc.document_id}', this)">
+                            <input type="checkbox" class="scope-doc-cb" ${isChecked ? 'checked' : ''} onclick="event.stopPropagation(); toggleScopeDoc('${doc.document_id}', this.closest('.scope-doc-item'))">
+                            <div class="scope-doc-info">
+                                <div class="scope-doc-name" title="${escapeHtml(doc.original_filename || doc.document_id)}">${escapeHtml(doc.original_filename || doc.document_id)}</div>
+                                <div class="scope-doc-meta">${escapeHtml(meta)}</div>
+                            </div>
+                            <span class="scope-doc-status ${doc.status}">${doc.status}</span>
+                        </div>`;
+                }).join('');
+            } catch (e) {
+                list.innerHTML = '<div class="scope-doc-empty" style="color:var(--red)">Failed to load documents</div>';
+            }
+        }
+
+        function toggleScopeDoc(docId, itemEl) {
+            const idx = activeScope.docIds.indexOf(docId);
+            const cb = itemEl.querySelector('.scope-doc-cb');
+            if (idx === -1) {
+                activeScope.docIds.push(docId);
+                itemEl.classList.add('checked');
+                if (cb) cb.checked = true;
+            } else {
+                activeScope.docIds.splice(idx, 1);
+                itemEl.classList.remove('checked');
+                if (cb) cb.checked = false;
+            }
+        }
+
+        function applyDocumentScope() {
+            activeScope.mrn = (document.getElementById('scopeMrn').value || '').trim();
+            activeScope.patientId = (document.getElementById('scopePatientId').value || '').trim();
+            updateScopeIndicator();
+            // Collapse the panel
+            const body = document.getElementById('scopeBody');
+            const arrow = document.getElementById('scopeArrow');
+            body.classList.remove('open');
+            arrow.classList.remove('open');
+        }
+
+        function clearDocumentScope() {
+            activeScope = { mrn: '', patientId: '', docIds: [] };
+            const mrnEl = document.getElementById('scopeMrn');
+            const pidEl = document.getElementById('scopePatientId');
+            if (mrnEl) mrnEl.value = '';
+            if (pidEl) pidEl.value = '';
+            document.querySelectorAll('.scope-doc-item.checked').forEach(el => {
+                el.classList.remove('checked');
+                const cb = el.querySelector('.scope-doc-cb');
+                if (cb) cb.checked = false;
+            });
+            updateScopeIndicator();
+        }
+
+        function updateScopeIndicator() {
+            const row = document.getElementById('scopeIndicatorRow');
+            const dot = document.getElementById('scopeActiveDot');
+            const badge = document.getElementById('scopeActiveBadge');
+            const badgeText = document.getElementById('scopeActiveBadgeText');
+            const hasScope = activeScope.mrn || activeScope.patientId || activeScope.docIds.length > 0;
+            if (!hasScope) {
+                if (row) { row.classList.remove('visible'); row.innerHTML = ''; }
+                if (dot) dot.classList.remove('visible');
+                if (badge) badge.classList.remove('visible');
+                return;
+            }
+            let html = '<span class="scope-indicator-label">Scope:</span>';
+            if (activeScope.mrn) {
+                html += `<span class="scope-indicator-pill">&#128101; ${escapeHtml(activeScope.mrn)}</span>`;
+            }
+            if (activeScope.patientId && activeScope.patientId !== activeScope.mrn) {
+                html += `<span class="scope-indicator-pill">&#128273; ${escapeHtml(activeScope.patientId)}</span>`;
+            }
+            if (activeScope.docIds.length > 0) {
+                html += `<span class="scope-indicator-pill">&#128451; ${activeScope.docIds.length} doc${activeScope.docIds.length !== 1 ? 's' : ''}</span>`;
+            }
+            html += `<button class="scope-indicator-clear" onclick="clearDocumentScope()" title="Clear scope">&#10005; Clear</button>`;
+            if (row) { row.innerHTML = html; row.classList.add('visible'); }
+            if (dot) dot.classList.add('visible');
+            if (badge && badgeText) {
+                const parts = [];
+                if (activeScope.mrn) parts.push(activeScope.mrn);
+                if (activeScope.docIds.length) parts.push(`${activeScope.docIds.length} doc(s)`);
+                badgeText.textContent = parts.join(' \u00b7 ') || 'Scope active';
+                badge.classList.add('visible');
+            }
+        }
+
+        // ── Batch Ingest Modal ──────────────────────────────────────────────────
+        let batchFiles = [];
+
+        function openBatchIngestModal() {
+            batchFiles = [];
+            const list = document.getElementById('batchFileList');
+            const meta = document.getElementById('batchMetadataJson');
+            const result = document.getElementById('batchIngestResult');
+            const btn = document.getElementById('batchSubmitBtn');
+            if (list) list.innerHTML = '';
+            if (meta) meta.value = '';
+            if (result) result.innerHTML = '';
+            if (btn) { btn.disabled = false; btn.textContent = '\u2b06 Submit Ingest'; }
+            document.getElementById('batchIngestModal').classList.add('open');
+        }
+
+        function closeBatchIngestModal() {
+            document.getElementById('batchIngestModal').classList.remove('open');
+        }
+
+        function closeBatchIngestModalOnOverlay(e) {
+            if (e.target === e.currentTarget) closeBatchIngestModal();
+        }
+
+        function onBatchFilesSelected(e) {
+            Array.from(e.target.files || []).forEach(f => {
+                if (!batchFiles.find(x => x.name === f.name)) batchFiles.push(f);
+            });
+            e.target.value = '';
+            renderBatchFileList();
+            autoPopulateBatchMetadata();
+        }
+
+        function renderBatchFileList() {
+            const list = document.getElementById('batchFileList');
+            if (!list) return;
+            if (batchFiles.length === 0) { list.innerHTML = ''; return; }
+            list.innerHTML = batchFiles.map((f, i) => `
+                <div class="modal-file-item">
+                    <span style="color:var(--red);font-size:14px">&#128196;</span>
+                    <span class="modal-file-item-name" title="${escapeHtml(f.name)}">${escapeHtml(f.name)}</span>
+                    <span class="modal-file-item-size">${(f.size / 1024).toFixed(1)} KB</span>
+                    <button class="modal-file-remove" onclick="removeBatchFile(${i})" title="Remove">&#10006;</button>
+                </div>`).join('');
+        }
+
+        function removeBatchFile(idx) {
+            batchFiles.splice(idx, 1);
+            renderBatchFileList();
+            autoPopulateBatchMetadata();
+        }
+
+        function autoPopulateBatchMetadata() {
+            const metaEl = document.getElementById('batchMetadataJson');
+            if (!metaEl || batchFiles.length === 0) return;
+            const today = new Date().toISOString().split('T')[0];
+            const mrn = activeScope.mrn || '';
+            const pid = activeScope.patientId || mrn;
+            const entries = batchFiles.map(f => {
+                const base = f.name.replace(/\.[^.]+$/, '').replace(/[^a-zA-Z0-9_-]/g, '_').toLowerCase().slice(0, 40);
+                return {
+                    filename: f.name,
+                    document_id: `doc_${base}_v1`,
+                    patient_mrn: mrn,
+                    patient_id: pid,
+                    document_type: '',
+                    document_date: today,
+                    encounter_id: '',
+                    source_system: 'EHR',
+                };
+            });
+            metaEl.value = JSON.stringify(entries, null, 2);
+        }
+
+        async function submitBatchIngest() {
+            const btn = document.getElementById('batchSubmitBtn');
+            const resultEl = document.getElementById('batchIngestResult');
+            if (batchFiles.length === 0) {
+                resultEl.innerHTML = '<div class="ingest-result error">Please add at least one file.</div>';
+                return;
+            }
+            let metaArr;
+            try {
+                metaArr = JSON.parse(document.getElementById('batchMetadataJson').value);
+                if (!Array.isArray(metaArr)) throw new Error('Must be a JSON array');
+            } catch (e) {
+                resultEl.innerHTML = `<div class="ingest-result error">Invalid metadata JSON: ${escapeHtml(e.message)}</div>`;
+                return;
+            }
+            btn.disabled = true;
+            btn.textContent = 'Submitting...';
+            resultEl.innerHTML = '';
+            try {
+                const formData = new FormData();
+                // FastAPI parameter name is 'files' (List[UploadFile])
+                batchFiles.forEach(f => formData.append('files', f, f.name));
+                formData.append('metadata_json', JSON.stringify(metaArr));
+                const resp = await fetch('/api/documents/ingest', {
+                    method: 'POST',
+                    body: formData,
+                });
+                const data = await resp.json();
+                if (resp.ok) {
+                    const docLines = (data.documents || []).map(d =>
+                        `&bull; ${escapeHtml(d.filename)} &rarr; <strong>${escapeHtml(d.document_id)}</strong> [${d.status}]`
+                    ).join('<br>');
+                    resultEl.innerHTML = `<div class="ingest-result success">
+                        &#10003; Batch accepted &mdash; job_id: <code>${escapeHtml(data.batch_id)}</code><br>${docLines}
+                    </div>`;
+                    loadUploadedDocs();
+                    loadDocsForScope();
+                } else {
+                    resultEl.innerHTML = `<div class="ingest-result error">&#10005; ${escapeHtml(data.detail || 'Ingest failed')}</div>`;
+                }
+            } catch (e) {
+                resultEl.innerHTML = `<div class="ingest-result error">&#10005; Network error: ${escapeHtml(e.message)}</div>`;
+            }
+            btn.disabled = false;
+            btn.textContent = '\u2b06 Submit Ingest';
+        }
+
+        // Drag-and-drop for batch modal drop zone
+        (function() {
+            const zone = document.getElementById('batchDropZone');
+            if (!zone) return;
+            ['dragenter', 'dragover'].forEach(evt => {
+                zone.addEventListener(evt, e => { e.preventDefault(); zone.classList.add('drag-over'); });
+            });
+            ['dragleave', 'drop'].forEach(evt => {
+                zone.addEventListener(evt, e => { e.preventDefault(); zone.classList.remove('drag-over'); });
+            });
+            zone.addEventListener('drop', e => {
+                Array.from(e.dataTransfer.files || []).forEach(f => {
+                    if (!batchFiles.find(x => x.name === f.name)) batchFiles.push(f);
+                });
+                renderBatchFileList();
+                autoPopulateBatchMetadata();
+            });
+        })();
+
+        loadUploadedDocs();
 
         messageInput.focus();
     </script>

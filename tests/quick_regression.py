@@ -56,10 +56,7 @@ def warmup(headers: dict) -> None:
 
 
 def main():
-    # Auth
-    r = requests.post(f"{BASE}/api/auth/token", json={"user_id": "admin", "password": "admin123"})
-    token = r.json()["token"]
-    headers = {"Authorization": f"Bearer {token}"}
+    headers = {"Content-Type": "application/json"}
 
     warmup(headers)
 

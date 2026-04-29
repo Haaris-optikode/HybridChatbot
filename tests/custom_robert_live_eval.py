@@ -59,18 +59,8 @@ class EvalCase:
     extra_check: Callable[[str], bool] | None = None
 
 
-def _get_token() -> str:
-    r = requests.post(
-        f"{BASE_URL}/api/auth/token",
-        json={"user_id": "custom-robert-eval", "role": "clinician"},
-        timeout=20,
-    )
-    r.raise_for_status()
-    return r.json()["token"]
-
-
-def _ask_chat(question: str, token: str, thinking: bool = False) -> tuple[str, dict, float]:
-    headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+def _ask_chat(question: str, thinking: bool = False) -> tuple[str, dict, float]:
+    headers = {"Content-Type": "application/json"}
     payload = {
         "message": question,
         "session_id": f"custom-eval-{uuid.uuid4()}",
@@ -268,7 +258,7 @@ def run() -> int:
     health = hr.json()
     print(f"Health status: {health.get('status')} | Qdrant: {(health.get('qdrant') or {}).get('status')}")
 
-    token = _get_token()
+    token = None
     cases = _default_cases()
 
     rows: list[dict] = []
@@ -280,7 +270,7 @@ def run() -> int:
     complex_model_ok = 0
 
     for c in cases:
-        reply, usage, wall_s = _ask_chat(c.question, token=token, thinking=False)
+        reply, usage, wall_s = _ask_chat(c.question, thinking=False)
         score = _concept_group_score(reply, c.groups)
         base_ok = score >= c.min_groups
 

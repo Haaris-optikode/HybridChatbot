@@ -1,14 +1,14 @@
 {
-  "generated_at": "2026-04-24T11:15:28Z",
+  "generated_at": "2026-04-27T10:40:10Z",
   "base_url": "http://localhost:7860",
   "document_target": "data/unstructured_docs/clinical_notes/patient_inpatient_record.pdf",
   "total_cases": 16,
-  "passed_cases": 16,
-  "overall_accuracy_pct": 100.0,
+  "passed_cases": 15,
+  "overall_accuracy_pct": 93.8,
   "simple": {
     "total": 12,
-    "passed": 12,
-    "accuracy_pct": 100.0
+    "passed": 11,
+    "accuracy_pct": 91.7
   },
   "complex": {
     "total": 4,
@@ -29,12 +29,12 @@
       "base_ok": true,
       "model_ok": true,
       "passed": true,
-      "latency_s": 11.58,
+      "latency_s": 9.51,
       "usage": {
         "input_tokens": 5400,
-        "output_tokens": 42,
-        "total_tokens": 5442,
-        "cost_usd": 0.0014976,
+        "output_tokens": 52,
+        "total_tokens": 5452,
+        "cost_usd": 0.0015136,
         "calls": 2,
         "models": [
           "gpt-4.1-mini-2025-04-14",
@@ -44,7 +44,7 @@
           "openai"
         ]
       },
-      "reply": "The full name of the patient is Robert James Whitfield, and his date of birth is June 14, 1963 [S1]."
+      "reply": "The full name of the patient with MRN MRN-2026-004782 is Robert James Whitfield. His date of birth is June 14, 1963 [S1]."
     },
     {
       "case_id": 2,
@@ -57,12 +57,12 @@
       "base_ok": true,
       "model_ok": true,
       "passed": true,
-      "latency_s": 16.45,
+      "latency_s": 16.87,
       "usage": {
         "input_tokens": 6646,
         "output_tokens": 200,
         "total_tokens": 6846,
-        "cost_usd": 0.0022488,
+        "cost_usd": 0.002172,
         "calls": 2,
         "models": [
           "gpt-4.1-mini-2025-04-14",
@@ -85,12 +85,12 @@
       "base_ok": true,
       "model_ok": true,
       "passed": true,
-      "latency_s": 22.96,
+      "latency_s": 15.88,
       "usage": {
-        "input_tokens": 7220,
-        "output_tokens": 146,
-        "total_tokens": 7366,
-        "cost_usd": 0.0018544,
+        "input_tokens": 8886,
+        "output_tokens": 109,
+        "total_tokens": 8995,
+        "cost_usd": 0.0022696,
         "calls": 2,
         "models": [
           "gpt-4.1-mini-2025-04-14",
@@ -100,7 +100,7 @@
           "openai"
         ]
       },
-      "reply": "For patient Robert James Whitfield (MRN: MRN-2026-004782):\n\n- The documented code status is \"Full Code.\"\n- The healthcare power of attorney (POA) is Linda Whitfield.\n\nThese details are noted in the patient demographics and inpatient medical record sections [S1][S2]."
+      "reply": "For patient Robert James Whitfield (MRN: MRN-2026-004782):\n\n- The documented code status is \"Full Code\" [S1].\n- The healthcare power of attorney (POA) is his wife, Linda Whitfield [S1][S3].\n\nThis information is from the patient demographics and social history sections of the clinical notes."
     },
     {
       "case_id": 4,
@@ -113,12 +113,12 @@
       "base_ok": true,
       "model_ok": true,
       "passed": true,
-      "latency_s": 19.61,
+      "latency_s": 17.55,
       "usage": {
-        "input_tokens": 10014,
-        "output_tokens": 104,
-        "total_tokens": 10118,
-        "cost_usd": 0.0029048,
+        "input_tokens": 8942,
+        "output_tokens": 79,
+        "total_tokens": 9021,
+        "cost_usd": 0.0029736,
         "calls": 2,
         "models": [
           "gpt-4.1-mini-2025-04-14",
@@ -128,7 +128,7 @@
           "openai"
         ]
       },
-      "reply": "On admission, Robert James Whitfield had a B-type natriuretic peptide (BNP) level of 1,842 pg/mL, which is critically high compared to the reference range of less than 100 pg/mL [S1][S3]. This elevated BNP level indicates severe cardiac stress or heart failure at the time of admission."
+      "reply": "The BNP level on admission for Robert James Whitfield (MRN: MRN-2026-004782) was 1,842 pg/mL, indicating severe decompensated heart failure at presentation [S8]."
     },
     {
       "case_id": 5,
@@ -141,12 +141,12 @@
       "base_ok": true,
       "model_ok": true,
       "passed": true,
-      "latency_s": 16.36,
+      "latency_s": 20.16,
       "usage": {
-        "input_tokens": 7717,
-        "output_tokens": 274,
-        "total_tokens": 7991,
-        "cost_usd": 0.00245,
+        "input_tokens": 8180,
+        "output_tokens": 288,
+        "total_tokens": 8468,
+        "cost_usd": 0.0021584,
         "calls": 2,
         "models": [
           "gpt-4.1-mini-2025-04-14",
@@ -156,25 +156,25 @@
           "openai"
         ]
       },
-      "reply": "Patient Robert James Whitfield (MRN: MRN-2026-004782) was taking the following medications at home before admission:\n\n- Lisinopril 20 mg once daily orally (ACE inhibitor for hypertension/CHF)\n- Carvedilol 12.5 mg twice daily orally (beta-blocker for CHF)\n- Furosemide 40 mg once daily orally (loop diuretic for CHF)\n- Metformin 1000 mg twice daily orally (type 2 diabetes management)\n- Atorvastatin 40 mg once daily at bedtime orally (statin for hyperlipidemia/ASCVD prevention)\n- Aspirin 81 mg once daily orally (antiplatelet post-PCI)\n- Tiotropium bromide 2.5 mcg 2 puffs once daily by inhalation (COPD maintenance)\n- Omeprazole 20 mg once daily orally before breakfast (GERD)\n- Allopurinol 100 mg once daily orally (gout prophylaxis)\n- Potassium chloride 20 mEq once daily orally (potassium supplementation with diuretic)\n\nThese were documented as active home medications on admission [S2]."
+      "reply": "Before admission, Robert James Whitfield (MRN: MRN-2026-004782) was taking the following home medications:\n\n- Lisinopril 20 mg once daily orally (ACE inhibitor for hypertension/CHF)\n- Carvedilol 12.5 mg twice daily orally (beta-blocker for CHF)\n- Furosemide 40 mg once daily orally (loop diuretic for CHF)\n- Metformin Hydrochloride 1000 mg twice daily orally (type 2 diabetes management)\n- Atorvastatin 40 mg once daily at bedtime orally (statin for hyperlipidemia/ASCVD prevention)\n- Aspirin 81 mg once daily orally (antiplatelet post-PCI)\n- Tiotropium Bromide 2.5 mcg/actuation inhalation spray, 2 puffs once daily (COPD maintenance)\n- Omeprazole 20 mg once daily orally before breakfast (GERD)\n- Allopurinol 100 mg once daily orally (gout prophylaxis)\n- Potassium Chloride 20 mEq once daily orally (potassium supplementation with diuretic) [S1][S7].\n\nHe reported adherence to these medications prior to admission [S7]."
     },
     {
       "case_id": 6,
       "label": "discharge_meds_core",
       "question": "For patient Robert James Whitfield (MRN: MRN-2026-004782), what are the key discharge heart-failure and anticoagulation medications?",
       "is_complex": false,
-      "score": 5,
+      "score": 3,
       "max_score": 5,
       "min_groups": 4,
-      "base_ok": true,
+      "base_ok": false,
       "model_ok": true,
-      "passed": true,
-      "latency_s": 30.97,
+      "passed": false,
+      "latency_s": 31.65,
       "usage": {
-        "input_tokens": 12290,
-        "output_tokens": 480,
-        "total_tokens": 12770,
-        "cost_usd": 0.0041096,
+        "input_tokens": 7389,
+        "output_tokens": 414,
+        "total_tokens": 7803,
+        "cost_usd": 0.0020436,
         "calls": 2,
         "models": [
           "gpt-4.1-mini-2025-04-14",
@@ -184,25 +184,25 @@
           "openai"
         ]
       },
-      "reply": "For patient Robert James Whitfield (MRN: MRN-2026-004782), the key discharge medications related to heart failure and anticoagulation are as follows:\n\nHeart Failure Medications:\n- Sacubitril/valsartan (Entresto) 24/26 mg twice daily with food (new, replacing lisinopril) to help heart function.\n- Spironolactone 25 mg once daily (new) for heart protection and fluid removal.\n- Carvedilol 25 mg twice daily with food (dose increased) to slow heart rate and improve pumping.\n- Furosemide 80 mg once every morning (dose increased) as a diuretic to remove excess fluid.\n- Empagliflozin (Jardiance) 10 mg once daily in the morning (new) to help heart and diabetes control.\n\nAnticoagulation Medication:\n- Apixaban (Eliquis) 5 mg twice daily (new) as a blood thinner for atrial fibrillation.\n\nAdditional relevant medications include basal insulin (Lantus) 18 units at bedtime and metformin 1000 mg twice daily for diabetes, atorvastatin 40 mg at bedtime for cholesterol, and magnesium oxide 400 mg once daily to prevent irregular heartbeat [S1][S3][S4].\n\nThe patient was discharged stable, euvolemic, ambulatory without assistance, with improved ejection fraction from 25% to 30%, and a comprehensive follow-up plan including cardiology and nephrology visits [S1][S2][S3].\n\nDischarge instructions emphasized medication adherence, daily weight monitoring, low sodium diet, fluid restriction, and return to ER criteria for worsening symptoms [S2][S4]. \n\nThis summary reflects documented discharge heart failure and anticoagulation medications and related clinical context for Mr. Whitfield [S1-S5]."
+      "reply": "For Robert James Whitfield (MRN: MRN-2026-004782), the key discharge medications related to heart failure and anticoagulation are as follows:\n\nHeart Failure Medications:\n- Sacubitril/valsartan (ARNI) was added as part of guideline-directed medical therapy (GDMT).\n- Spironolactone, a mineralocorticoid receptor antagonist, was included.\n- Empagliflozin, an SGLT2 inhibitor, was also part of the optimized regimen.\n- Basal insulin was added for diabetes management, which is relevant given his comorbid diabetes.\nThese medications were part of an optimized regimen after treatment for severe decompensated heart failure with significant weight loss and clinical improvement [S1][S2].\n\nAnticoagulation Medications:\n- The discharge summary does not explicitly list anticoagulation medications by name.\n- The patient had new-onset atrial fibrillation during hospitalization, but specific anticoagulants at discharge were not documented in the available notes [S1][S2].\n\nAdditional discharge instructions included careful daily weight monitoring, low-sodium diet, fluid restriction, and follow-up plans with cardiology and other specialties [S2][S3].\n\nIn summary, the documented key heart failure discharge medications are sacubitril/valsartan, spironolactone, and empagliflozin. Anticoagulation medications at discharge were not explicitly documented in the available records. Please consult the treating provider for confirmation and details on anticoagulation therapy [S1-S3]."
     },
     {
       "case_id": 7,
       "label": "ef_trajectory",
       "question": "For patient Robert James Whitfield (MRN: MRN-2026-004782), how did ejection fraction change during hospitalization?",
       "is_complex": false,
-      "score": 3,
+      "score": 4,
       "max_score": 4,
       "min_groups": 3,
       "base_ok": true,
       "model_ok": true,
       "passed": true,
-      "latency_s": 32.35,
+      "latency_s": 30.48,
       "usage": {
-        "input_tokens": 13027,
-        "output_tokens": 272,
-        "total_tokens": 13299,
-        "cost_usd": 0.0226588,
+        "input_tokens": 13484,
+        "output_tokens": 255,
+        "total_tokens": 13739,
+        "cost_usd": 0.0195968,
         "calls": 2,
         "models": [
           "gpt-4.1-mini-2025-04-14",
@@ -212,7 +212,7 @@
           "openai"
         ]
       },
-      "reply": "During this hospitalization, Robert James Whitfield\u2019s left ventricular ejection fraction **decreased from 30% to 25%**. His prior EF was documented as **30%** in September 2025, and the inpatient echocardiogram on **2026-01-16** estimated EF at **25%**, described as \u201cdecreased from 30% in Sept 2025.\u201d [S1][S2]\n\nClinically, this was in the setting of **acute on chronic systolic heart failure/decompensation** with volume overload, pleural effusions, and pulmonary congestion at presentation. [S3][S4] The available records do **not** document a later repeat EF showing recovery before discharge. [S3]"
+      "reply": "During hospitalization, Robert James Whitfield\u2019s left ventricular ejection fraction improved from **25%** on the **1/16/2026 echocardiogram** to **30% by Day 23** in the hospital course summary, which notes this as an improvement during the admission [S2][S3]. The record also states his prior EF before admission had been **30% in Sept 2025**, so the hospitalization effectively returned him to his prior baseline EF rather than above it [S2][S1].\n\nThis was documented in the setting of severe decompensated heart failure with aggressive diuresis and guideline-directed medical therapy optimization [S3]."
     },
     {
       "case_id": 8,
@@ -225,12 +225,12 @@
       "base_ok": true,
       "model_ok": true,
       "passed": true,
-      "latency_s": 17.71,
+      "latency_s": 18.18,
       "usage": {
-        "input_tokens": 15028,
-        "output_tokens": 209,
-        "total_tokens": 15237,
-        "cost_usd": 0.0048864,
+        "input_tokens": 13839,
+        "output_tokens": 235,
+        "total_tokens": 14074,
+        "cost_usd": 0.0044524,
         "calls": 2,
         "models": [
           "gpt-4.1-mini-2025-04-14",
@@ -240,7 +240,7 @@
           "openai"
         ]
       },
-      "reply": "For Robert James Whitfield (MRN: MRN-2026-004782), the planned post-discharge follow-up specialties included:\n\n- Cardiology with Dr. Mercer, scheduled for 02/20/2026\n- Primary Care Physician (PCP) with Dr. Chen, also on 02/20/2026\n- Nephrology, scheduled for 02/27/2026\n- Diabetes Education, also on 02/27/2026\n\nAdditional follow-up plans included a repeat echocardiogram in March 2026 and an implantable cardioverter-defibrillator (ICD) evaluation in April 2026. The patient was discharged home with home health services and extensive education on heart failure self-management, medication adherence, and diabetes control [S11][S13][S10]."
+      "reply": "For Robert James Whitfield (MRN: MRN-2026-004782), the planned post-discharge follow-up specialties included:\n\n- Cardiology with Dr. Mercer, scheduled for 02/20/2026\n- Primary Care Physician (PCP) Dr. Chen, also on 02/20/2026\n- Nephrology, scheduled for 02/27/2026\n- Diabetes Education, also scheduled for 02/27/2026\n\nAdditional follow-up plans included a repeat echocardiogram in March 2026 and an implantable cardioverter-defibrillator (ICD) evaluation in April 2026. The patient was discharged home with home health services and physical therapy starting 02/14/2026. Discharge instructions emphasized daily weight monitoring, low-sodium and diabetic diet, fluid restriction, and return to ED criteria for specific symptoms [S12][S13][S17][S18]."
     },
     {
       "case_id": 9,
@@ -253,12 +253,12 @@
       "base_ok": true,
       "model_ok": true,
       "passed": true,
-      "latency_s": 30.51,
+      "latency_s": 33.54,
       "usage": {
-        "input_tokens": 12470,
-        "output_tokens": 292,
-        "total_tokens": 12762,
-        "cost_usd": 0.0177992,
+        "input_tokens": 10591,
+        "output_tokens": 298,
+        "total_tokens": 10889,
+        "cost_usd": 0.0140892,
         "calls": 2,
         "models": [
           "gpt-4.1-mini-2025-04-14",
@@ -268,7 +268,7 @@
           "openai"
         ]
       },
-      "reply": "Lisinopril was stopped because the team transitioned him from an ACE inhibitor to **sacubitril/valsartan (Entresto) 24/26 mg twice daily**, with the note that this was **replacing lisinopril** and required a **36-hour washout from the ACE inhibitor** before starting Entresto. [S2]\n\nThe admission orders also state to **hold the home ACE inhibitor per nephrology until creatinine improved**, in the setting of **acute kidney injury on CKD stage 3a**. [S1][S5]\n\nIn short: it was stopped for **renal protection during AKI** and because it was **switched to Entresto as part of heart failure therapy**. [S1][S2][S5]"
+      "reply": "Lisinopril was stopped because the team **replaced it with sacubitril/valsartan (Entresto)** at discharge, and the note specifically says to **allow a 36-hour washout from the ACE inhibitor** before starting the new medication. [S2][S8]\n\nThe hospitalization narrative also documents that lisinopril/home ACE inhibitor was **held during admission per nephrology until creatinine improved**. [S1]\n\nSo, based on the chart, the documented reasons were:\n- **ACE inhibitor held during AKI/renal recovery** per nephrology [S1]\n- **Switched to Entresto at discharge**, which requires a **36-hour ACE-inhibitor washout** [S2][S8]\n\nThis information was not found in the available records beyond those documented reasons."
     },
     {
       "case_id": 10,
@@ -281,12 +281,12 @@
       "base_ok": true,
       "model_ok": true,
       "passed": true,
-      "latency_s": 34.83,
+      "latency_s": 33.02,
       "usage": {
-        "input_tokens": 12090,
-        "output_tokens": 586,
-        "total_tokens": 12676,
-        "cost_usd": 0.0191192,
+        "input_tokens": 10429,
+        "output_tokens": 522,
+        "total_tokens": 10951,
+        "cost_usd": 0.015298,
         "calls": 2,
         "models": [
           "gpt-4.1-mini-2025-04-14",
@@ -296,7 +296,7 @@
           "openai"
         ]
       },
-      "reply": "During admission, his medication regimen was expanded mainly to treat **severe decompensated systolic heart failure**, **atrial fibrillation**, **diabetes**, and to support renal/electrolyte stability [S1][S2].\n\n- **Diuresis was intensified:** **Furosemide IV** was used in hospital, then transitioned to oral diuresis, to treat marked volume overload and pleural effusions; the discharge summary states he underwent aggressive IV diuresis with major weight loss [S2].\n- **Heart failure guideline-directed therapy was added/optimized:** **Spironolactone 25 mg PO**, **sacubitril/valsartan 24/26 mg PO**, **metolazone 2.5 mg PO**, and **empagliflozin 10 mg PO** were added to optimize heart failure management [S1][S2].\n- **Atrial fibrillation treatment was added:** **Apixaban 5 mg PO** and a **heparin drip** were used for anticoagulation during hospitalization [S1].\n- **Diabetes therapy was intensified:** **Insulin glargine** was started, along with **empagliflozin**, to improve glycemic control [S1][S2].\n\nWhy these changes were made:\n- He presented with **acute on chronic systolic heart failure**, **atrial fibrillation with RVR**, **AKI on CKD3a**, **hyponatremia**, and **bilateral pleural effusions** [S1].\n- The record says GDMT was optimized because of severe decompensated heart failure; thoracentesis and right heart catheterization were also performed to manage and assess the congestion [S2].\n- **Sacubitril/valsartan** was later kept at **24/26 mg BID** because nephrology felt the proteinuria was likely hemodynamic/functional and recommended not re-up-titrating it [S2].\n- The discharge summary also notes a course complicated by **AF recurrence** and **transient proteinuria**, which influenced ongoing monitoring and dose management [S2].\n\nIf you want, I can also list the **home meds vs discharge meds** side by side."
+      "reply": "During admission, his regimen was changed in response to **severe decompensated heart failure with new-onset atrial fibrillation**, plus diabetes optimization and later a proteinuria issue [S1][S2].\n\n- **Added/changed heart failure therapy:** **Furosemide IV**, **spironolactone 25 mg PO**, **sacubitril/valsartan 24/26 mg PO**, and **empagliflozin 10 mg PO** were started/added during hospitalization as part of GDMT optimization and aggressive diuresis for volume overload [S2][S1].  \n- **Diuresis intensified:** He required **aggressive IV diuresis transitioning to oral**, with total weight loss of **18.4 kg** and improvement to euvolemia by discharge [S1][S2].  \n- **Atrial fibrillation treatment:** **Apixaban 5 mg PO** and a **heparin drip** were ordered during hospitalization, reflecting management of atrial fibrillation [S2].  \n- **Diabetes treatment:** **Insulin glargine** was added, and the discharge summary states diabetes management was optimized with a **basal insulin** plus **SGLT2 inhibitor** [S2][S1].  \n- **Reason for later ARNI adjustment:** The course was complicated by **transient proteinuria on Day 26**, described as **ARNI-related**, and nephrology recommended **maintaining a lower ARNI dose** [S1][S3].\n\nAt discharge, he was **stable, improved, and euvolemic** [S2]. Discharge instructions included daily weights and return to the ED for **chest pain, worsening shortness of breath, weight gain > 2 lb in 1 day, fainting, palpitations > 15 minutes, or blood sugar > 300 or < 70 with symptoms** [S3]."
     },
     {
       "case_id": 11,
@@ -309,12 +309,12 @@
       "base_ok": true,
       "model_ok": true,
       "passed": true,
-      "latency_s": 33.77,
+      "latency_s": 32.8,
       "usage": {
-        "input_tokens": 13206,
-        "output_tokens": 758,
-        "total_tokens": 13964,
-        "cost_usd": 0.0229832,
+        "input_tokens": 12073,
+        "output_tokens": 715,
+        "total_tokens": 12788,
+        "cost_usd": 0.0201812,
         "calls": 2,
         "models": [
           "gpt-4.1-mini-2025-04-14",
@@ -324,25 +324,25 @@
           "openai"
         ]
       },
-      "reply": "Robert James Whitfield\u2019s hospitalization followed a classic severe decompensated heart failure trajectory, with several key turning points. He was admitted on **January 15, 2026** and discharged on **February 14, 2026** after a **30-day stay** for **acute on chronic systolic heart failure**, **atrial fibrillation with RVR**, **AKI on CKD3a**, **hyponatremia**, and **bilateral pleural effusions**. [S1]\n\n- **Initial presentation:** He came in with **severe fluid overload**, including an **18-lb weight gain** and marked dyspnea from heart failure decompensation. [S1]\n- **Early diagnostic turning point:** Echocardiogram on **01/16/2026** showed **EF 25%**, global hypokinesis, moderate MR, mild TR, elevated RVSP, LA dilation, and LV dilation, confirming significant HFrEF. [S3]\n- **Procedural turning point:** On **Day 5**, a **right-sided thoracentesis removed 850 mL** of straw-colored transudative fluid, and post-procedure imaging showed improved aeration. [S3][S4]\n- **Hemodynamic confirmation:** **Right heart catheterization on 01/22/2026** showed elevated filling pressures and reduced cardiac index, confirming severe decompensated heart failure physiology. [S3][S4]\n- **Therapeutic turning point:** He improved with **aggressive IV diuresis transitioning to oral therapy**, with a total **18.4 kg weight loss** and subsequent clinical euvolemia. [S4]\n- **Medication optimization:** Guideline-directed therapy was intensified with **sacubitril/valsartan, spironolactone, empagliflozin**, and **carvedilol uptitration**; diabetes therapy was also escalated with **basal insulin**. [S2][S4]\n- **Complications during recovery:** He had **atrial fibrillation recurrence on Day 22**, thought to be **triggered by hypomagnesemia**, but it resolved after repletion; he also had **transient proteinuria on Day 26**, attributed to ARNI-related hemodynamic effects and improving after dose reduction. [S2][S4]\n- **Later improvement:** Repeat echocardiogram on **02/06/2026** showed **EF improved to 30%** from 25%, with mild wall-motion improvement and better RVSP. [S3]\n- **Status at discharge:** He left **stable, improved, euvolemic, ambulatory without assistance**, and in **normal sinus rhythm**. [S1][S4]\n\n**Return precautions documented:** go to the ER for **chest pain/pressure, worsening shortness of breath, sudden weight gain, fainting, heart racing >15 minutes, blood sugar >300 or <70 with symptoms, or new leg swelling**. [S3]\n\n"
+      "reply": "Mr. Whitfield\u2019s hospitalization was driven by **severe acute decompensated heart failure** with **18-lb weight gain**, **bilateral pleural effusions**, and **new-onset atrial fibrillation** at presentation. He also had **AKI on CKD3a** and **hyponatremia** on admission. [S2]\n\n### Trajectory over time\n- He underwent **aggressive IV diuresis**, then transitioned to oral diuretics, with a **total weight loss of 18.4 kg** and clinical improvement in volume status. [S1]\n- Because of persistent right pleural effusion, he had a **right-sided thoracentesis on Day 5** with **850 mL** removed; the effusion improved afterward. [S1][S6]\n- A **right heart catheterization on Day 8** showed **elevated filling pressures** and **reduced cardiac index**, confirming significant hemodynamic congestion. [S1]\n- His heart failure regimen was optimized with **sacubitril/valsartan, spironolactone, empagliflozin**, and **carvedilol uptitration**. [S1][S3]\n- Echocardiography showed **EF improvement from 25% to 30% by Day 23**. [S1]\n- He was discharged **stable, improved, euvolemic, and ambulatory**, with discharge weight **91.4 kg (201.4 lb)** from **109.8 kg (242 lb)** at admission. [S2]\n\n### Most critical turning points\n1. **Initial decompensation:** severe HF with AFib RVR, pleural effusions, AKI, and hyponatremia. [S2]\n2. **Thoracentesis on Day 5:** addressed the persistent pleural effusion despite diuresis. [S1][S6]\n3. **RHC on Day 8:** documented the severity of hemodynamic impairment. [S1]\n4. **AFib recurrence on Day 22:** attributed to **hypomagnesemia**, then resolved after repletion. [S1][S3]\n5. **Transient proteinuria on Day 26:** attributed to **ARNI-related hemodynamic effects**, improved after dose reduction. [S1]\n6. **Functional recovery by discharge:** sinus rhythm, resolved AKI/hyponatremia/effusions, and improved EF. [S2]\n\n### Discharge warning signs documented\nHe was instructed to return for **chest pain, worsening shortness of breath, weight gain >2 lb in 1 day, fainting, palpitations lasting >15 minutes, or blood sugar >300 or <70 with symptoms**. [S3]"
     },
     {
       "case_id": 12,
       "label": "complex_risk_reasoning",
       "question": "For patient Robert James Whitfield (MRN: MRN-2026-004782), which findings were most critical for readmission risk and prognosis?",
       "is_complex": true,
-      "score": 4,
+      "score": 3,
       "max_score": 4,
       "min_groups": 3,
       "base_ok": true,
       "model_ok": true,
       "passed": true,
-      "latency_s": 32.21,
+      "latency_s": 31.91,
       "usage": {
-        "input_tokens": 13743,
-        "output_tokens": 495,
-        "total_tokens": 14238,
-        "cost_usd": 0.021774,
+        "input_tokens": 11560,
+        "output_tokens": 514,
+        "total_tokens": 12074,
+        "cost_usd": 0.01756,
         "calls": 2,
         "models": [
           "gpt-4.1-mini-2025-04-14",
@@ -352,7 +352,7 @@
           "openai"
         ]
       },
-      "reply": "The findings most critical for **readmission risk and prognosis** were the ones showing severe decompensated heart failure and end-organ stress:\n\n- **Severe heart failure decompensation** with **18-lb fluid/weight gain**, marked dyspnea, and **bilateral pleural effusions** on admission, indicating major volume overload and a high risk for recurrent congestion/readmission [S1][S4].\n- **New atrial fibrillation with rapid ventricular response** and later recurrence during the stay, which increases risk for hemodynamic instability and rehospitalization [S3][S4].\n- **Acute kidney injury on CKD3a** with admission **creatinine 2.1 mg/dL** (baseline noted as 1.6 mg/dL) and elevated BUN, showing cardiorenal involvement that worsens prognosis [S2][S3].\n- **Critically high BNP of 1,842 pg/mL** on admission, supporting severe HF burden [S2].\n- **Reduced EF of 25%**, later improving to **30%**, which still reflects significantly impaired systolic function and ongoing risk [S3][S4].\n- **Hyponatremia (Na 131 mEq/L)** and **poorly controlled diabetes (HbA1c 8.2%)**, both associated with more complicated recovery and higher readmission risk [S2][S3].\n\nDocumented prognosis was **improved/stable at discharge**, but the discharge plan still emphasized close follow-up, daily weights, fluid/sodium restriction, and ER return for **chest pain, worsening shortness of breath, sudden weight gain, fainting, palpitations >15 minutes, or blood sugar >300/<70 with symptoms** [S4]."
+      "reply": "The **most critical findings for readmission risk and prognosis** were the markers of **severe decompensated heart failure with end-organ involvement**. Mr. Whitfield presented with **acute on chronic systolic HF** with **new-onset atrial fibrillation with RVR**, **bilateral pleural effusions**, **AKI on CKD3a** (creatinine **2.1 mg/dL** from baseline **1.6 mg/dL**), **hyponatremia** (**Na 131 mEq/L**), **poorly controlled diabetes** (**HbA1c 8.2%**), and a **markedly elevated BNP of 1,842 pg/mL** [S1][S4].\n\nThe discharge summary shows the biggest prognosis drivers were:\n- **Severe fluid overload** with **18-lb weight gain** at presentation and **18.4 kg** total diuresis during hospitalization [S3][S1]\n- **Cardiac dysfunction** with EF **25%** improving only to **30%** by day 23 [S3][S1]\n- **New atrial fibrillation**, including recurrence during the stay, which signals arrhythmia burden [S1][S3]\n- **Renal stress/AKI** that improved but remains important because CKD persisted [S1][S3]\n\nDischarge risk-reduction instructions documented were:\n- **Daily weights**; call for **>2 lb/day** or **>5 lb/week** gain [S2][S3]\n- Return to ED for **chest pain, worsening shortness of breath, fainting, palpitations >15 min, or glucose >300 or <70 with symptoms** [S3]\n\nThis information was not found in the available records: a formal readmission-risk score or explicit prognostic estimate."
     },
     {
       "case_id": 13,
@@ -365,12 +365,12 @@
       "base_ok": true,
       "model_ok": true,
       "passed": true,
-      "latency_s": 16.43,
+      "latency_s": 17.02,
       "usage": {
-        "input_tokens": 37217,
-        "output_tokens": 365,
-        "total_tokens": 37582,
-        "cost_usd": 0.0149332,
+        "input_tokens": 29191,
+        "output_tokens": 310,
+        "total_tokens": 29501,
+        "cost_usd": 0.0109052,
         "calls": 2,
         "models": [
           "gpt-4.1-mini-2025-04-14",
@@ -380,7 +380,7 @@
           "openai"
         ]
       },
-      "reply": "During Robert James Whitfield's 30-day hospitalization for acute on chronic systolic heart failure with complications, key procedures and diagnostic studies performed included:\n\n- Chest X-rays on admission and follow-up showing cardiomegaly, bilateral pleural effusions, and pulmonary congestion with interval improvement after treatment.\n- Transthoracic echocardiogram with Doppler on hospital day 2 revealing reduced left ventricular ejection fraction (25%, down from 30%), global hypokinesis, moderate mitral regurgitation, pulmonary hypertension, and left atrial dilation.\n- 12-lead electrocardiogram on admission showing atrial fibrillation with rapid ventricular response and left ventricular hypertrophy.\n- Thoracentesis performed on hospital day 6, removing 850 mL of transudative pleural fluid, with post-procedure improvement in lung aeration.\n- Right heart catheterization on hospital day 8 confirming elevated filling pressures (PCWP 26 mmHg), low cardiac index (1.8 L/min/m\u00b2), and pulmonary artery pressures consistent with advanced heart failure.\n- Multiple laboratory tests including BNP, renal function, electrolytes, glucose, and cardiac biomarkers monitored serially.\n- Continuous telemetry monitoring for arrhythmia detection and management.\n\nThese studies guided management including diuresis, rhythm control, medication optimization, and planning for device evaluation post-discharge [S1][S2][S3][S4][S5][S6][S7][S8][S9][S10][S11][S12][S13][S14][S15][S16][S17][S18][S19][S20][S21][S22]."
+      "reply": "During hospitalization for acute on chronic systolic heart failure with severe decompensation, patient Robert James Whitfield underwent several key procedures and diagnostic studies:\n\n- Chest X-rays on admission and follow-up showed cardiomegaly, bilateral pleural effusions, and pulmonary congestion with interval improvement after treatment.\n- Transthoracic echocardiogram with Doppler revealed reduced left ventricular ejection fraction (EF) of 25% initially, with global hypokinesis, moderate mitral regurgitation, and pulmonary hypertension. EF improved to 30% by Day 23.\n- Thoracentesis was performed on Day 5, removing 850 mL of transudative pleural fluid, which improved respiratory status.\n- Right heart catheterization on Day 8 confirmed elevated right atrial pressure, pulmonary artery pressures, pulmonary capillary wedge pressure (PCWP 26 mmHg), low cardiac index (1.8 L/min/m\u00b2), consistent with advanced heart failure.\n- Serial laboratory tests including BNP, renal function, electrolytes, and glycemic markers were closely monitored.\n- Continuous telemetry and 12-lead ECG documented atrial fibrillation with rapid ventricular response on admission, later converting to normal sinus rhythm.\n\nThese procedures and studies guided aggressive diuresis, GDMT optimization, and management of complications during the 30-day hospitalization [S14][S18c][S22][S19][S13]."
     },
     {
       "case_id": 14,
@@ -393,12 +393,12 @@
       "base_ok": true,
       "model_ok": true,
       "passed": true,
-      "latency_s": 15.21,
+      "latency_s": 23.71,
       "usage": {
-        "input_tokens": 8015,
-        "output_tokens": 170,
-        "total_tokens": 8185,
-        "cost_usd": 0.0027484,
+        "input_tokens": 8608,
+        "output_tokens": 220,
+        "total_tokens": 8828,
+        "cost_usd": 0.002336,
         "calls": 2,
         "models": [
           "gpt-4.1-mini-2025-04-14",
@@ -408,7 +408,7 @@
           "openai"
         ]
       },
-      "reply": "At discharge, Robert James Whitfield was advised the following dietary and fluid restrictions:\n\n- A low-sodium diet with sodium intake less than 2 grams per day (<2g/day).\n- A heart-healthy diet that is also diabetic-friendly.\n- Fluid restriction to 1.5 liters per day (1.5 L/day).\n\nThese instructions were part of his discharge plan to manage his heart failure and diabetes effectively. He was also instructed to weigh himself daily and report any rapid weight gain, which could indicate fluid retention. The importance of strict sodium restriction was emphasized due to prior episodes of dietary-induced fluid retention during hospitalization [S1][S3][S4]."
+      "reply": "At discharge, Robert James Whitfield was advised the following dietary and fluid restrictions:\n\n- A low-sodium diet with sodium intake less than 2 grams per day, tailored to be heart-healthy and diabetic-friendly.\n- Fluid restriction limited to 1.5 liters per day.\n\nThese instructions were part of a comprehensive discharge plan after treatment for severe decompensated heart failure and optimization of diabetes management. The patient was also instructed to weigh himself every morning before breakfast and to call the doctor if weight gain exceeded 2 pounds in one day or 5 pounds in one week [S1][S2][S3]."
     },
     {
       "case_id": 15,
@@ -421,12 +421,12 @@
       "base_ok": true,
       "model_ok": true,
       "passed": true,
-      "latency_s": 33.75,
+      "latency_s": 34.36,
       "usage": {
-        "input_tokens": 13074,
-        "output_tokens": 754,
-        "total_tokens": 13828,
-        "cost_usd": 0.0224776,
+        "input_tokens": 12951,
+        "output_tokens": 1043,
+        "total_tokens": 13994,
+        "cost_usd": 0.0245436,
         "calls": 2,
         "models": [
           "gpt-4.1-mini-2025-04-14",
@@ -436,7 +436,7 @@
           "openai"
         ]
       },
-      "reply": "Here\u2019s the medication comparison for **Robert James Whitfield (MRN-2026-004782)**:\n\n- **Lisinopril 20 mg daily** at home was **stopped** and replaced by **sacubitril/valsartan 24/26 mg twice daily** at discharge; the record states this was to optimize heart failure therapy, with a required **36-hour washout from the ACE inhibitor**. [S2][S3]\n- **Carvedilol 12.5 mg twice daily** at home was **increased to 25 mg twice daily** at discharge, reflecting **up-titration during hospitalization** as part of GDMT optimization. [S2][S3]\n- **Furosemide 40 mg daily** at home was **increased to 80 mg daily** at discharge after **aggressive IV diuresis** and a **total 18.4 kg weight loss**, consistent with treatment of severe volume overload. [S2][S3][S5]\n- **Spironolactone 25 mg daily** was **new** at discharge for heart failure GDMT. [S3]\n- **Empagliflozin 10 mg daily** was **new** at discharge, documented for **HFrEF and diabetes benefit**. [S3]\n- **Apixaban 5 mg twice daily** was **new** at discharge for **atrial fibrillation** (CHA\u2082DS\u2082-VASc = 4). [S3]\n- **Insulin glargine 18 units nightly** was **new** at discharge for **improved glycemic control**. [S3]\n- **Metformin 1000 mg twice daily** was **continued**. [S2][S3]\n- **Atorvastatin 40 mg nightly**, **aspirin 81 mg daily**, **tiotropium 2 puffs daily**, **omeprazole 20 mg daily**, **allopurinol 100 mg daily**, and **potassium chloride 20 mEq daily** were all **continued** at discharge. [S2][S3]\n- **Hydralazine 25 mg TID as needed for SBP >160 mmHg** appears on the discharge list as an added PRN antihypertensive. [S3]\n\n**Clinical rationale documented in the chart:** the hospitalization was for **acute on chronic systolic heart failure with major volume overload**, complicated by **atrial fibrillation**, **AKI on CKD**, and **diabetes optimization**; the team responded with **IV diuresis**, **GDMT intensification** (ARNI, beta-blocker uptitration, MRA, SGLT2 inhibitor), and **anticoagulation** for AF. [S5] The discharge summary notes the patient was **stable and improved**, **euvolemic**, and in **sinus rhythm** at discharge. [S1][S5]\n\nIf you want, I can also format this as a **side-by-side home vs discharge medication table**."
+      "reply": "Here\u2019s the documented comparison of **home/admission vs discharge medications** for **Robert James Whitfield (MRN-2026-004782)**, with the clinical rationale for the major changes.\n\n### Home/admission medications\nDocumented home meds included: **lisinopril 20 mg daily, carvedilol 12.5 mg BID, furosemide 40 mg daily, metformin 1000 mg BID, atorvastatin 40 mg nightly, aspirin 81 mg daily, tiotropium inhaled daily, omeprazole 20 mg daily, allopurinol 100 mg daily, and potassium chloride 20 mEq daily** [S1]. Admission orders also noted **IV furosemide 40 mg q12h**, **holding the home ACE inhibitor**, and **reducing carvedilol to 6.25 mg BID initially** because of hypotension risk [S1].\n\n### Discharge medications\nDischarge prescriptions included: **sacubitril/valsartan 24/26 mg BID**, **carvedilol 25 mg BID**, **furosemide 80 mg daily**, **spironolactone 25 mg daily**, **empagliflozin 10 mg daily**, **apixaban 5 mg BID**, **metformin 1000 mg BID**, **insulin glargine 18 units nightly**, **atorvastatin 40 mg nightly**, **aspirin 81 mg daily**, **tiotropium 2 puffs daily**, **omeprazole 20 mg daily**, **allopurinol 100 mg daily**, **potassium chloride 20 mEq daily**, and **hydralazine 25 mg TID PRN for SBP >160** [S2][S3].\n\n### Major medication changes and rationale\n- **Lisinopril stopped \u2192 sacubitril/valsartan started**: explicitly documented as a replacement for lisinopril, with a **36-hour washout from the ACE inhibitor** [S2]. This was part of **GDMT optimization** for heart failure [S4][S10].\n- **Carvedilol increased from 12.5 mg BID \u2192 25 mg BID**: documented as an **uptitration during hospitalization** as part of GDMT optimization [S2].  \n- **Furosemide increased from 40 mg daily \u2192 80 mg daily**: increased after severe decompensated heart failure; the patient required **aggressive IV diuresis transitioning to oral therapy** and achieved major weight loss and euvolemia [S2][S10].\n- **Spironolactone added**: part of heart failure GDMT optimization [S2][S10].\n- **Empagliflozin added**: documented as new therapy for **HFrEF and diabetes benefit** [S2][S10].\n- **Apixaban added**: new for **atrial fibrillation**; the note documents **CHA\u2082DS\u2082-VASc = 4** as the rationale [S2].\n- **Insulin glargine added**: new for **improved glycemic control** during admission [S3][S4].\n- **Hydralazine PRN added**: for **SBP >160 mmHg** [S3].\n- **Potassium chloride continued** with a note to monitor potassium closely because of **spironolactone** [S3].\n\n### Clinical context for the changes\nThe patient was admitted with **severe decompensated systolic heart failure**, **new-onset atrial fibrillation with RVR**, **AKI on CKD3a**, **hyponatremia**, and **bilateral pleural effusions** [S4][S8]. His course improved with **aggressive IV diuresis**, **thoracentesis (850 mL)**, and **heart failure GDMT optimization**; discharge summary notes he was **stable, improved, ambulatory, and euvolemic** [S4][S10][S11].\n\n### Discharge warning signs documented\nHe was instructed to return for **chest pain, worsening shortness of breath, weight gain >2 lb/day, fainting, palpitations >15 minutes, or blood sugar >300 or <70 with symptoms** [S7][S12].\n\nIf you want, I can also put this into a **clean \u201chome meds vs discharge meds\u201d table**."
     },
     {
       "case_id": 16,
@@ -449,22 +449,22 @@
       "base_ok": true,
       "model_ok": true,
       "passed": true,
-      "latency_s": 33.4,
+      "latency_s": 30.41,
       "usage": {
-        "input_tokens": 16550,
-        "output_tokens": 333,
-        "total_tokens": 16883,
-        "cost_usd": 0.0058088,
+        "input_tokens": 12687,
+        "output_tokens": 344,
+        "total_tokens": 13031,
+        "cost_usd": 0.0183356,
         "calls": 2,
         "models": [
           "gpt-4.1-mini-2025-04-14",
-          "gpt-4.1-mini-2025-04-14"
+          "gpt-5.4-mini-2026-03-17"
         ],
         "providers": [
           "openai"
         ]
       },
-      "reply": "For Robert James Whitfield (MRN: MRN-2026-004782), the documented red-flag symptoms that should prompt emergency evaluation after discharge include:\n\n- Chest pain or pressure\n- Increasing shortness of breath or worsening breathing\n- Sudden weight gain of more than 2 pounds in one day or more than 5 pounds in one week\n- Fainting or feeling like you might faint\n- Heart racing or palpitations lasting more than 15 minutes\n- Blood sugar over 300 mg/dL or under 70 mg/dL with symptoms such as shakiness or sweating\n- New leg swelling\n\nHe was instructed to weigh himself every morning and call the doctor if weight gain exceeds these thresholds. These warnings are part of his discharge instructions following hospitalization for acute on chronic systolic heart failure and atrial fibrillation, among other conditions. The patient was discharged stable with a comprehensive follow-up plan and home health services [S1][S2][S3][S5]."
+      "reply": "After discharge, the documented **red-flag symptoms that should trigger emergency evaluation** are:  \n\n- **Chest pain or pressure** [S1][S3]  \n- **Worsening shortness of breath** / getting more short of breath [S1][S3]  \n- **Sudden weight gain**, especially **more than 2 lbs overnight** or **>2 lbs in 1 day** [S1][S3]  \n- **Fainting** or feeling like you might faint [S1][S3]  \n- **Palpitations / heart racing lasting more than 15 minutes** [S1][S3]  \n- **Blood sugar over 300** or **under 70 with symptoms** such as **shakiness or sweating** [S1][S3]  \n- **New leg swelling** [S1]  \n\nThe discharge instructions also say to **call the doctor** for **weight gain >2 lbs/day or >5 lbs/week** [S2][S3]."
     }
   ]
 }

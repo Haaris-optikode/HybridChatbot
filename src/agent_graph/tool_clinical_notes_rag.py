@@ -20,7 +20,7 @@ from agent_graph.load_tools_config import (
     swap_google_api_key,
 )
 from qdrant_client import QdrantClient
-from qdrant_client.models import SearchParams, QuantizationSearchParams
+from qdrant_client.models import SearchParams, QuantizationSearchParams, PayloadSchemaType
 from pyprojroot import here
 import logging
 import os
@@ -50,6 +50,50 @@ _CACHE_TTL_HOURS = 24
 _CACHE_MAX_SIZE = int(os.environ.get("MEDGRAPH_CACHE_MAX_SIZE", "50"))  # max patient summaries in memory
 _SUMMARY_REQUEST_MODE: ContextVar[str] = ContextVar("summary_request_mode", default="normal")
 
+# ── Phase 3: Request-scoped document scope context vars ──────────────────────
+# Set by api.py before graph invocation when the client supplies document_ids.
+# lookup_clinical_notes reads these to enforce the selected-document scope.
+# Tools may only narrow the scope; they may never broaden it.
+_CTX_ACTIVE_DOCUMENT_IDS: ContextVar[list] = ContextVar("active_document_ids", default=[])
+_CTX_ACTIVE_PATIENT_MRN: ContextVar[str] = ContextVar("active_patient_mrn", default="")
+_CTX_ACTIVE_PATIENT_ID: ContextVar[str] = ContextVar("active_patient_id", default="")
+_CTX_ACTIVE_TENANT_ID: ContextVar[str] = ContextVar("active_tenant_id", default="")
+_CTX_ACTIVE_ORG_ID: ContextVar[str] = ContextVar("active_org_id", default="")
+
+
+def set_active_document_scope(
+    document_ids: list = None,
+    patient_mrn: str = "",
+    patient_id: str = "",
+    tenant_id: str = "",
+    org_id: str = "",
+) -> tuple:
+    """Set request-scoped document and patient scope.
+
+    Returns a tuple of ContextVar tokens for resetting after the request.
+    Call reset_active_document_scope(tokens) in a finally block.
+    """
+    t1 = _CTX_ACTIVE_DOCUMENT_IDS.set(list(document_ids or []))
+    t2 = _CTX_ACTIVE_PATIENT_MRN.set(patient_mrn or "")
+    t3 = _CTX_ACTIVE_PATIENT_ID.set(patient_id or "")
+    t4 = _CTX_ACTIVE_TENANT_ID.set(tenant_id or "")
+    t5 = _CTX_ACTIVE_ORG_ID.set(org_id or "")
+    return (t1, t2, t3, t4, t5)
+
+
+def reset_active_document_scope(tokens: tuple) -> None:
+    """Reset document scope context vars after request completes."""
+    try:
+        _CTX_ACTIVE_DOCUMENT_IDS.reset(tokens[0])
+        _CTX_ACTIVE_PATIENT_MRN.reset(tokens[1])
+        _CTX_ACTIVE_PATIENT_ID.reset(tokens[2])
+        if len(tokens) > 3:
+            _CTX_ACTIVE_TENANT_ID.reset(tokens[3])
+        if len(tokens) > 4:
+            _CTX_ACTIVE_ORG_ID.reset(tokens[4])
+    except Exception:
+        pass
+
 
 def set_summary_request_mode(mode: str):
     """Set request-scoped summary mode ('normal' or 'thinking')."""
@@ -74,26 +118,36 @@ def _current_summary_mode() -> str:
 # Each entry: (compiled_regex, replacement_suffix_to_append)
 import re as _re_init
 _CLINICAL_INTENT_REWRITES: list[tuple] = [
+    # Rule 1: Advance directive / code status queries — generic clinical vocabulary only
     (_re_init.compile(r"advance directive|code status|healthcare proxy|power of attorney|poa|full code|dnr", _re_init.I),
-     "advance directive full code DNR healthcare POA proxy Linda Whitfield"),
-    (_re_init.compile(r"weight\s+gain|pounds?\s+gain|gained.{0,30}before admission|presenting\s+weight|18.{0,10}lb|18.{0,10}pound", _re_init.I),
-     "weight gain presenting complaint admission 18-lb pounds"),
+     "advance directive full code DNR do-not-resuscitate DNAR DNI do-not-intubate healthcare proxy power of attorney POA comfort care goals of care POLST MOLST code status resuscitation"),
+    # Rule 2: Weight gain on admission — generic presenting-complaint vocabulary
+    (_re_init.compile(r"weight\s+gain|pounds?\s+gain|gained.{0,30}before admission|presenting\s+weight", _re_init.I),
+     "weight gain presenting complaint admission significant weight gain fluid retention edema"),
+    # Rule 3: Home / admission medications — generic reconciliation vocabulary
     (_re_init.compile(r"home\s+med|medication.{0,20}at home|medications?\s+before admission|taking\s+at\s+home|admission\s+med", _re_init.I),
-     "home medications admission medication list lisinopril carvedilol metformin furosemide atorvastatin aspirin tiotropium omeprazole allopurinol"),
+     "home medications prior medications admission medication reconciliation chronic medications medication history"),
+    # Rule 4: BNP / natriuretic peptide — generic cardiac biomarker vocabulary
     (_re_init.compile(r"bnp.{0,30}admission|admission.{0,30}bnp|bnp.{0,10}on admission|natriuretic\s+peptide", _re_init.I),
-        "BNP brain natriuretic peptide admission labs 1842 1,842 pg/mL"),
+     "BNP brain natriuretic peptide elevated admission labs baseline cardiac biomarker heart failure fluid overload"),
+    # Rule 5: Weight loss during hospitalisation — generic decongestion vocabulary
     (_re_init.compile(r"weight\s+loss.{0,20}hospital|lost.{0,20}weight.{0,20}hospital|total\s+weight\s+loss|weight\s+was\s+lost|weight\s+lost", _re_init.I),
-     "DISCHARGE SUMMARY total weight loss 18.4 kg 40.5 pounds final weight 91.4 kg 30-day hospitalization decongestion"),
+     "total weight loss discharge decongestion diuresis fluid removal hospitalization net fluid balance"),
+    # Rule 6: EpiPen / anaphylaxis — keep generic (allergen type not patient-specific)
     (_re_init.compile(r"epi.?pen|epinephrine\s+auto|shellfish\s+anaphylaxis", _re_init.I),
-     "EpiPen epinephrine anaphylaxis shellfish allergy severe"),
+     "EpiPen epinephrine anaphylaxis allergy severe hypersensitivity reaction"),
+    # Rule 7: CHA2DS2-VASc / stroke risk — generic scoring vocabulary
     (_re_init.compile(r"cha2ds2|stroke\s+risk\s+score", _re_init.I),
-     "CHA2DS2-VASc score atrial fibrillation anticoagulation apixaban"),
+     "CHA2DS2-VASc score atrial fibrillation anticoagulation stroke prevention"),
+    # Rule 8: ICD / defibrillator — generic cardiac device vocabulary
     (_re_init.compile(r"\bicd\b|implantable.{0,20}defibrillator", _re_init.I),
-     "implantable cardioverter defibrillator cardiac device evaluation planned April 2026 three month GDMT not yet implanted"),
+     "implantable cardioverter defibrillator ICD cardiac device GDMT guideline-directed medical therapy evaluation planned not yet implanted electrophysiology"),
+    # Rule 9: Dietary / fluid restriction — generic discharge education vocabulary
     (_re_init.compile(r"dietary\s+restrict|fluid\s+restrict|sodium\s+restrict|diet\s+at\s+discharge|discharge\s+diet", _re_init.I),
-     "dietary restrictions discharge education patient DISCHARGE EDUCATION 2g Na sodium fluid restriction 1.5L 1500 mL per day diabetic meal plan heart-healthy diet low sodium"),
+     "sodium dietary restriction fluid restriction discharge education heart-healthy low-sodium diet fluid intake daily weight monitoring"),
+    # Rule 10: Lisinopril switch — keep ARNI/Entresto vocabulary; add generic transition terms
     (_re_init.compile(r"lisinopril.{0,20}stop|lisinopril.{0,20}discontin|why.{0,20}lisinopril|switch.{0,20}lisinopril", _re_init.I),
-     "lisinopril stopped discontinued replaced sacubitril entresto ARNI washout AKI"),
+     "lisinopril stopped discontinued replaced sacubitril entresto ARNI washout ACE inhibitor ARB transition switch ARNI neprilysin inhibitor"),
 ]
 del _re_init
 
@@ -280,10 +334,43 @@ class ClinicalNotesRAGTool:
         try:
             info = self.client.get_collection(collection_name)
             logger.info("Connected to '%s': %d vectors | Status: %s", collection_name, info.points_count, info.status)
+            self._ensure_fact_payload_indexes()
         except Exception as e:
             logger.warning("Could not get collection info: %s", e)
 
     # ── Phase 2 retrieval helpers ────────────────────────────────────────────
+
+    def _ensure_fact_payload_indexes(self) -> None:
+        """Best-effort indexes for additive row/event fact retrieval."""
+        if str(os.environ.get("MEDGRAPH_ENSURE_FACT_INDEXES", "")).strip().lower() not in {"1", "true", "yes"}:
+            return
+        keyword_fields = (
+            "metadata.chunk_kind",
+            "metadata.fact_type",
+            "metadata.test_name",
+            "metadata.benefit_name",
+            "metadata.event_type",
+            "metadata.event_action",
+        )
+        datetime_fields = ("metadata.row_date", "metadata.event_date")
+        for field in keyword_fields:
+            try:
+                self.client.create_payload_index(
+                    collection_name=self.collection_name,
+                    field_name=field,
+                    field_schema=PayloadSchemaType.KEYWORD,
+                )
+            except Exception:
+                pass
+        for field in datetime_fields:
+            try:
+                self.client.create_payload_index(
+                    collection_name=self.collection_name,
+                    field_name=field,
+                    field_schema=PayloadSchemaType.DATETIME,
+                )
+            except Exception:
+                pass
 
     def _rewrite_clinical_query(self, query: str) -> str:
         """Map natural-language question patterns to richer clinical search terms.
@@ -378,28 +465,77 @@ class ClinicalNotesRAGTool:
             return []
 
     def _bm25_fallback_all_chunks(
-        self, query: str, patient_mrn: str = None, document_id: str = None
+        self, query: str, patient_mrn: str = None, document_id: str = None,
+        document_ids: list = None, patient_id: str = None,
+        tenant_id: str = None, org_id: str = None,
     ) -> list:
-        """BM25 over ALL patient chunks — safety net when dense+reranker finds nothing.
+        """BM25 over the scoped corpus — safety net when dense+reranker finds nothing.
 
         Phase 2.6 — Called only when the cross-encoder rejects all dense candidates.
         Unlike _bm25_score_candidates (which re-ranks only the dense candidates), this
         method searches the ENTIRE scoped corpus so no chunk is missed.
 
+        Phase 3 — document_ids: when non-empty, restricts to the allowed set of
+        document IDs (multi-document scope enforcement).
+
         Returns up to reranker_top_k docs with BM25 score > 0, ordered by score.
         Returns empty list if rank_bm25 is not installed or no scoped chunks exist.
         """
+        # Normalise document_id into document_ids for unified handling
+        _doc_ids: list[str] = list(document_ids or [])
+        if document_id and document_id not in _doc_ids:
+            _doc_ids.append(document_id)
+
         try:
             from rank_bm25 import BM25Okapi
             from langchain_core.documents import Document as _LCDoc
+            from qdrant_client.models import Filter, FieldCondition, MatchValue, MatchAny
 
-            all_points = self._scroll_all_points(limit=2048)
+            must_conditions = []
+            if patient_mrn:
+                must_conditions.append(
+                    FieldCondition(key="metadata.patient_mrn", match=MatchValue(value=patient_mrn))
+                )
+            if patient_id and patient_id != patient_mrn:
+                must_conditions.append(
+                    FieldCondition(key="metadata.patient_id", match=MatchValue(value=patient_id))
+                )
+            if tenant_id:
+                must_conditions.append(
+                    FieldCondition(key="metadata.tenant_id", match=MatchValue(value=tenant_id))
+                )
+            if org_id:
+                must_conditions.append(
+                    FieldCondition(key="metadata.org_id", match=MatchValue(value=org_id))
+                )
+            if _doc_ids:
+                if len(_doc_ids) == 1:
+                    must_conditions.append(
+                        FieldCondition(key="metadata.document_id", match=MatchValue(value=_doc_ids[0]))
+                    )
+                else:
+                    must_conditions.append(
+                        FieldCondition(key="metadata.document_id", match=MatchAny(any=_doc_ids))
+                    )
+            scroll_filter = Filter(must=must_conditions) if must_conditions else None
+
+            all_points = self._scroll_all_points(scroll_filter=scroll_filter, limit=512)
             filtered: list = []
             for p in all_points:
                 meta = p.payload.get("metadata", {})
                 if patient_mrn and str(meta.get("patient_mrn", "") or "").strip() != patient_mrn:
                     continue
-                if document_id and str(meta.get("document_id", "") or "").strip() != document_id:
+                if patient_id and str(meta.get("patient_id", "") or "").strip() != patient_id:
+                    continue
+                if tenant_id and str(meta.get("tenant_id", "") or "").strip() != tenant_id:
+                    continue
+                if org_id and str(meta.get("org_id", "") or "").strip() != org_id:
+                    continue
+                if _doc_ids:
+                    chunk_doc_id = str(meta.get("document_id", "") or "").strip()
+                    if chunk_doc_id not in _doc_ids:
+                        continue
+                elif document_id and str(meta.get("document_id", "") or "").strip() != document_id:
                     continue
                 content = str(p.payload.get("page_content", "") or "").strip()
                 if content:
@@ -417,7 +553,7 @@ class ClinicalNotesRAGTool:
             scored = sorted(zip(filtered, scores), key=lambda x: x[1], reverse=True)
             results = [doc for doc, score in scored[:self.reranker_top_k] if score > 0]
             logger.info(
-                "BM25 fallback over %d patient chunks → %d hits for query %r",
+                "BM25 fallback over %d scoped chunks → %d hits for query %r",
                 len(filtered), len(results), query[:60],
             )
             return results
@@ -440,6 +576,286 @@ class ClinicalNotesRAGTool:
             return []
         raw = _re.sub(r"(?<=\d),(?=\d)", "", raw)
         return _re.findall(r"[a-z0-9]+(?:\.[0-9]+)?", raw)
+
+    @staticmethod
+    def _is_table_or_numeric_query(query: str) -> bool:
+        q = (query or "").lower()
+        return bool(_re.search(
+            r"\b(lab|laboratory|result|value|range|reference|vital|blood pressure|bp|heart rate|"
+            r"hba1c|a1c|creatinine|egfr|glucose|ldl|hdl|inr|bun|sodium|potassium|"
+            r"allergen|ige|class|positive|sensiti|test|panel|"
+            r"benefit|coverage|copay|coinsurance|deductible|policy|limit|allowance)\b|\d",
+            q,
+        ))
+
+    @staticmethod
+    def _is_chronology_query(query: str) -> bool:
+        q = (query or "").lower()
+        return bool(_re.search(
+            r"\b(trend|timeline|chronolog|over time|compare|change|changed|started|stopped|"
+            r"initiated|increased|decreased|latest|recent|current|most recent|newer|later)\b",
+            q,
+        ))
+
+    @staticmethod
+    def _is_admin_query(query: str) -> bool:
+        q = (query or "").lower()
+        return bool(_re.search(
+            r"\b(benefit|coverage|copay|co[- ]?insurance|deductible|policy|eligibility|"
+            r"allowance|limit|covered|insurance|claim)\b",
+            q,
+        ))
+
+    @staticmethod
+    def _date_sort_value(meta: dict) -> str:
+        for key in ("event_date", "row_date", "clinical_date", "encounter_date", "document_date"):
+            raw = str((meta or {}).get(key) or "").strip()
+            if raw:
+                return raw
+        return ""
+
+    @staticmethod
+    def _safe_int(value, default: int = 0) -> int:
+        try:
+            return int(value)
+        except Exception:
+            return default
+
+    def _scope_filter(
+        self,
+        patient_mrn: str = None,
+        document_id: str = None,
+        document_ids: list = None,
+        patient_id: str = None,
+        tenant_id: str = None,
+        org_id: str = None,
+        chunk_kinds: list[str] | None = None,
+    ):
+        from qdrant_client.models import Filter, FieldCondition, MatchValue, MatchAny
+
+        _doc_ids: list[str] = [str(d).strip() for d in (document_ids or []) if str(d).strip()]
+        if document_id and document_id not in _doc_ids:
+            _doc_ids.append(document_id)
+
+        must_conditions = []
+        if patient_mrn:
+            must_conditions.append(FieldCondition(key="metadata.patient_mrn", match=MatchValue(value=patient_mrn)))
+        if patient_id and patient_id != patient_mrn:
+            must_conditions.append(FieldCondition(key="metadata.patient_id", match=MatchValue(value=patient_id)))
+        if tenant_id:
+            must_conditions.append(FieldCondition(key="metadata.tenant_id", match=MatchValue(value=tenant_id)))
+        if org_id:
+            must_conditions.append(FieldCondition(key="metadata.org_id", match=MatchValue(value=org_id)))
+        if _doc_ids:
+            if len(_doc_ids) == 1:
+                must_conditions.append(FieldCondition(key="metadata.document_id", match=MatchValue(value=_doc_ids[0])))
+            else:
+                must_conditions.append(FieldCondition(key="metadata.document_id", match=MatchAny(any=_doc_ids)))
+        if chunk_kinds:
+            if len(chunk_kinds) == 1:
+                must_conditions.append(FieldCondition(key="metadata.chunk_kind", match=MatchValue(value=chunk_kinds[0])))
+            else:
+                must_conditions.append(FieldCondition(key="metadata.chunk_kind", match=MatchAny(any=chunk_kinds)))
+        return Filter(must=must_conditions) if must_conditions else None
+
+    def _retrieve_fact_documents(
+        self,
+        query: str,
+        patient_mrn: str = None,
+        document_id: str = None,
+        document_ids: list = None,
+        patient_id: str = None,
+        tenant_id: str = None,
+        org_id: str = None,
+        limit: int = 40,
+    ) -> list:
+        """Retrieve additive row/event fact docs with lexical scoring inside scope."""
+        if not (self._is_table_or_numeric_query(query) or self._is_chronology_query(query)):
+            return []
+        try:
+            from langchain_core.documents import Document as _LCDoc
+
+            chunk_kinds = []
+            if self._is_table_or_numeric_query(query):
+                chunk_kinds.append("table_row")
+            if self._is_chronology_query(query):
+                chunk_kinds.append("clinical_event")
+            if not chunk_kinds:
+                return []
+            scroll_filter = self._scope_filter(
+                patient_mrn=patient_mrn,
+                document_id=document_id,
+                document_ids=document_ids,
+                patient_id=patient_id,
+                tenant_id=tenant_id,
+                org_id=org_id,
+                chunk_kinds=chunk_kinds,
+            )
+            points = self._scroll_all_points(scroll_filter=scroll_filter, limit=512)
+            if not points:
+                return []
+
+            q_tokens = set(self._bm25_tokenize(query))
+            q_numbers = set(_re.findall(r"\d+(?:\.\d+)?", (query or "").replace(",", "")))
+            scored: list[tuple[float, object]] = []
+            admin_query = self._is_admin_query(query)
+            chrono_query = self._is_chronology_query(query)
+            medication_query = bool(_re.search(
+                r"\b(medication|medications|meds|drug|rx|prescrib|prescription|"
+                r"started|start|initiated|added|stopped|discontinued|increased|"
+                r"decreased|dose|dosage|change|changes)\b",
+                query or "",
+                _re.IGNORECASE,
+            ))
+            medication_domain_query = bool(_re.search(
+                r"\b(medication|medications|meds|drug|rx|prescrib|prescription|dose|dosage)\b",
+                query or "",
+                _re.IGNORECASE,
+            ))
+            bp_query = bool(_re.search(r"\b(office\s+bp|office\s+blood pressure|blood pressure|bp|vitals?)\b", query or "", _re.IGNORECASE))
+            office_query = bool(_re.search(r"\b(office|clinic|vital|vitals|in[- ]office)\b", query or "", _re.IGNORECASE))
+            allergen_class_query = bool(_re.search(r"\b(allergen|ige|class|positive|sensiti)\b", query or "", _re.IGNORECASE))
+            clinical_value_query = bool(_re.search(
+                r"\b(lab|laboratory|result|value|vital|blood pressure|bp|heart rate|"
+                r"hba1c|a1c|creatinine|egfr|glucose|ldl|hdl|inr|bun|sodium|potassium)\b",
+                query or "",
+                _re.IGNORECASE,
+            ))
+
+            for p in points:
+                meta = p.payload.get("metadata", {}) or {}
+                content = str(p.payload.get("page_content", "") or "")
+                fact_text = " ".join([
+                    content,
+                    str(meta.get("test_name", "")),
+                    str(meta.get("benefit_name", "")),
+                    str(meta.get("event_name", "")),
+                    str(meta.get("event_action", "")),
+                    str(meta.get("medication_name", "")),
+                    str(meta.get("result_value", "")),
+                    str(meta.get("result_class", "")),
+                    str(meta.get("result_interpretation", "")),
+                    str(meta.get("coverage_value", "")),
+                    str(meta.get("reference_range", "")),
+                    str(meta.get("section_title", "")),
+                ])
+                tokens = set(self._bm25_tokenize(fact_text))
+                overlap = len(q_tokens & tokens)
+                numbers = set(_re.findall(r"\d+(?:\.\d+)?", fact_text.replace(",", "")))
+                number_overlap = len(q_numbers & numbers)
+
+                score = float(overlap) + (2.0 * number_overlap)
+                if admin_query and meta.get("fact_type") == "administrative_benefit":
+                    score += 3.0
+                if chrono_query and meta.get("chunk_kind") == "clinical_event":
+                    score += 2.0
+                if meta.get("chunk_kind") == "table_row" and self._is_table_or_numeric_query(query):
+                    score += 1.0
+                if medication_query:
+                    if meta.get("event_type") == "medication_change":
+                        score += 5.0
+                    elif meta.get("event_type") == "measurement":
+                        score -= 2.0
+                    elif meta.get("chunk_kind") == "table_row" and not (clinical_value_query or admin_query or allergen_class_query):
+                        score -= 5.0
+                    if medication_domain_query and not clinical_value_query and meta.get("event_type") and meta.get("event_type") != "medication_change":
+                        score -= 5.0
+                if bp_query and meta.get("chunk_kind") == "table_row":
+                    test = str(meta.get("test_name", "") or "").lower()
+                    section = str(meta.get("section_title", "") or "").lower()
+                    if "blood pressure" in test or test == "bp" or " bp" in test:
+                        score += 4.0
+                        if "vital" in section:
+                            score += 2.0
+                if office_query and _re.search(r"\b(home|patient reported|self[- ]reported)\b", fact_text, _re.IGNORECASE):
+                    score -= 3.0
+                if allergen_class_query and meta.get("result_class"):
+                    score += 3.0
+                if score <= 0:
+                    continue
+
+                scored.append((score, _LCDoc(page_content=content, metadata=meta)))
+
+            scored.sort(
+                key=lambda item: (
+                    item[0],
+                    self._date_sort_value(item[1].metadata),
+                    str(item[1].metadata.get("document_id", "")),
+                ),
+                reverse=True,
+            )
+            docs = [doc for _, doc in scored[:limit]]
+            if docs:
+                logger.info("Fact retrieval: %d scoped row/event fact(s) for query %r", len(docs), query[:80])
+            return docs
+        except Exception as e:
+            logger.warning("Fact retrieval failed: %s", e)
+            return []
+
+    def _dedupe_documents(self, docs: list) -> list:
+        out = []
+        seen: set[str] = set()
+        for doc in docs or []:
+            meta = getattr(doc, "metadata", {}) or {}
+            key = str(meta.get("fact_id") or "|".join([
+                str(meta.get("document_id", "")),
+                str(meta.get("chunk_kind", "")),
+                str(meta.get("chunk_index", "")),
+                hashlib.md5(str(getattr(doc, "page_content", "") or "").encode()).hexdigest(),
+            ]))
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(doc)
+        return out
+
+    def _apply_chronology_controls(
+        self,
+        query: str,
+        docs: list,
+        patient_mrn: str = None,
+        document_id: str = None,
+        document_ids: list = None,
+        patient_id: str = None,
+        tenant_id: str = None,
+        org_id: str = None,
+    ) -> list:
+        """Guarantee scoped document coverage and date-aware ordering for chronology queries."""
+        if not self._is_chronology_query(query):
+            return docs
+        _doc_ids: list[str] = [str(d).strip() for d in (document_ids or []) if str(d).strip()]
+        if document_id and document_id not in _doc_ids:
+            _doc_ids.append(document_id)
+
+        additions = []
+        present = {str((getattr(d, "metadata", {}) or {}).get("document_id", "") or "") for d in docs}
+        if len(_doc_ids) > 1:
+            missing = [did for did in _doc_ids if did not in present]
+            for did in missing:
+                scoped = self._bm25_fallback_all_chunks(
+                    query,
+                    patient_mrn=patient_mrn,
+                    document_ids=[did],
+                    patient_id=patient_id,
+                    tenant_id=tenant_id,
+                    org_id=org_id,
+                )
+                if scoped:
+                    additions.append(scoped[0])
+
+        combined = self._dedupe_documents(list(docs or []) + additions)
+        reverse = bool(_re.search(r"\b(latest|recent|current|most recent|newer|later)\b", (query or "").lower()))
+        combined.sort(
+            key=lambda d: (
+                self._date_sort_value(getattr(d, "metadata", {}) or {}),
+                str((getattr(d, "metadata", {}) or {}).get("document_id", "")),
+                self._safe_int((getattr(d, "metadata", {}) or {}).get("source_chunk_index", (getattr(d, "metadata", {}) or {}).get("chunk_index", 0))),
+            ),
+            reverse=reverse,
+        )
+        if additions:
+            logger.info("Chronology controls injected %d scoped document candidate(s)", len(additions))
+        return combined
 
     def _detect_metadata_hints(self, query: str) -> dict[str, list[str]]:
         """Detect document type and section hints from the query.
@@ -477,6 +893,14 @@ class ClinicalNotesRAGTool:
                                          "Nutrition", "Diet"]
         if _re.search(r"\bvital|\bblood\s+pressure|\bheart\s+rate|\btemperature", q):
             hints["section_titles"] += ["Vitals", "Vital Signs", "Physical Examination"]
+        if _re.search(r"\bbnp\b|\bnatriuretic\s+peptide\b|\bnt[-\s]?probnp\b", q):
+            # BNP is a lab value — prefer LABS and ADMISSION LABS sections over
+            # clinical narrative sections where interpretation text may appear.
+            hints["doc_types"].append("lab_report")
+            hints["section_titles"] += [
+                "LABS", "ADMISSION LABS", "Laboratory", "Lab Results",
+                "Admission Laboratory", "Labs on Admission",
+            ]
         if _re.search(r"weight\s+loss.{0,20}hospital|total\s+weight\s+lost?|weight\s+was\s+lost|weight\s+lost.{0,20}hospital", q):
             # Prefer discharge summary sections for hospitalization-outcome weight queries
             # to avoid returning intermediate mid-stay assessment values.
@@ -534,7 +958,103 @@ class ClinicalNotesRAGTool:
             chunk_index,
         )
 
-    def search(self, query: str, document_id: str = None, patient_mrn: str = None) -> str:
+    @staticmethod
+    def _format_source_header(source_index: int, meta: dict, section: str = None, page: str = None) -> str:
+        """Render auditable source metadata for selected-document retrieval."""
+        meta = meta or {}
+        sec = section if section is not None else meta.get("section_title", "Section")
+        page_val = page if page is not None else meta.get("page_number", "?")
+        doc_id = meta.get("document_id", "")
+        doc_type = meta.get("document_type", "")
+        chunk_kind = meta.get("chunk_kind", "")
+        encounter_date = meta.get("encounter_date", "")
+        document_date = meta.get("document_date", "")
+        clinical_date = meta.get("clinical_date", "")
+        mrn = meta.get("patient_mrn", "")
+        patient_id = meta.get("patient_id", "")
+        patient_ref = mrn or patient_id
+        date_bits = []
+        if encounter_date:
+            date_bits.append(f"Encounter Date: {encounter_date}")
+        if document_date:
+            date_bits.append(f"Document Date: {document_date}")
+        if clinical_date:
+            date_bits.append(f"Clinical Date: {clinical_date}")
+        if chunk_kind:
+            date_bits.append(f"Chunk Kind: {chunk_kind}")
+        date_suffix = (" | " + " | ".join(date_bits)) if date_bits else ""
+        return (
+            f"[Source {source_index} | Document ID: {doc_id} | Patient/MRN: {patient_ref} | "
+            f"Document Type: {doc_type} | Section: {sec} | Page {page_val}{date_suffix}]"
+        )
+
+    @staticmethod
+    def _compact_evidence_span(query: str, content: str, max_chars: int = 900) -> str:
+        """Return a compact, query-centered evidence span for scoped document answers."""
+        text = (content or "").strip()
+        if len(text) <= max_chars:
+            return text
+
+        terms = {
+            t.lower()
+            for t in _re.findall(r"[A-Za-z0-9]+", query or "")
+            if len(t) >= 3 and t.lower() not in {"the", "and", "for", "with", "from", "that", "this", "what", "were"}
+        }
+        if not terms:
+            return text[:max_chars].rstrip() + "\n...[truncated]"
+
+        best_pos = -1
+        best_score = -1
+        lowered = text.lower()
+        for term in terms:
+            start = 0
+            while True:
+                pos = lowered.find(term, start)
+                if pos < 0:
+                    break
+                window = lowered[max(0, pos - 250): min(len(lowered), pos + 250)]
+                score = sum(1 for t in terms if t in window)
+                if _re.search(r"\d", window):
+                    score += 1
+                if score > best_score:
+                    best_score = score
+                    best_pos = pos
+                start = pos + len(term)
+
+        if best_pos < 0:
+            return text[:max_chars].rstrip() + "\n...[truncated]"
+
+        half = max_chars // 2
+        start = max(0, best_pos - half)
+        end = min(len(text), start + max_chars)
+        start = max(0, end - max_chars)
+
+        # Snap to nearby line/sentence boundary when possible.
+        if start > 0:
+            boundary = max(text.rfind("\n", 0, start + 120), text.rfind(". ", 0, start + 120))
+            if boundary > max(0, start - 120):
+                start = boundary + 1
+        if end < len(text):
+            boundary = text.find("\n", max(start, end - 120), min(len(text), end + 120))
+            if boundary < 0:
+                boundary = text.find(". ", max(start, end - 120), min(len(text), end + 120))
+            if boundary > 0:
+                end = boundary + 1
+
+        prefix = "...[truncated]\n" if start > 0 else ""
+        suffix = "\n...[truncated]" if end < len(text) else ""
+        return prefix + text[start:end].strip() + suffix
+
+    def search(
+        self,
+        query: str,
+        document_id: str = None,
+        patient_mrn: str = None,
+        patient_id: str = None,
+        tenant_id: str = None,
+        org_id: str = None,
+        document_ids: list = None,
+    ) -> str:
         """
         Hybrid retrieval: dense MMR + per-query BM25 + RRF fusion + cross-encoder
         reranking + metadata soft-boost + neighbor chunk expansion.
@@ -545,15 +1065,27 @@ class ClinicalNotesRAGTool:
         - Medical abbreviation expansion on the dense search query.
         - Metadata soft-boost re-ranks type/section-matching docs to front.
         - Neighbor expansion uses Qdrant directly (no in-memory corpus needed).
+
+        Phase 3 additions:
+        - document_ids: list of allowed document_ids (multi-document scope).
+        - patient_id: additional patient ownership filter alongside patient_mrn.
+        - Single document_id merged into document_ids for unified handling.
         """
         try:
             t0 = _time.perf_counter()
 
+            # ── Normalise document scope ───────────────────────────────────────
+            # Merge legacy single document_id into the document_ids list so all
+            # filtering code operates on a single canonical list.
+            _doc_ids: list[str] = list(document_ids or [])
+            if document_id and document_id not in _doc_ids:
+                _doc_ids.append(document_id)
+
             # ── Build Qdrant filter for patient/document scoping ───────────────
             _qdrant_filter = None
             must_conditions = []
-            if patient_mrn or document_id:
-                from qdrant_client.models import Filter, FieldCondition, MatchValue
+            if patient_mrn or patient_id or tenant_id or org_id or _doc_ids:
+                from qdrant_client.models import Filter, FieldCondition, MatchValue, MatchAny
                 if patient_mrn:
                     must_conditions.append(
                         FieldCondition(
@@ -561,13 +1093,42 @@ class ClinicalNotesRAGTool:
                             match=MatchValue(value=patient_mrn),
                         )
                     )
-                if document_id:
+                if patient_id and patient_id != patient_mrn:
                     must_conditions.append(
                         FieldCondition(
-                            key="metadata.document_id",
-                            match=MatchValue(value=document_id),
+                            key="metadata.patient_id",
+                            match=MatchValue(value=patient_id),
                         )
                     )
+                if tenant_id:
+                    must_conditions.append(
+                        FieldCondition(
+                            key="metadata.tenant_id",
+                            match=MatchValue(value=tenant_id),
+                        )
+                    )
+                if org_id:
+                    must_conditions.append(
+                        FieldCondition(
+                            key="metadata.org_id",
+                            match=MatchValue(value=org_id),
+                        )
+                    )
+                if _doc_ids:
+                    if len(_doc_ids) == 1:
+                        must_conditions.append(
+                            FieldCondition(
+                                key="metadata.document_id",
+                                match=MatchValue(value=_doc_ids[0]),
+                            )
+                        )
+                    else:
+                        must_conditions.append(
+                            FieldCondition(
+                                key="metadata.document_id",
+                                match=MatchAny(any=_doc_ids),
+                            )
+                        )
                 _qdrant_filter = Filter(must=must_conditions)
 
             # ── Stage 1: Dense MMR search (Phase 2.2 adaptive fetch_k) ────────
@@ -577,6 +1138,15 @@ class ClinicalNotesRAGTool:
             rewritten_query = self._rewrite_clinical_query(query)
             adaptive_k = self._adaptive_fetch_k(rewritten_query)
             expanded_query = self._expand_medical_query(rewritten_query)
+            fact_docs = self._retrieve_fact_documents(
+                query,
+                patient_mrn=patient_mrn,
+                patient_id=patient_id,
+                tenant_id=tenant_id,
+                org_id=org_id,
+                document_ids=_doc_ids,
+                limit=50 if self._is_chronology_query(query) else 30,
+            )
 
             search_kwargs = {
                 "k": adaptive_k,
@@ -604,44 +1174,108 @@ class ClinicalNotesRAGTool:
             bm25_docs = self._bm25_score_candidates(rewritten_query, dense_docs)
             t_bm25 = _time.perf_counter() - t0 - t_dense
 
+            # ── Stage 2.5: Pre-emptive BM25 full-corpus supplement (Phase 1.3) ─
+            # When dense results are sparse OR the query mentions rare clinical
+            # abbreviations that embedding models under-represent, run a full-corpus
+            # BM25 search in parallel and include its top results in the RRF pool.
+            # This prevents sparse-embedding blind spots from killing retrieval before
+            # the reranker even gets a chance.
+            _RARE_LAB_ABBR_RE = _re.compile(
+                r"\b(?:bnp|nt[-\s]?probnp|hba1c|cha2ds2|has[-\s]?bled|lvef|rvsp|troponin|creatinine|egfr)\b",
+                _re.IGNORECASE,
+            )
+            _scoped_document_query = bool(_doc_ids)
+            _need_full_corpus = (
+                len(dense_docs) < 3
+                or (
+                    not _scoped_document_query
+                    and (
+                        bool(_RARE_LAB_ABBR_RE.search(query))
+                        or _re.search(r"\b\d+(?:\.\d+)?\s*(?:pg/mL|ng/mL|mg/dL|mmol/L|%|IU/L)\b", query, _re.IGNORECASE)
+                    )
+                )
+            )
+            if _need_full_corpus:
+                logger.debug(
+                    "Pre-emptive full-corpus BM25 triggered "
+                    "(dense_docs=%d, rare_abbr=%s)",
+                    len(dense_docs),
+                    bool(_RARE_LAB_ABBR_RE.search(query)),
+                )
+                full_bm25_docs = self._bm25_fallback_all_chunks(
+                    rewritten_query,
+                    patient_mrn=patient_mrn,
+                    patient_id=patient_id,
+                    tenant_id=tenant_id,
+                    org_id=org_id,
+                    document_ids=_doc_ids,
+                )
+                if full_bm25_docs:
+                    # Merge with dense via RRF so relevance ordering still applies.
+                    dense_docs = list(self._reciprocal_rank_fusion(dense_docs, full_bm25_docs, k=60))
+
             # ── Stage 3: RRF fusion ────────────────────────────────────────────
             if bm25_docs:
                 fused = self._reciprocal_rank_fusion(dense_docs, bm25_docs, k=60)
             else:
                 fused = dense_docs
+            if fact_docs:
+                fused = self._reciprocal_rank_fusion(fact_docs, fused, k=20)
 
             if not fused:
                 return f"No relevant documents found for: {query}"
 
             # ── Stage 4: Cross-encoder reranking ──────────────────────────────
-            _MIN_RERANKER_SCORE = 0.05
+            _MIN_RERANKER_SCORE = 0.08
             rerank_pool = fused[:adaptive_k]  # cap reranker input at adaptive fetch_k
             _top_reranker_score: float = 0.0
             if self.reranker and len(rerank_pool) > 1:
                 # Use rewritten_query for cross-encoder so clinical vocabulary added by
                 # Phase 2.6 rewrites also improves reranker scoring (not just retrieval).
                 pairs = [[rewritten_query, doc.page_content] for doc in rerank_pool]
+
+                # Phase 2.5 — Truncation detection: ms-marco-MiniLM-L-6-v2 has a hard
+                # 512-token limit. At ~4 chars/token, a query+chunk combination approaching
+                # 1920 chars risks silent truncation and degraded reranker accuracy.
+                _TRUNCATION_CHAR_THRESHOLD = 1920  # ~480 tokens × 4 chars/token
+                for _pair_q, _pair_doc in pairs[:3]:  # Sample first 3 pairs for efficiency
+                    _combined_len = len(_pair_q) + len(_pair_doc)
+                    if _combined_len > _TRUNCATION_CHAR_THRESHOLD:
+                        logger.warning(
+                            "Cross-encoder truncation risk: query=%d chars, chunk=%d chars, "
+                            "combined=%d chars (threshold=%d) — reranker may truncate silently",
+                            len(_pair_q),
+                            len(_pair_doc),
+                            _combined_len,
+                            _TRUNCATION_CHAR_THRESHOLD,
+                        )
+                        break  # Log once per search call, not per pair
                 scores = self.reranker.predict(pairs)
                 scored_docs = sorted(
                     zip(rerank_pool, scores), key=lambda x: x[1], reverse=True
                 )
                 scored_docs = [(doc, s) for doc, s in scored_docs if s >= _MIN_RERANKER_SCORE]
                 if not scored_docs:
-                    # Phase 2.6: BM25 fallback over all patient chunks before giving up.
+                    # Phase 2.6: BM25 fallback over scoped chunks before giving up.
                     # The cross-encoder rejected every dense candidate, but the answer
                     # may still exist in a chunk that dense search missed entirely.
                     logger.info(
-                        "Reranker rejected all candidates — activating BM25 fallback over full corpus"
+                        "Reranker rejected all candidates — activating BM25 fallback over scoped corpus"
                     )
                     fallback_docs = self._bm25_fallback_all_chunks(
-                        rewritten_query, patient_mrn=patient_mrn, document_id=document_id
+                        rewritten_query,
+                        patient_mrn=patient_mrn,
+                        patient_id=patient_id,
+                        tenant_id=tenant_id,
+                        org_id=org_id,
+                        document_ids=_doc_ids,
                     )
-                    if not fallback_docs:
+                    if not fallback_docs and not fact_docs:
                         return (f"No sufficiently relevant clinical data found for: {query}. "
                                 f"Try rephrasing with specific clinical terms "
                                 f"(e.g., medication names, lab tests, section names, dates).")
                     # Use fallback results — bypass further reranking, mark LOW confidence
-                    docs = fallback_docs
+                    docs = self._dedupe_documents((fact_docs or [])[:10] + (fallback_docs or []))
                     _top_reranker_score = 0.0
                     confidence = "LOW"
                     # Skip to rendering (jump over the reranker block below)
@@ -651,9 +1285,9 @@ class ClinicalNotesRAGTool:
                     for i, d in enumerate(docs, 1):
                         sec = d.metadata.get("section_title", d.metadata.get("section_header", "Section"))
                         page = d.metadata.get("page_number", d.metadata.get("page", "?"))
-                        mrn_val = d.metadata.get("patient_mrn", "")
-                        header = f"[Source {i} | Section: {sec} | Page {page} | MRN: {mrn_val}]"
-                        parts.append(f"{header}\n{d.page_content}")
+                        header = self._format_source_header(i, d.metadata, sec, page)
+                        body = self._compact_evidence_span(query, d.page_content) if _doc_ids else d.page_content
+                        parts.append(f"{header}\n{body}")
                     t_total = _time.perf_counter() - t0
                     logger.info(
                         "Search (BM25 fallback): %.2fs → %d docs [confidence=LOW]", t_total, len(docs)
@@ -663,17 +1297,34 @@ class ClinicalNotesRAGTool:
                 docs = [doc for doc, _ in scored_docs[:self.reranker_top_k]]
             else:
                 docs = rerank_pool[:self.k]
+            if fact_docs:
+                fact_keep = min(len(fact_docs), 16 if self._is_chronology_query(query) else 10)
+                docs = self._dedupe_documents(fact_docs[:fact_keep] + docs)
 
             # ── Stage 4b: Metadata soft-boost (Phase 2.4) ─────────────────────
             # Re-order (never discard) docs that match query-inferred type/section
             # hints so the most contextually relevant chunks appear first.
             docs = self._apply_metadata_boost(query, docs)
+            docs = self._apply_chronology_controls(
+                query,
+                docs,
+                patient_mrn=patient_mrn,
+                patient_id=patient_id,
+                tenant_id=tenant_id,
+                org_id=org_id,
+                document_id=_doc_ids[0] if len(_doc_ids) == 1 else None,
+                document_ids=_doc_ids if len(_doc_ids) != 1 else None,
+            )
 
             # ── Stage 5: Adjacent-chunk expansion (Qdrant-based, Phase 2.1) ───
             docs = self._expand_with_neighbors(
                 docs,
                 patient_mrn=patient_mrn,
-                document_id=document_id,
+                patient_id=patient_id,
+                tenant_id=tenant_id,
+                org_id=org_id,
+                document_id=_doc_ids[0] if len(_doc_ids) == 1 else None,
+                document_ids=_doc_ids if len(_doc_ids) != 1 else None,
             )
 
             t_total = _time.perf_counter() - t0
@@ -687,7 +1338,7 @@ class ClinicalNotesRAGTool:
                 adaptive_k, "yes" if expanded_query != query else "no", confidence,
             )
 
-            # ── Render with source citations for LLM grounding ────────────────
+            # ── Render with [Source N | Section: ... | Page] citations for LLM grounding ─
             confidence_banner = (
                 f"[RETRIEVAL_CONFIDENCE: {confidence} | {len(docs)} source(s)"
                 + (f" | top_score={_top_reranker_score:.2f}" if _top_reranker_score > 0 else "")
@@ -697,9 +1348,9 @@ class ClinicalNotesRAGTool:
             for i, d in enumerate(docs, 1):
                 sec = d.metadata.get("section_title", "Section")
                 page = d.metadata.get("page_number", "?")
-                mrn = d.metadata.get("patient_mrn", "")
-                header = f"[Source {i} | Section: {sec} | Page {page} | MRN: {mrn}]"
-                parts.append(f"{header}\n{d.page_content}")
+                header = self._format_source_header(i, d.metadata, sec, page)
+                body = self._compact_evidence_span(query, d.page_content) if _doc_ids else d.page_content
+                parts.append(f"{header}\n{body}")
             return confidence_banner + "\n\n---\n\n".join(parts)
         except Exception as e:
             return f"Error during search: {e}"
@@ -756,12 +1407,19 @@ class ClinicalNotesRAGTool:
         sorted_keys = sorted(scores, key=scores.get, reverse=True)
         return [doc_map[k] for k in sorted_keys]
 
-    def _expand_with_neighbors(self, docs: list, patient_mrn: str = None, document_id: str = None) -> list:
+    def _expand_with_neighbors(
+        self, docs: list, patient_mrn: str = None, document_id: str = None,
+        document_ids: list = None, patient_id: str = None,
+        tenant_id: str = None, org_id: str = None,
+    ) -> list:
         """Expand each retrieved document with its ±1 chunk-index neighbors.
 
         Phase 2.1 change: uses Qdrant queries instead of the old global BM25
         corpus.  This means neighbor lookup is always up-to-date (no staleness
         after uploads) and requires no startup memory overhead.
+
+        Phase 3: document_ids param enforces multi-document scope so neighbor
+        fetch never crosses into unselected documents.
 
         Strategy:
         - Group retrieved docs by document_id (one Qdrant scroll per unique doc).
@@ -773,7 +1431,12 @@ class ClinicalNotesRAGTool:
         and/or document_id so neighbors from other patients are never fetched.
         """
         from langchain_core.documents import Document
-        from qdrant_client.models import Filter, FieldCondition, MatchValue
+        from qdrant_client.models import Filter, FieldCondition, MatchValue, MatchAny
+
+        # Normalise document scope
+        _doc_ids: list[str] = list(document_ids or [])
+        if document_id and document_id not in _doc_ids:
+            _doc_ids.append(document_id)
 
         if not docs:
             return docs
@@ -785,6 +1448,9 @@ class ClinicalNotesRAGTool:
 
         for d in docs:
             meta = d.metadata or {}
+            if meta.get("chunk_kind") in {"table_row", "clinical_event"}:
+                no_index_docs.append(d)
+                continue
             did = str(meta.get("document_id") or "").strip()
             cidx = meta.get("chunk_index", -1)
             try:
@@ -817,10 +1483,31 @@ class ClinicalNotesRAGTool:
                         FieldCondition(key="metadata.patient_mrn",
                                        match=MatchValue(value=patient_mrn))
                     )
-                # Always filter by document_id so we only fetch the right doc.
+                if patient_id:
+                    must_conds.append(
+                        FieldCondition(key="metadata.patient_id",
+                                       match=MatchValue(value=patient_id))
+                    )
+                if tenant_id:
+                    must_conds.append(
+                        FieldCondition(key="metadata.tenant_id",
+                                       match=MatchValue(value=tenant_id))
+                    )
+                if org_id:
+                    must_conds.append(
+                        FieldCondition(key="metadata.org_id",
+                                       match=MatchValue(value=org_id))
+                    )
+                # Always filter by the specific document_id being expanded so we
+                # only fetch neighbors from the same document.
+                # When multi-document scope is active (_doc_ids), verify the
+                # document being expanded is within the allowed set.
+                if _doc_ids and did not in _doc_ids:
+                    # Skip expansion for documents outside the active scope
+                    continue
                 must_conds.append(
                     FieldCondition(key="metadata.document_id",
-                                   match=MatchValue(value=document_id or did))
+                                   match=MatchValue(value=did))
                 )
                 scroll_filter = Filter(must=must_conds)
 
@@ -900,8 +1587,14 @@ class ClinicalNotesRAGTool:
             prev_fname = fname
             prev_cidx = cidx
 
-        # Append original no-index docs that couldn't be expanded
-        expanded.extend(no_index_docs)
+        # Keep additive fact docs ahead of narrative neighbor context so exact
+        # row/event evidence remains prominent in the synthesis prompt.
+        fact_no_index = [
+            d for d in no_index_docs
+            if (getattr(d, "metadata", {}) or {}).get("chunk_kind") in {"table_row", "clinical_event"}
+        ]
+        other_no_index = [d for d in no_index_docs if d not in fact_no_index]
+        expanded = fact_no_index + expanded + other_no_index
 
         added = len(expanded) - len(docs)
         if added > 0:
@@ -1273,19 +1966,80 @@ class ClinicalNotesRAGTool:
             return best_cat if best_score >= 2 else None
         return None
 
-    def get_order_chunks_for_patient(self, patient_mrn: str) -> str:
+    def get_order_chunks_for_patient(
+        self,
+        patient_mrn: str = "",
+        document_id: str = None,
+        document_ids: list = None,
+        patient_id: str = None,
+        tenant_id: str = None,
+        org_id: str = None,
+    ) -> str:
         """Retrieve ALL order-related chunks for a patient: labs, medications,
         procedures, referrals, discharge prescriptions, care directives.
 
         Format-agnostic approach:
-        - Retrieve all patient chunks (paginated scroll for long documents)
+        - Retrieve all scoped chunks (paginated scroll for long documents)
         - Infer order categories from chunk content
         - Return them grouped by inferred order category
         """
         try:
-            from qdrant_client.models import Filter, FieldCondition, MatchValue
+            from qdrant_client.models import Filter, FieldCondition, MatchValue, MatchAny
 
             t0 = _time.perf_counter()
+            _doc_ids: list[str] = [str(d).strip() for d in (document_ids or []) if str(d).strip()]
+            if document_id and document_id not in _doc_ids:
+                _doc_ids.append(document_id)
+
+            must_conditions = []
+            if patient_mrn:
+                must_conditions.append(
+                    FieldCondition(
+                        key="metadata.patient_mrn",
+                        match=MatchValue(value=patient_mrn),
+                    )
+                )
+            if patient_id and patient_id != patient_mrn:
+                must_conditions.append(
+                    FieldCondition(
+                        key="metadata.patient_id",
+                        match=MatchValue(value=patient_id),
+                    )
+                )
+            if tenant_id:
+                must_conditions.append(
+                    FieldCondition(
+                        key="metadata.tenant_id",
+                        match=MatchValue(value=tenant_id),
+                    )
+                )
+            if org_id:
+                must_conditions.append(
+                    FieldCondition(
+                        key="metadata.org_id",
+                        match=MatchValue(value=org_id),
+                    )
+                )
+            if _doc_ids:
+                if len(_doc_ids) == 1:
+                    must_conditions.append(
+                        FieldCondition(
+                            key="metadata.document_id",
+                            match=MatchValue(value=_doc_ids[0]),
+                        )
+                    )
+                else:
+                    must_conditions.append(
+                        FieldCondition(
+                            key="metadata.document_id",
+                            match=MatchAny(any=_doc_ids),
+                        )
+                    )
+
+            if not must_conditions:
+                return "Order retrieval requires a patient MRN/patient_id or selected document_id scope."
+
+            scroll_filter = Filter(must=must_conditions)
 
             # Paginate to avoid missing >500 chunks.
             # (Longer EHR extracts and multi-encounter PDFs exceed that easily.)
@@ -1295,14 +2049,7 @@ class ClinicalNotesRAGTool:
             while True:
                 results = self.client.scroll(
                     collection_name=self.collection_name,
-                    scroll_filter=Filter(
-                        must=[
-                            FieldCondition(
-                                key="metadata.patient_mrn",
-                                match=MatchValue(value=patient_mrn),
-                            )
-                        ]
-                    ),
+                    scroll_filter=scroll_filter,
                     limit=512,
                     with_payload=True,
                     with_vectors=False,
@@ -1321,7 +2068,8 @@ class ClinicalNotesRAGTool:
                     break
 
             if not points:
-                return f"No records found for patient MRN: {patient_mrn}"
+                scope_desc = patient_mrn or patient_id or ", ".join(_doc_ids)
+                return f"No records found for scoped order retrieval: {scope_desc}"
 
             # Filter to order-related chunks using content inference.
             order_points: list = []
@@ -1334,7 +2082,8 @@ class ClinicalNotesRAGTool:
                     order_points.append((cat, p))
 
             if not order_points:
-                return f"No order-related data found for patient MRN: {patient_mrn}"
+                scope_desc = patient_mrn or patient_id or ", ".join(_doc_ids)
+                return f"No order-related data found for scoped retrieval: {scope_desc}"
 
             # Sort by inferred category priority, then by (page, chunk_index).
             cat_priority = [
@@ -1389,8 +2138,8 @@ class ClinicalNotesRAGTool:
 
             elapsed = _time.perf_counter() - t0
             logger.info(
-                "Order retrieval: %d/%d chunks inferred as order-related for %s in %.2fs",
-                len(order_points), len(points), patient_mrn, elapsed,
+                "Order retrieval: %d/%d chunks inferred as order-related for mrn=%s docs=%s in %.2fs",
+                len(order_points), len(points), patient_mrn, _doc_ids, elapsed,
             )
 
             return "\n\n".join(parts)
@@ -2152,6 +2901,17 @@ def _safe_json_loads(text: str) -> dict:
 def _norm_key(s: str) -> str:
     s = (s or "").strip().lower()
     s = _re.sub(r"\s+", " ", s)
+    # Normalize common dose/date formatting so duplicate MAP extractions merge
+    # (e.g., "500 mg" vs "500mg", "04/07/26" vs "4/7/2026").
+    s = _re.sub(r"(?<=\d)\s+(?=(?:mg|mcg|g|kg|ml|l|units?|iu|meq|mmol|%)\b)", "", s)
+    def _date_key(m):
+        mo = int(m.group(1))
+        day = int(m.group(2))
+        yr = m.group(3)
+        if len(yr) == 2:
+            yr = "20" + yr
+        return f"{yr}-{mo:02d}-{day:02d}"
+    s = _re.sub(r"\b(\d{1,2})[/-](\d{1,2})[/-](\d{2,4})\b", _date_key, s)
     return s
 
 
@@ -2427,7 +3187,7 @@ def _score_summary_quality(summary: str, merged: dict, indexed_chunks: list[tupl
 
     Returns a dict with a numeric score (0.0-1.0) and per-domain flags for monitoring.
     """
-    raw_text = "\n".join((txt[:600] if txt else "") for _, txt, _ in indexed_chunks).lower()
+    raw_text = "\n".join((txt[:2000] if txt else "") for _, txt, _ in indexed_chunks).lower()
     summary_lower = (summary or "").lower()
 
     _DOMAIN_CHECKS = [
@@ -2711,7 +3471,18 @@ SOURCES:
             max_retries=1,
             model_chain=model_chain,
         )
-        return _safe_json_loads(text2)
+        obj2 = _safe_json_loads(text2)
+        if obj2:
+            return obj2
+        return {
+            "missing_or_unclear": [
+                {
+                    "topic": "map_extraction_json",
+                    "note": "A source group could not be parsed as valid extraction JSON after retry; verify original sources for omitted facts.",
+                    "citations": [],
+                }
+            ]
+        }
 
     with _futures.ThreadPoolExecutor(max_workers=min(len(sources_groups), 3 if is_fast_mode else 4)) as pool:
         extractions = list(pool.map(_extract_group, sources_groups))
@@ -2733,8 +3504,9 @@ SOURCES:
             focus_extractions = list(pool.map(_extract_group, focus_groups))
         merged = _merge_doc_extractions([merged, _merge_doc_extractions(focus_extractions)])
 
-    # Build domain-signal text from all chunks (truncated per chunk for memory safety)
-    signal_text = "\n".join((txt[:600] if txt else "") for _, txt, _ in indexed_chunks)
+    # Build domain-signal text from all chunks. Use a generous per-chunk cap so
+    # a safety domain buried late in a chunk still triggers targeted retry.
+    signal_text = "\n".join((txt[:2000] if txt else "") for _, txt, _ in indexed_chunks)
     missing_domains = _doc_needs_keyword_retry(signal_text, merged, note_type=note_type)
 
     if missing_domains:
@@ -2852,9 +3624,10 @@ SOURCES:
         model_chain=reduce_chain,
     )
 
-    # Phase 4.2 — quality scoring for observability (no latency impact)
+    # Phase 4.2 — quality scoring with one fail-safe retry for missed domains.
     try:
         quality = _score_summary_quality(summary, merged, indexed_chunks)
+        missing_domains = [k for k, v in quality["domain_results"].items() if v == "missing"]
         logger.info(
             "[SummaryQuality] entity=%s score=%.3f text_cov=%.3f payload=%.3f "
             "domains_present=%d domains_captured=%d missing=%s",
@@ -2864,8 +3637,36 @@ SOURCES:
             quality["payload_completeness_score"],
             quality["domains_present_in_source"],
             quality["domains_captured_in_summary"],
-            [k for k, v in quality["domain_results"].items() if v == "missing"],
+            missing_domains,
         )
+        if missing_domains and quality["score"] < float(os.environ.get("MEDGRAPH_SUMMARY_RETRY_QUALITY_THRESHOLD", "0.85")):
+            retry_prompt = (
+                reduce_prompt
+                + "\n\nQUALITY RETRY:\n"
+                + "The source text contains signals for these domains, but the draft summary may have missed them: "
+                + ", ".join(missing_domains)
+                + ". Re-generate the summary using ONLY EXTRACTED_JSON. Include the missing domains when supported; "
+                  "if the extracted JSON is insufficient, explicitly state that the domain needs source verification."
+            )
+            retry_model, retry_summary = _llm_invoke_with_fallback(
+                _get_doc_reduce_llm,
+                retry_prompt,
+                max_retries=1,
+                model_chain=reduce_chain,
+            )
+            retry_quality = _score_summary_quality(retry_summary, merged, indexed_chunks)
+            if retry_quality["score"] >= quality["score"]:
+                summary = retry_summary
+                model_name = retry_model
+                quality = retry_quality
+                missing_domains = [k for k, v in quality["domain_results"].items() if v == "missing"]
+            if missing_domains:
+                summary += (
+                    "\n\nQuality note: source text contains signals for "
+                    + ", ".join(missing_domains)
+                    + ", but the structured extraction/summary did not fully capture them. "
+                      "Verify the cited source document before relying on those domains."
+                )
     except Exception as _qe:
         logger.debug("Quality scoring error (non-critical): %s", _qe)
 
@@ -2952,12 +3753,12 @@ RULES:
 - Target ≤50% of original length (but preserve all discrete data points).
 
 EXAMPLE OUTPUT:
-• DOB 1958-11-03, Male, MRN-2026-004782
-• Admitted 2026-01-15 for acute decompensated HF (NYHA III→IV)
+• DOB [DATE], [SEX], MRN-[ID]
+• Admitted [DATE] for acute decompensated HF (NYHA III→IV)
 • ALLERGIES: Penicillin→Anaphylaxis, Sulfa→Rash, Latex→Contact dermatitis
-• BNP 1842 pg/mL [ABNORMAL], Cr 1.8 mg/dL, K 3.2 mEq/L [LOW]
+• BNP [VALUE] pg/mL [ABNORMAL], Cr 1.8 mg/dL, K 3.2 mEq/L [LOW]
 • Furosemide 40mg IV q12h → transitioned PO 80mg daily day 3
-• Echo 2026-01-16: EF 25%, severe MR, dilated LV
+• Echo [DATE]: EF 25%, severe MR, dilated LV
 
 RECORD SECTION:
 
@@ -3097,9 +3898,8 @@ def _map_reduce_summarize(patient_mrn: str, full_record: str) -> tuple:
 
 # ── Tool definitions ─────────────────────────────────────────────────────────
 
-# Query rewriting removed — saves ~2s per request.
-# The hybrid BM25+dense+RRF search already handles synonyms and abbreviations well.
-# Evaluation showed 92.5% accuracy without query rewriting being a bottleneck.
+# Tool definitions. The active retrieval path still performs lightweight
+# clinical intent rewriting and abbreviation expansion inside search().
 
 
 @tool
@@ -3126,10 +3926,48 @@ def lookup_clinical_notes(query: str, patient_mrn: str = "", document_id: str = 
         q_clean = _re.sub(r"\s+", " ", q_clean).strip(" ,")
         lookup_query = q_clean or (query or "")
         
+        # Phase 3: Read request-scoped document and patient context.
+        # Context vars are set by api.py before graph invocation when document_ids
+        # are supplied in the request. The tool may only narrow scope, never broaden.
+        _ctx_doc_ids: list = list(_CTX_ACTIVE_DOCUMENT_IDS.get() or [])
+        _ctx_mrn: str = _CTX_ACTIVE_PATIENT_MRN.get() or ""
+        _ctx_patient_id: str = _CTX_ACTIVE_PATIENT_ID.get() or ""
+        _ctx_tenant_id: str = _CTX_ACTIVE_TENANT_ID.get() or ""
+        _ctx_org_id: str = _CTX_ACTIVE_ORG_ID.get() or ""
+
         # Use document_id filter if provided (strip whitespace, treat empty as None)
+        # Model-supplied document_id must be within the request-scoped document_ids.
         doc_filter = document_id.strip() if document_id else None
         mrn_filter = patient_mrn.strip() if patient_mrn else None
-        
+
+        # Enforce context-scoped patient MRN when model did not supply one
+        if not mrn_filter and _ctx_mrn:
+            mrn_filter = _ctx_mrn
+        # Enforce context-scoped patient_id when available
+        patient_id_filter = _ctx_patient_id if _ctx_patient_id else None
+
+        # Merge model-supplied document_id into the context-scoped list.
+        # The model may narrow to a single doc, but cannot select a doc outside
+        # the request scope.
+        effective_doc_ids: list = list(_ctx_doc_ids)
+        if doc_filter:
+            if effective_doc_ids and doc_filter not in effective_doc_ids:
+                # Model tried to access a document outside the active scope — ignore
+                logger.warning(
+                    "lookup_clinical_notes: model requested doc '%s' outside active scope %s — "
+                    "using context scope instead",
+                    doc_filter, effective_doc_ids,
+                )
+                doc_filter = None  # fall back to full context scope
+            elif effective_doc_ids and doc_filter in effective_doc_ids:
+                # Model narrowed the scope to a specific doc within the allowed set
+                effective_doc_ids = [doc_filter]
+                doc_filter = None  # already represented in effective_doc_ids
+            else:
+                # No context scope — use model-supplied doc_id as single-doc scope
+                effective_doc_ids = [doc_filter]
+                doc_filter = None
+
         def _is_unhelpful_search_result(text: str) -> bool:
             t = (text or "").strip().lower()
             if not t:
@@ -3144,7 +3982,17 @@ def lookup_clinical_notes(query: str, patient_mrn: str = "", document_id: str = 
 
         def _search_with_timeout():
             try:
-                result[0] = rag.search(lookup_query, document_id=doc_filter, patient_mrn=mrn_filter)
+                search_kwargs = {
+                    "document_id": doc_filter,
+                    "patient_mrn": mrn_filter,
+                    "patient_id": patient_id_filter,
+                    "document_ids": effective_doc_ids if effective_doc_ids else None,
+                }
+                if _ctx_tenant_id:
+                    search_kwargs["tenant_id"] = _ctx_tenant_id
+                if _ctx_org_id:
+                    search_kwargs["org_id"] = _ctx_org_id
+                result[0] = rag.search(lookup_query, **search_kwargs)
             except Exception as e:
                 exception[0] = e
         
@@ -3162,7 +4010,15 @@ def lookup_clinical_notes(query: str, patient_mrn: str = "", document_id: str = 
         # Production fallback: if broad search misses and no explicit document_id
         # was provided, try patient-aware document-scoped retrieval on likely
         # uploaded documents inferred from the query itself.
-        if not doc_filter and not mrn_filter and _is_unhelpful_search_result(result[0] or ""):
+        if (
+            not doc_filter
+            and not effective_doc_ids
+            and not mrn_filter
+            and not patient_id_filter
+            and not _ctx_tenant_id
+            and not _ctx_org_id
+            and _is_unhelpful_search_result(result[0] or "")
+        ):
             try:
                 candidate_doc_ids = rag.find_documents_for_patient_identifier(lookup_query, max_docs=3)
                 fallback_hits: list[str] = []
@@ -3188,7 +4044,7 @@ def lookup_clinical_notes(query: str, patient_mrn: str = "", document_id: str = 
 
 
 @tool
-def lookup_patient_orders(patient_identifier: str) -> str:
+def lookup_patient_orders(patient_identifier: str, document_id: str = "", document_ids: list = None) -> str:
     """Retrieve ALL structured orders for a patient — laboratory orders (with CPT/LOINC codes), medication orders (with RxNorm codes), procedure orders (with CPT/SNOMED codes), ICD-10 diagnostic codes, referrals/consultations, discharge prescriptions, and care directives. Input is the patient name (e.g. 'Robert Whitfield') or MRN (e.g. 'MRN-2026-004782'). Use this when asked for 'all orders', 'complete order list', 'what was ordered', or any comprehensive orders query. Do NOT use for questions about cardiac devices (ICD implantable defibrillator/pacemaker) — use lookup_clinical_notes for those."""
     try:
         import threading
@@ -3198,18 +4054,53 @@ def lookup_patient_orders(patient_identifier: str) -> str:
         
         result = [None]
         exception = [None]
+
+        _ctx_doc_ids: list = list(_CTX_ACTIVE_DOCUMENT_IDS.get() or [])
+        _ctx_mrn: str = _CTX_ACTIVE_PATIENT_MRN.get() or ""
+        _ctx_patient_id: str = _CTX_ACTIVE_PATIENT_ID.get() or ""
+        _ctx_tenant_id: str = _CTX_ACTIVE_TENANT_ID.get() or ""
+        _ctx_org_id: str = _CTX_ACTIVE_ORG_ID.get() or ""
+
+        requested_doc_ids = [str(d).strip() for d in (document_ids or []) if str(d).strip()]
+        if document_id and document_id.strip():
+            requested_doc_ids.append(document_id.strip())
+        requested_doc_ids = list(dict.fromkeys(requested_doc_ids))
+
+        if _ctx_doc_ids:
+            # Request context is the hard boundary. Tool args may only narrow it.
+            if requested_doc_ids:
+                effective_doc_ids = [d for d in requested_doc_ids if d in _ctx_doc_ids]
+                if not effective_doc_ids:
+                    logger.warning(
+                        "lookup_patient_orders: requested docs %s outside active scope %s; using active scope",
+                        requested_doc_ids,
+                        _ctx_doc_ids,
+                    )
+                    effective_doc_ids = list(_ctx_doc_ids)
+            else:
+                effective_doc_ids = list(_ctx_doc_ids)
+        else:
+            effective_doc_ids = requested_doc_ids
         
         def _fetch_orders():
             try:
-                # Resolve identifier to MRN
-                patient_mrn = rag.resolve_to_mrn(patient_identifier)
-                if not patient_mrn:
+                # Resolve identifier to MRN unless the API already supplied one.
+                patient_mrn = (_ctx_mrn or "").strip()
+                if not patient_mrn and (patient_identifier or "").strip():
+                    patient_mrn = rag.resolve_to_mrn(patient_identifier)
+                if not patient_mrn and not effective_doc_ids and not _ctx_patient_id:
                     exception[0] = f"Could not find a patient matching '{patient_identifier}'. Use list_available_patients to see who is in the database."
                     return
-                logger.info("[Orders] Resolved '%s' → %s", patient_identifier, patient_mrn)
+                logger.info("[Orders] Resolved '%s' -> %s docs=%s", patient_identifier, patient_mrn, effective_doc_ids)
                 
-                # Fetch all order-related chunks (section-filtered)
-                result[0] = rag.get_order_chunks_for_patient(patient_mrn)
+                # Fetch all order-related chunks within the hard patient/document scope.
+                result[0] = rag.get_order_chunks_for_patient(
+                    patient_mrn=patient_mrn,
+                    patient_id=_ctx_patient_id or None,
+                    tenant_id=_ctx_tenant_id or None,
+                    org_id=_ctx_org_id or None,
+                    document_ids=effective_doc_ids or None,
+                )
             except Exception as e:
                 exception[0] = str(e)
         
@@ -3876,3 +4767,110 @@ def summarize_uploaded_document(document_id: str) -> str:
 
     except Exception as e:
         return f"Error generating document summary: {str(e)[:300]}"
+
+
+@tool
+def summarize_uploaded_documents(document_ids: list, patient_mrn: str = "") -> str:
+    """Generate a clinically grounded summary across specific uploaded documents.
+
+    Input: document_ids (selected document UUIDs) and optional patient_mrn.
+    Output: clinician-facing summary with citations like [S12].
+    """
+    try:
+        raw_ids = document_ids or []
+        if isinstance(raw_ids, str):
+            cleaned = raw_ids.strip()
+            if cleaned.startswith("["):
+                try:
+                    raw_ids = json.loads(cleaned)
+                except Exception:
+                    raw_ids = [cleaned]
+            else:
+                raw_ids = [p.strip() for p in cleaned.split(",")]
+        doc_ids = list(dict.fromkeys([str(d).strip() for d in raw_ids if str(d).strip()]))
+
+        _ctx_doc_ids: list = list(_CTX_ACTIVE_DOCUMENT_IDS.get() or [])
+        _ctx_mrn: str = _CTX_ACTIVE_PATIENT_MRN.get() or ""
+        if _ctx_doc_ids:
+            scoped_ids = [d for d in doc_ids if d in _ctx_doc_ids] if doc_ids else list(_ctx_doc_ids)
+            if not scoped_ids:
+                logger.warning(
+                    "summarize_uploaded_documents: requested docs %s outside active scope %s; using active scope",
+                    doc_ids,
+                    _ctx_doc_ids,
+                )
+                scoped_ids = list(_ctx_doc_ids)
+            doc_ids = scoped_ids
+
+        if not doc_ids:
+            return "Missing document_ids. The request must include one or more selected document IDs."
+
+        effective_mrn = (patient_mrn or _ctx_mrn or "").strip()
+        req_mode = _current_summary_mode()
+
+        rag = get_rag_tool_instance()
+        all_chunks: list[tuple[str, dict]] = []
+        missing_docs: list[str] = []
+        seen = set()
+
+        for doc_id in doc_ids:
+            chunks = rag.get_all_chunks_for_document(doc_id)
+            if not chunks:
+                missing_docs.append(doc_id)
+                continue
+            chunks.extend(_supplement_from_targeted_searches_for_document(rag, doc_id))
+            for txt, meta in chunks:
+                meta = dict(meta or {})
+                meta.setdefault("document_id", doc_id)
+                if effective_mrn and meta.get("patient_mrn") and str(meta.get("patient_mrn")) != effective_mrn:
+                    logger.warning(
+                        "summarize_uploaded_documents: skipping chunk from doc %s due MRN mismatch %s != %s",
+                        doc_id,
+                        meta.get("patient_mrn"),
+                        effective_mrn,
+                    )
+                    continue
+                key = (
+                    str(meta.get("document_id", doc_id)),
+                    str(meta.get("page_number", "")),
+                    str(meta.get("chunk_index", "")),
+                    hashlib.md5((txt or "").encode("utf-8")).hexdigest(),
+                )
+                if key in seen:
+                    continue
+                seen.add(key)
+                all_chunks.append((txt, meta))
+
+        if not all_chunks:
+            return (
+                "No indexed chunks found for the selected document IDs. "
+                "If these were just uploaded, they may still be processing."
+            )
+
+        indexed_chunks: list[tuple[int, str, dict]] = [
+            (i, txt, meta) for i, (txt, meta) in enumerate(all_chunks, 1)
+        ]
+        entity_key = "documents:" + hashlib.sha256("|".join(sorted(doc_ids)).encode("utf-8")).hexdigest()[:16]
+
+        t0 = _time.perf_counter()
+        summary, model_name = _run_structured_summary_pipeline(entity_key, indexed_chunks)
+        elapsed = _time.perf_counter() - t0
+        logger.info(
+            "[DocSummaryMulti] docs=%s chunks=%d elapsed=%.1fs model=%s mode=%s",
+            doc_ids,
+            len(all_chunks),
+            elapsed,
+            model_name,
+            req_mode,
+        )
+
+        if missing_docs:
+            summary += (
+                "\n\nScope note: no indexed chunks were found for selected document ID(s): "
+                + ", ".join(missing_docs)
+                + "."
+            )
+        return summary
+
+    except Exception as e:
+        return f"Error generating multi-document summary: {str(e)[:300]}"

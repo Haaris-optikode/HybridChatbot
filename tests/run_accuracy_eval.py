@@ -191,19 +191,9 @@ QUESTIONS = [
 
 # ---------------------------------------------------------------------------
 
-def get_token() -> str:
-    r = requests.post(
-        f"{BASE_URL}/api/auth/token",
-        json={"user_id": "eval_runner", "role": "clinician"},
-        timeout=15,
-    )
-    r.raise_for_status()
-    return r.json()["token"]
-
-
-def ask(question: str, token: str, session_id: str, timeout: int = 120) -> tuple[str, float]:
+def ask(question: str, session_id: str, timeout: int = 120) -> tuple[str, float]:
     """Send question through streaming endpoint; return (content, latency_s)."""
-    headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+    headers = {"Content-Type": "application/json"}
     payload = {"message": question, "session_id": session_id}
 
     t0 = time.perf_counter()
@@ -242,11 +232,9 @@ def run_eval(save: bool = False):
     print("=" * 70)
 
     try:
-        token = get_token()
-        print("Auth: OK\n")
+        print("Auth: disabled (open endpoints)\n")
     except Exception as e:
-        print(f"Auth FAILED: {e}")
-        return 1
+        pass
 
     # Each question is self-contained with explicit patient identity prefix —
     # matching the quick_regression.py approach (which achieves 100%).
@@ -265,7 +253,7 @@ def run_eval(save: bool = False):
         sid = f"eval-{item['id']}-{int(time.time())}"
         full_question = PATIENT_PREFIX + item["question"][0].lower() + item["question"][1:]
         try:
-            content, latency_s = ask(full_question, token, sid)
+            content, latency_s = ask(full_question, sid)
         except Exception as e:
             content = ""
             latency_s = 0.0

@@ -281,7 +281,7 @@ class TestPatientIdentifierResolution:
             def __init__(self):
                 self.calls = []
 
-            def search(self, query, document_id=None, patient_mrn=None):
+            def search(self, query, document_id=None, patient_mrn=None, patient_id=None, document_ids=None):
                 self.calls.append((document_id, patient_mrn))
                 if not document_id:
                     return f"No relevant documents found for: {query}"
@@ -686,41 +686,16 @@ class TestLRUCache:
 
 
 class TestJWTAuth:
-    """Test JWT token creation and verification (P0)."""
+    """JWT auth has been removed. These tests are now skipped."""
 
-    @pytest.fixture(autouse=True)
-    def _import(self):
-        from api import create_jwt_token, verify_jwt_token
-        self.create = create_jwt_token
-        self.verify = verify_jwt_token
+    @pytest.mark.skip(reason="JWT auth removed")
+    def test_roundtrip(self): pass
 
-    def test_roundtrip(self):
-        token = self.create("test_user", "admin")
-        payload = self.verify(token)
-        assert payload["sub"] == "test_user"
-        assert payload["role"] == "admin"
+    @pytest.mark.skip(reason="JWT auth removed")
+    def test_expired_token(self): pass
 
-    def test_expired_token(self):
-        """Manually create an expired token and verify it fails."""
-        import jwt as pyjwt
-        from api import JWT_SECRET, JWT_ALGORITHM
-        from fastapi import HTTPException
-
-        payload = {
-            "sub": "old_user",
-            "role": "clinician",
-            "iat": datetime.utcnow() - timedelta(hours=48),
-            "exp": datetime.utcnow() - timedelta(hours=24),
-        }
-        token = pyjwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
-        with pytest.raises(HTTPException) as exc_info:
-            self.verify(token)
-        assert exc_info.value.status_code == 401
-
-    def test_invalid_token(self):
-        from fastapi import HTTPException
-        with pytest.raises(HTTPException):
-            self.verify("definitely-not-a-valid-token")
+    @pytest.mark.skip(reason="JWT auth removed")
+    def test_invalid_token(self): pass
 
 
 class TestRelevanceFiltering:

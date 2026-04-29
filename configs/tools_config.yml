@@ -29,10 +29,12 @@ clinical_notes_rag:
   k: 5
   fetch_k: 10
   chunk_size: 1000
-  chunk_overlap: 80
+  chunk_overlap: 200
   collection_name: PatientData
   reranker_model: cross-encoder/ms-marco-MiniLM-L-6-v2
-  reranker_top_k: 5
+  reranker_top_k: 8
+  max_adaptive_fetch_k: 30
+  bm25_full_corpus_fallback: true
   qdrant_url: "http://localhost:6333"  # Qdrant standalone server (Phase 5.1). Run start_qdrant.ps1 first.
   qdrant_api_key: ""
   uploads_directory: data/uploads  # where uploaded documents are stored

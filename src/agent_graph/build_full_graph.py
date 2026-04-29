@@ -10,6 +10,7 @@ from agent_graph.tool_clinical_notes_rag import (
     cohort_patient_search,
     summarize_patient_record,
     summarize_uploaded_document,
+    summarize_uploaded_documents,
     list_available_patients,
     list_uploaded_documents,
     get_rag_tool_instance,
@@ -115,7 +116,9 @@ def _resolve_active_patient_mrn(state: State, current_query: str = "") -> str:
     try:
         rag = get_rag_tool_instance()
     except Exception:
-        return existing
+        # Still check context var before giving up
+        from agent_graph.tool_clinical_notes_rag import _CTX_ACTIVE_PATIENT_MRN as _ctx_mrn_var
+        return existing or (_ctx_mrn_var.get() or "").strip()
 
     current = (current_query or "").strip()
     if current:
@@ -145,7 +148,46 @@ def _resolve_active_patient_mrn(state: State, current_query: str = "") -> str:
             mrn = None
         if mrn:
             return str(mrn).strip()
+
+    # Final fallback: use request-scoped MRN from context var (set by api.py via
+    # set_active_document_scope when patient_mrn is supplied in the chat request).
+    from agent_graph.tool_clinical_notes_rag import _CTX_ACTIVE_PATIENT_MRN as _ctx_mrn_var
+    ctx_mrn = (_ctx_mrn_var.get() or "").strip()
+    if ctx_mrn:
+        return ctx_mrn
     return ""
+
+
+def _resolve_active_document_ids(state: State) -> list[str]:
+    """Resolve selected document IDs from graph state or request context."""
+    existing = list(state.get("active_document_ids", []) or [])
+    if existing:
+        return [str(d).strip() for d in existing if str(d).strip()]
+    from agent_graph.tool_clinical_notes_rag import _CTX_ACTIVE_DOCUMENT_IDS as _ctx_doc_ids_var
+    return [str(d).strip() for d in (_ctx_doc_ids_var.get() or []) if str(d).strip()]
+
+
+def _is_summary_request(query: str) -> bool:
+    q = (query or "").lower()
+    return bool(_re.search(r"\bsummar(?:y|ize|ise)|\boverview\b|\breview\b|\bwhat\s+is\s+this\b|\bwhat\s+are\s+these\b|\bcontents?\b", q))
+
+
+def _is_orders_request(query: str) -> bool:
+    q = (query or "").lower()
+    return bool(_re.search(r"\ball\s+orders?\b|\border(?:ed|s)?\b|\bcomplete\s+(?:med|medication|lab|order)|\bmedications?\s+and\s+labs?\b", q))
+
+
+def _normalize_document_ids(value) -> list[str]:
+    """Normalize tool/model document_id inputs into a de-duplicated list."""
+    if not value:
+        return []
+    if isinstance(value, str):
+        raw = [p.strip() for p in value.split(",")]
+    elif isinstance(value, (list, tuple, set)):
+        raw = [str(p).strip() for p in value]
+    else:
+        raw = [str(value).strip()]
+    return list(dict.fromkeys([p for p in raw if p]))
 
 
 def _copy_ai_message_with_tool_calls(message: _AIMessage, tool_calls: list[dict]) -> _AIMessage:
@@ -159,27 +201,157 @@ def _copy_ai_message_with_tool_calls(message: _AIMessage, tool_calls: list[dict]
 
 
 def _scope_lookup_tool_calls(message: _AIMessage, active_mrn: str) -> _AIMessage:
-    """Inject MRN scoping into lookup_clinical_notes calls or block unscoped calls."""
+    """Enforce active scope on all tool calls that access patient/document data.
+
+    Handles tools that touch patient/document data:
+    - lookup_clinical_notes: inject MRN; validate document scope; block when unscoped.
+    - lookup_patient_orders: inject MRN and selected document IDs.
+    - summarize_uploaded_document(s): substitute/inject scoped document_id(s).
+    - list_uploaded_documents: block when document scope is already resolved (doc IDs known).
+
+    The model may narrow scope but must never broaden it.
+    """
     tool_calls = getattr(message, "tool_calls", []) or []
     if not tool_calls:
         return message
 
+    from agent_graph.tool_clinical_notes_rag import (
+        _CTX_ACTIVE_DOCUMENT_IDS as _ctx_doc_ids_var,
+        _CTX_ACTIVE_PATIENT_MRN as _ctx_mrn_var,
+    )
+    ctx_doc_ids: list = list(_ctx_doc_ids_var.get() or [])
+    ctx_has_document_scope = bool(ctx_doc_ids)
+    # Use context-var MRN when the graph-state MRN is absent (already resolved by
+    # _resolve_active_patient_mrn, but guard here for synthesizer multi-hop calls).
+    effective_mrn = active_mrn or (_ctx_mrn_var.get() or "").strip()
+
     updated_calls = []
     for tool_call in tool_calls:
-        if tool_call.get("name") != "lookup_clinical_notes":
-            updated_calls.append(tool_call)
-            continue
-
+        tool_name = tool_call.get("name", "")
         args = dict(tool_call.get("args") or {})
-        has_document_scope = bool(str(args.get("document_id", "") or "").strip())
-        if active_mrn:
-            args["patient_mrn"] = active_mrn
-        elif not has_document_scope:
-            return _AIMessage(content=_UNSCOPED_PATIENT_QUERY_MSG)
 
-        updated_call = dict(tool_call)
-        updated_call["args"] = args
-        updated_calls.append(updated_call)
+        # ── lookup_clinical_notes ─────────────────────────────────────────────
+        if tool_name == "lookup_clinical_notes":
+            has_doc_scope = (
+                bool(str(args.get("document_id", "") or "").strip())
+                or ctx_has_document_scope
+            )
+            if effective_mrn:
+                args["patient_mrn"] = effective_mrn
+            elif not has_doc_scope:
+                # Neither MRN nor document scope — cannot safely run retrieval.
+                return _AIMessage(content=_UNSCOPED_PATIENT_QUERY_MSG)
+            updated_call = dict(tool_call)
+            updated_call["args"] = args
+            updated_calls.append(updated_call)
+
+        # ── lookup_patient_orders ───────────────────────────────────────────
+        elif tool_name == "lookup_patient_orders":
+            if effective_mrn:
+                args["patient_identifier"] = effective_mrn
+            elif not ctx_has_document_scope and not str(args.get("patient_identifier", "") or "").strip():
+                return _AIMessage(content=_UNSCOPED_PATIENT_QUERY_MSG)
+
+            if ctx_has_document_scope:
+                requested_ids = _normalize_document_ids(args.get("document_ids")) or _normalize_document_ids(args.get("document_id"))
+                if requested_ids:
+                    scoped_ids = [d for d in requested_ids if d in ctx_doc_ids]
+                    if not scoped_ids:
+                        logger.warning(
+                            "_scope_lookup_tool_calls: lookup_patient_orders requested docs %s outside active scope %s; using active scope",
+                            requested_ids,
+                            ctx_doc_ids,
+                        )
+                        scoped_ids = ctx_doc_ids
+                else:
+                    scoped_ids = ctx_doc_ids
+                args["document_ids"] = scoped_ids
+                args.pop("document_id", None)
+
+            updated_call = dict(tool_call)
+            updated_call["args"] = args
+            updated_calls.append(updated_call)
+
+        # ── summarize_uploaded_document ───────────────────────────────────────
+        elif tool_name == "summarize_uploaded_document":
+            if ctx_has_document_scope:
+                requested = (args.get("document_id") or "").strip()
+                if not requested:
+                    # Model didn't supply a doc_id — inject from scope.
+                    if len(ctx_doc_ids) == 1:
+                        args["document_id"] = ctx_doc_ids[0]
+                    else:
+                        updated_call = dict(tool_call)
+                        updated_call["name"] = "summarize_uploaded_documents"
+                        updated_call["args"] = {"document_ids": ctx_doc_ids, "patient_mrn": effective_mrn}
+                        updated_calls.append(updated_call)
+                        continue
+                elif requested not in ctx_doc_ids:
+                    # Model requested a doc outside the active scope.
+                    # Substitute with the single scoped doc, or drop to first in scope.
+                    logger.warning(
+                        "_scope_lookup_tool_calls: summarize_uploaded_document requested "
+                        "doc '%s' outside active scope %s — substituting with scoped doc",
+                        requested, ctx_doc_ids,
+                    )
+                    args["document_id"] = ctx_doc_ids[0]
+                updated_call = dict(tool_call)
+                updated_call["args"] = args
+                updated_calls.append(updated_call)
+            else:
+                updated_calls.append(tool_call)
+
+        # ── summarize_uploaded_documents ─────────────────────────────────────
+        elif tool_name == "summarize_uploaded_documents":
+            if ctx_has_document_scope:
+                requested_ids = _normalize_document_ids(args.get("document_ids")) or _normalize_document_ids(args.get("document_id"))
+                scoped_ids = [d for d in requested_ids if d in ctx_doc_ids] if requested_ids else list(ctx_doc_ids)
+                if not scoped_ids:
+                    logger.warning(
+                        "_scope_lookup_tool_calls: summarize_uploaded_documents requested docs %s outside active scope %s; using active scope",
+                        requested_ids,
+                        ctx_doc_ids,
+                    )
+                    scoped_ids = list(ctx_doc_ids)
+                args["document_ids"] = scoped_ids
+                if effective_mrn:
+                    args["patient_mrn"] = effective_mrn
+            updated_call = dict(tool_call)
+            updated_call["args"] = args
+            updated_calls.append(updated_call)
+
+        # ── list_uploaded_documents ───────────────────────────────────────────
+        # When the client has already selected specific documents (ctx_has_document_scope),
+        # calling list_uploaded_documents adds nothing useful and causes the router to
+        # present all documents to the user, ignoring the selection. Block it and let
+        # the synthesizer answer directly using the scoped context.
+        elif tool_name == "list_uploaded_documents" and ctx_has_document_scope:
+            doc_summary = ", ".join(ctx_doc_ids)
+            logger.info(
+                "_scope_lookup_tool_calls: suppressed list_uploaded_documents — "
+                "document scope already active: %s", doc_summary,
+            )
+            # Replace this call with a synthetic tool result injected as an AIMessage
+            # note: returning early here replaces the whole message with a direct answer
+            # instruction so the synthesizer proceeds without the useless listing call.
+            # We do this only when list_uploaded_documents is the ONLY tool call.
+            if len(tool_calls) == 1:
+                return _AIMessage(
+                    content="",
+                    tool_calls=[{
+                        "name": "summarize_uploaded_document" if len(ctx_doc_ids) == 1 else "summarize_uploaded_documents",
+                        "args": (
+                            {"document_id": ctx_doc_ids[0]}
+                            if len(ctx_doc_ids) == 1
+                            else {"document_ids": ctx_doc_ids, "patient_mrn": effective_mrn}
+                        ),
+                        "id": tool_call.get("id", "scope_reroute_0"),
+                    }]
+                )
+            # list_uploaded_documents alongside other calls — just drop it
+            # (other calls will be processed normally).
+        else:
+            updated_calls.append(tool_call)
 
     return _copy_ai_message_with_tool_calls(message, updated_calls)
 
@@ -232,6 +404,7 @@ def build_graph(thinking_mode: bool = False):
              cohort_patient_search,
              summarize_patient_record,
              summarize_uploaded_document,
+             summarize_uploaded_documents,
              list_available_patients,
              list_uploaded_documents,
              ]
@@ -243,7 +416,50 @@ def build_graph(thinking_mode: bool = False):
         """Fast tool-routing + deterministic decomposition for multi-part questions."""
         last_user_text = _last_user_text(state)
         active_mrn = _resolve_active_patient_mrn(state, current_query=last_user_text)
+        active_doc_ids = _resolve_active_document_ids(state)
         q_lower = (last_user_text or "").lower()
+
+        # Deterministic fast path for already selected documents. The API/EHR
+        # supplied the hard scope, so do not spend a router call rediscovering
+        # documents or risk the LLM dropping document_id.
+        if active_doc_ids and last_user_text.strip():
+            if _is_summary_request(last_user_text):
+                if len(active_doc_ids) == 1:
+                    call = {
+                        "name": "summarize_uploaded_document",
+                        "args": {"document_id": active_doc_ids[0]},
+                        "id": "scoped_summary_0",
+                    }
+                else:
+                    call = {
+                        "name": "summarize_uploaded_documents",
+                        "args": {"document_ids": active_doc_ids, "patient_mrn": active_mrn},
+                        "id": "scoped_summary_multi_0",
+                    }
+            elif _is_orders_request(last_user_text):
+                call = {
+                    "name": "lookup_patient_orders",
+                    "args": {
+                        "patient_identifier": active_mrn or last_user_text,
+                        "document_ids": active_doc_ids,
+                    },
+                    "id": "scoped_orders_0",
+                }
+            else:
+                call = {
+                    "name": "lookup_clinical_notes",
+                    "args": {
+                        "query": last_user_text,
+                        "patient_mrn": active_mrn,
+                        "document_id": "",
+                    },
+                    "id": "scoped_lookup_0",
+                }
+            return {
+                "messages": [_AIMessage(content="", tool_calls=[call])],
+                "active_patient_mrn": active_mrn,
+                "active_document_ids": active_doc_ids,
+            }
 
         # Heuristic: multi-part analytical questions often contain multiple domains.
         domains = set()
@@ -301,10 +517,13 @@ def build_graph(thinking_mode: bool = False):
                 sub_queries = obj.get("sub_queries") or []
                 sub_queries = [str(s).strip() for s in sub_queries if str(s).strip()]
                 if len(sub_queries) >= 2:
-                    if not active_mrn:
+                    from agent_graph.tool_clinical_notes_rag import _CTX_ACTIVE_DOCUMENT_IDS as _ctx_doc_ids_var2
+                    _ctx_has_doc_scope = bool(_ctx_doc_ids_var2.get())
+                    if not active_mrn and not _ctx_has_doc_scope:
                         return {
                             "messages": [_AIMessage(content=_UNSCOPED_PATIENT_QUERY_MSG)],
                             "active_patient_mrn": "",
+                            "active_document_ids": active_doc_ids,
                         }
                     tool_calls = []
                     for i, sq in enumerate(sub_queries[:4]):
@@ -322,6 +541,7 @@ def build_graph(thinking_mode: bool = False):
                     return {
                         "messages": [_AIMessage(content="", tool_calls=tool_calls)],
                         "active_patient_mrn": active_mrn,
+                        "active_document_ids": active_doc_ids,
                     }
             except Exception:
                 # Fall back to normal router behavior.
@@ -333,6 +553,7 @@ def build_graph(thinking_mode: bool = False):
         return {
             "messages": [routed],
             "active_patient_mrn": active_mrn,
+            "active_document_ids": active_doc_ids,
         }
 
     # Synthesizer: generates final answer from tool output.
@@ -367,6 +588,7 @@ def build_graph(thinking_mode: bool = False):
         """High-quality answer synthesis from retrieved context."""
         msgs = state["messages"]
         active_mrn = (state.get("active_patient_mrn", "") or "").strip()
+        active_doc_ids = _resolve_active_document_ids(state)
         user_query = _last_user_text(state)
 
         # OpenAI thinking mode can hit "input limit exceeded" when tool outputs
@@ -411,11 +633,31 @@ def build_graph(thinking_mode: bool = False):
         for m in reversed(msgs):
             if isinstance(m, _ToolMessage):
                 tool_name = getattr(m, "name", "") or ""
-                if tool_name in ("summarize_patient_record", "summarize_uploaded_document"):
+                if tool_name in ("summarize_patient_record", "summarize_uploaded_document", "summarize_uploaded_documents"):
+                    # Phase 2.4 — wire grounding check for summarization pass-through.
+                    # The summary itself may carry [SN] citations; run a basic
+                    # citation-validity check so grounding_result is never empty.
+                    summary_content = str(getattr(m, "content", "") or "")
+                    _passthru_grounding: dict = {}
+                    if summary_content:
+                        try:
+                            from agent_graph.grounding import verify_grounding as _vg_passthru
+                            import re as _re_passthru
+                            # Derive source count from max [SN] in the summary text
+                            _sn_nums = {int(n) for n in _re_passthru.findall(r"\[S(\d+)", summary_content)}
+                            _passthru_src_count = max(_sn_nums) if _sn_nums else 0
+                            _passthru_grounding = _vg_passthru(
+                                summary_content,
+                                _passthru_src_count,
+                                check_uncited=False,  # Summaries use [SN], not inline citations
+                            )
+                        except Exception:
+                            pass
                     return {
-                        "messages": [_AIMessage(content=str(getattr(m, "content", "") or ""))],
+                        "messages": [_AIMessage(content=summary_content)],
                         "active_patient_mrn": active_mrn,
-                        "grounding_result": {},  # pass-through: grounding N/A for dedicated summarizers
+                        "active_document_ids": active_doc_ids,
+                        "grounding_result": _passthru_grounding,
                     }
                 # Stop at the first tool message seen in reverse order
                 break
@@ -446,21 +688,28 @@ def build_graph(thinking_mode: bool = False):
         _grounding_result: dict = {}
         if response_content and not has_tool_calls:
             from agent_graph.grounding import count_sources_in_tool_messages, verify_grounding as _verify_grounding
-            _source_count = count_sources_in_tool_messages(
-                [m for m in msgs if isinstance(m, _ToolMessage)]
+            _tool_msgs = [m for m in msgs if isinstance(m, _ToolMessage)]
+            _source_count = count_sources_in_tool_messages(_tool_msgs)
+            # Phase 2.1 — pass raw tool content for numeric hallucination detection
+            _tool_contents = [str(getattr(m, "content", "") or "") for m in _tool_msgs if getattr(m, "content", "")]
+            _grounding_result = _verify_grounding(
+                response_content,
+                _source_count,
+                tool_contents=_tool_contents if _tool_contents else None,
             )
-            _grounding_result = _verify_grounding(response_content, _source_count)
             if not _grounding_result["is_grounded"]:
                 logger.warning(
-                    "[Grounding] %d issue(s) in synthesizer response (coverage=%.0f%%): %s",
+                    "[Grounding] %d issue(s) in synthesizer response (coverage=%.0f%%, hallucinated=%d): %s",
                     len(_grounding_result["issues"]),
                     _grounding_result["citation_coverage"] * 100,
+                    len(_grounding_result.get("hallucinated_numerics", [])),
                     "; ".join(_grounding_result["issues"][:3]),
                 )
 
         return {
             "messages": [synth_msg],
             "active_patient_mrn": active_mrn,
+            "active_document_ids": active_doc_ids,
             "grounding_result": _grounding_result,  # Phase 11 — surfaced to api.py
         }
 
@@ -475,6 +724,7 @@ def build_graph(thinking_mode: bool = False):
             cohort_patient_search,
             summarize_patient_record,
             summarize_uploaded_document,
+            summarize_uploaded_documents,
             list_available_patients,
             list_uploaded_documents,
         ])

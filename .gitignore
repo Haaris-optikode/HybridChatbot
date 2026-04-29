@@ -143,7 +143,12 @@ feedback/
 # Application log
 logs.txt
 SampleQuestions.txt
-ImplementationPlan.md
+
+# Ignore all Markdown files everywhere except README.md
+*.md
+!README.md
+
+*.txt
 
 # ---------- Project-specific: old / test / unused files ----------
 

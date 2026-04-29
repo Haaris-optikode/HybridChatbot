@@ -156,23 +156,27 @@ class AdaptiveDocumentChunker:
 
     Splits markdown content by headers first, then applies element-specific
     strategies within each section:
-      - Tables: kept whole or split by rows with header preservation
-      - SOAP entries: split per day/date boundary
+      - Tables: kept whole or split by rows with header preservation (0 overlap)
+      - SOAP entries: split per day/date boundary (800-char target)
       - Lists: kept grouped
-      - Narrative: SentenceSnapTextSplitter (sentence-boundary overlap)
+      - Narrative: SentenceSnapTextSplitter (sentence-boundary overlap, 200 chars)
+
+    Phase 1.2b: adaptive chunk sizing per section type + max_chunk_size hard ceiling.
     """
 
     def __init__(
         self,
         chunk_size: int = 1000,
-        chunk_overlap: int = 80,
-        min_chunk_size: int = 150,
+        chunk_overlap: int = 200,
+        min_chunk_size: int = 300,
         max_table_chunk_size: int = 3000,
+        max_chunk_size: int = 1500,
     ):
         self.chunk_size = chunk_size
         self.chunk_overlap = chunk_overlap
         self.min_chunk_size = min_chunk_size
         self.max_table_chunk_size = max_table_chunk_size
+        self.max_chunk_size = max_chunk_size
 
         self._semantic_fallback_embedding_model = os.environ.get(
             "MEDGRAPH_SEMANTIC_CHUNKER_EMBEDDING_MODEL",
@@ -236,7 +240,18 @@ class AdaptiveDocumentChunker:
         # ── PATCH 3: Sub-document duplicate removal ─────────────────────────
         all_chunks = self._dedup_chunks(all_chunks)
 
-        # Step 4: Build Document objects with metadata
+        # Step 4: Split oversized chunks before Document construction. This is
+        # especially important for preserved tables; truncating would silently
+        # drop rows and bias clinical retrieval/summarization.
+        sized_chunks: List[Tuple[str, str]] = []
+        for chunk_text, section_title in all_chunks:
+            for piece in self._split_oversized_chunk(chunk_text):
+                if piece.strip():
+                    sized_chunks.append((piece, section_title))
+        all_chunks = sized_chunks
+
+        # Step 5: Build Document objects with metadata
+        total_chunks = max(len(all_chunks), 1)  # guard against zero-length
         documents = []
         ctx_parts = []
         if metadata.get("patient_name"):
@@ -259,6 +274,9 @@ class AdaptiveDocumentChunker:
                 if text_pos >= 0:
                     page_num = self._get_page_number(text_pos, page_map)
 
+            # Normalised position within document (0.0 = first chunk, 1.0 = last)
+            section_position = round(chunk_idx / max(total_chunks - 1, 1), 4)
+
             doc = Document(
                 page_content=contextualized,
                 metadata={
@@ -266,6 +284,7 @@ class AdaptiveDocumentChunker:
                     "section_title": section_title,
                     "page_number": page_num,
                     "chunk_index": chunk_idx,
+                    "section_position": section_position,
                 },
             )
             documents.append(doc)
@@ -566,16 +585,56 @@ class AdaptiveDocumentChunker:
             return False
         return True
 
+    # ── Phase 1.2b: Section-type-aware chunk sizing ───────────────────────────
+
+    # Regex patterns that identify section types by title keyword.
+    _LAB_SECTION_RE = re.compile(
+        r"\blab(?:oratory|s)?\b|\bblood\s+(?:test|result|panel)\b|"
+        r"\bcbc\b|\bcmp\b|\bbmp\b|\bpanel\b|\bculture\b|\bcoagulation\b",
+        re.IGNORECASE,
+    )
+    _SOAP_SECTION_RE = re.compile(
+        r"\bsubjective\b|\bobjective\b|\bassessment\b|\bplan\b|"
+        r"\bsoap\b|\ba\s*/\s*p\b|\bprogress\s+note\b|\bdaily\s+note\b",
+        re.IGNORECASE,
+    )
+    _DISCHARGE_SECTION_RE = re.compile(
+        r"\bdischarge\b|\badmission\s+note\b|\bsummary\b",
+        re.IGNORECASE,
+    )
+
+    def _infer_chunk_size(self, section_title: str) -> int:
+        """Return the optimal chunk size (chars) for a given section type.
+
+        | Section Type        | Target | Rationale                                   |
+        |---------------------|--------|---------------------------------------------|
+        | Lab report tables   | 400    | Sized to 2–3 result rows                    |
+        | SOAP notes          | 800    | Never split A/P mid-item                    |
+        | Discharge summaries | 1500   | Long sections fit one LLM context window    |
+        | Default             | 1000   | Current behaviour preserved                 |
+        """
+        t = (section_title or "").strip()
+        if self._LAB_SECTION_RE.search(t):
+            return 400
+        if self._SOAP_SECTION_RE.search(t):
+            return 800
+        if self._DISCHARGE_SECTION_RE.search(t):
+            return 1500
+        return self.chunk_size
+
     def _chunk_section(
         self, section_body: str, section_title: str
     ) -> List[Tuple[str, str]]:
         """Apply element-aware chunking to a single section."""
         chunks: List[Tuple[str, str]] = []
 
+        # Phase 1.2b: adapt target chunk size to section type
+        target_size = self._infer_chunk_size(section_title)
+
         soap_entries = self._extract_soap_entries(section_body, section_title)
         if soap_entries:
             for entry_text, sublabel in soap_entries:
-                if len(entry_text) <= self.chunk_size * 2:
+                if len(entry_text) <= target_size * 2:
                     chunks.append((entry_text, f"{section_title} > {sublabel}"))
                 else:
                     sub_chunks = self._split_mixed_content(entry_text)
@@ -584,17 +643,23 @@ class AdaptiveDocumentChunker:
                         chunks.append((sc, f"{section_title} > {lbl}"))
             return chunks
 
-        if len(section_body) <= int(self.chunk_size * 1.5):
+        if len(section_body) <= int(target_size * 1.5):
             chunks.append((section_body, section_title))
         else:
-            sub_chunks = self._split_mixed_content(section_body)
+            sub_chunks = self._split_mixed_content(section_body, target_size)
             for sc in sub_chunks:
                 chunks.append((sc, section_title))
 
         return chunks
 
-    def _split_mixed_content(self, text: str) -> List[str]:
-        """Split text that may contain a mix of tables, lists, and narrative."""
+    def _split_mixed_content(self, text: str, target_size: int = 0) -> List[str]:
+        """Split text that may contain a mix of tables, lists, and narrative.
+
+        Phase 1.2b: tables use the dedicated zero-overlap splitter to prevent
+        rows from bleeding across chunk boundaries.
+        """
+        if not target_size:
+            target_size = self.chunk_size
         segments = self._segment_by_tables(text)
 
         result = []
@@ -603,7 +668,7 @@ class AdaptiveDocumentChunker:
                 table_chunks = self._chunk_table(segment_text)
                 result.extend(table_chunks)
             else:
-                if len(segment_text) <= int(self.chunk_size * 1.5):
+                if len(segment_text) <= int(target_size * 1.5):
                     if segment_text.strip():
                         result.append(segment_text)
                 else:
@@ -657,9 +722,43 @@ class AdaptiveDocumentChunker:
 
         return segments if segments else [(text, False)]
 
-    def _chunk_table(self, table_text: str) -> List[str]:
+    def _split_oversized_chunk(self, text: str) -> List[str]:
+        """Split any chunk that still exceeds max_chunk_size without data loss."""
+        if len(text or "") <= self.max_chunk_size:
+            return [text]
+
+        segments = self._segment_by_tables(text)
+        if any(is_table for _, is_table in segments):
+            out: List[str] = []
+            for segment_text, is_table in segments:
+                if not segment_text.strip():
+                    continue
+                if is_table:
+                    out.extend(self._chunk_table(segment_text, max_size=self.max_chunk_size))
+                elif len(segment_text) <= self.max_chunk_size:
+                    out.append(segment_text)
+                else:
+                    splitter = RecursiveCharacterTextSplitter(
+                        chunk_size=self.max_chunk_size,
+                        chunk_overlap=min(self.chunk_overlap, max(0, self.max_chunk_size // 5)),
+                        separators=["\n\n", "\n", ". ", "? ", "! ", ", ", " ", ""],
+                        length_function=len,
+                    )
+                    out.extend(splitter.split_text(segment_text))
+            return [p for p in out if p.strip()]
+
+        splitter = RecursiveCharacterTextSplitter(
+            chunk_size=self.max_chunk_size,
+            chunk_overlap=min(self.chunk_overlap, max(0, self.max_chunk_size // 5)),
+            separators=["\n\n", "\n", ". ", "? ", "! ", ", ", " ", ""],
+            length_function=len,
+        )
+        return [p for p in splitter.split_text(text) if p.strip()]
+
+    def _chunk_table(self, table_text: str, max_size: Optional[int] = None) -> List[str]:
         """Chunk a markdown table, preserving the header row."""
-        if len(table_text) <= self.max_table_chunk_size:
+        target_size = max_size or self.max_table_chunk_size
+        if len(table_text) <= target_size:
             return [table_text]
 
         lines = table_text.split("\n")
@@ -687,11 +786,28 @@ class AdaptiveDocumentChunker:
 
         for row in data_lines:
             row_len = len(row) + 1
-            if current_size + row_len > self.max_table_chunk_size and current_rows:
+            if current_size + row_len > target_size and current_rows:
                 chunk = header + "\n" + "\n".join(current_rows)
                 chunks.append(chunk)
                 current_rows = []
                 current_size = header_len
+
+            if header_len + row_len > target_size:
+                if current_rows:
+                    chunk = header + "\n" + "\n".join(current_rows)
+                    chunks.append(chunk)
+                    current_rows = []
+                    current_size = header_len
+                # A single pathological row still needs a lossless split.
+                row_splitter = RecursiveCharacterTextSplitter(
+                    chunk_size=max(target_size - header_len, 200),
+                    chunk_overlap=0,
+                    separators=[" | ", " ", ""],
+                    length_function=len,
+                )
+                for row_part in row_splitter.split_text(row):
+                    chunks.append(header + "\n" + row_part)
+                continue
 
             current_rows.append(row)
             current_size += row_len

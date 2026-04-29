@@ -262,7 +262,10 @@ class ClinicalNotesVectorizer:
             "metadata.section_title",
             "metadata.source",
             "metadata.document_id",
+            "metadata.document_version",
+            "metadata.parent_document_id",
             "metadata.document_type",
+            "metadata.chunk_kind",
             # Versioning marker (lets query-time detect schema compatibility)
             "metadata.payload_schema_version",
             # Deduplication
@@ -271,13 +274,37 @@ class ClinicalNotesVectorizer:
             "metadata.diagnoses_text",
             "metadata.active_medications",
             "metadata.patient_location",
+            # Phase 1.4: normalised section category for domain pre-filtering
+            "metadata.section_category",
+            # Phase 3 — EHR multi-tenant and document scoping fields
+            "metadata.tenant_id",
+            "metadata.org_id",
+            "metadata.patient_id",
+            "metadata.encounter_id",
+            "metadata.document_date",
+            "metadata.ingestion_source",
+            "metadata.batch_id",
+            # Additive fact-document filter fields. Do not index every extracted
+            # value; row-first retrieval lexically ranks scoped fact docs after
+            # filtering by patient/document/chunk_kind.
+            "metadata.fact_type",
+            "metadata.test_name",
+            "metadata.benefit_name",
+            "metadata.event_type",
+            "metadata.event_action",
         )
         float_fields = (
             "metadata.hba1c",
+            # Phase 1.4: normalised position within document (0.0–1.0)
+            "metadata.section_position",
         )
         datetime_fields = (
             "metadata.hba1c_date",
             "metadata.encounter_date",
+            # Phase 1.4: specific clinical event date (lab draw, procedure, etc.)
+            "metadata.clinical_date",
+            "metadata.row_date",
+            "metadata.event_date",
         )
 
         for field in keyword_fields:
@@ -299,7 +326,7 @@ class ClinicalNotesVectorizer:
                 field_schema=PayloadSchemaType.DATETIME,
             )
         logger.info(
-            "  Payload indexes: patient_mrn/section_title/source/doc_id/doc_type + schema_version + cohort fields"
+            "  Payload indexes: patient_mrn/section_title/source/doc_id/doc_type + schema_version + cohort fields + Phase3 EHR scoping"
         )
 
     def index_documents(

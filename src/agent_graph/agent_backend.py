@@ -17,6 +17,7 @@ class State(TypedDict):
     """
     messages: Annotated[list, add_messages]
     active_patient_mrn: str
+    active_document_ids: list[str]
     grounding_result: dict  # Phase 11 — populated by synthesizer; {} when not applicable
 
 
@@ -54,8 +55,9 @@ class BasicToolNode:
             message = messages[-1]
         else:
             raise ValueError("No message found in input")
-        outputs = []
-        for tool_call in message.tool_calls:
+        tool_calls = list(message.tool_calls or [])
+
+        def _run_tool(tool_call: dict) -> ToolMessage:
             tool_result = self.tools_by_name[tool_call["name"]].invoke(
                 tool_call["args"]
             )
@@ -67,13 +69,27 @@ class BasicToolNode:
                 content = tool_result
             else:
                 content = json.dumps(tool_result)
-            outputs.append(
-                ToolMessage(
-                    content=content,
-                    name=tool_call["name"],
-                    tool_call_id=tool_call["id"],
-                )
+            return ToolMessage(
+                content=content,
+                name=tool_call["name"],
+                tool_call_id=tool_call["id"],
             )
+
+        if len(tool_calls) <= 1:
+            outputs = [_run_tool(tool_calls[0])] if tool_calls else []
+        else:
+            import contextvars
+            from concurrent.futures import ThreadPoolExecutor
+
+            # Preserve request-scoped document/patient context in worker threads.
+            contexts = [contextvars.copy_context() for _ in tool_calls]
+            max_workers = min(len(tool_calls), 4)
+            with ThreadPoolExecutor(max_workers=max_workers) as pool:
+                futures = [
+                    pool.submit(ctx.run, _run_tool, tool_call)
+                    for ctx, tool_call in zip(contexts, tool_calls)
+                ]
+                outputs = [f.result() for f in futures]
         return {"messages": outputs}
 
 

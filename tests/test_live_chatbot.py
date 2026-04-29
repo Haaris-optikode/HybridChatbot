@@ -9,21 +9,11 @@ import sys
 
 BASE_URL = "http://localhost:7860"
 SESSION_ID = None
-TOKEN = None
-
-def get_token():
-    global TOKEN
-    r = requests.post(f"{BASE_URL}/api/auth/token", json={"user_id": "tester", "role": "clinician"})
-    r.raise_for_status()
-    TOKEN = r.json()["token"]
-    print(f"✓ Auth token obtained")
-    return TOKEN
 
 def chat(message, tool_override=None, thinking=False, timeout=200):
     """Send a chat message via the streaming endpoint and collect the full response."""
     global SESSION_ID
     headers = {
-        "Authorization": f"Bearer {TOKEN}",
         "Content-Type": "application/json",
     }
     payload = {
@@ -245,11 +235,9 @@ def test_summarize_patient():
 
 
 def main():
-    print("╔══════════════════════════════════════════════════════════════════╗")
+    print("\u2554" + "═"*68 + "╗")
     print("║          MedGraph AI — Live Chatbot Test Suite                  ║")
-    print("╚══════════════════════════════════════════════════════════════════╝")
-    
-    get_token()
+    print("╚" + "═"*68 + "╝")
     
     results = {}
     
